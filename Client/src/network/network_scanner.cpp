@@ -12,7 +12,9 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <iphlpapi.h>
 #pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "iphlpapi.lib")
 #endif
 
 using json = nlohmann::json;
@@ -34,6 +36,51 @@ NetworkScanner::~NetworkScanner() {
 
 std::vector<std::string> NetworkScanner::get_local_ipv4_bases() {
     std::vector<std::string> bases;
+#ifdef _WIN32
+    ULONG outBufLen = 0;
+    if (GetAdaptersInfo(NULL, &outBufLen) == ERROR_BUFFER_OVERFLOW) {
+        PIP_ADAPTER_INFO pAdapterInfo = (IP_ADAPTER_INFO*)malloc(outBufLen);
+        if (GetAdaptersInfo(pAdapterInfo, &outBufLen) == NO_ERROR) {
+            PIP_ADAPTER_INFO pAdapter = pAdapterInfo;
+            while (pAdapter) {
+                std::string ip(pAdapter->IpAddressList.IpAddress.String);
+                std::string mask(pAdapter->IpAddressList.IpMask.String);
+                if (ip != "0.0.0.0" && ip != "127.0.0.1") {
+                    if (mask == "255.255.0.0" || mask == "255.240.0.0" || mask == "255.0.0.0") {
+                        // For large subnets, try to scan the /24 of the PC and some nearby /24s
+                        size_t first_dot = ip.find('.');
+                        size_t second_dot = ip.find('.', first_dot + 1);
+                        size_t third_dot = ip.find('.', second_dot + 1);
+                        if (first_dot != std::string::npos && second_dot != std::string::npos) {
+                            std::string base16 = ip.substr(0, second_dot + 1);
+                            int third_octet = std::stoi(ip.substr(second_dot + 1, third_dot - second_dot - 1));
+                            
+                            // Scan a small window around the PC's third octet to avoid 65000 requests
+                            int start = std::max(0, third_octet - 5);
+                            int end = std::min(255, third_octet + 5);
+                            for (int i = start; i <= end; ++i) {
+                                bases.push_back(base16 + std::to_string(i) + ".");
+                            }
+                            
+                            // Also always include .0 and .1 and .2
+                            bases.push_back(base16 + "0.");
+                            bases.push_back(base16 + "1.");
+                            bases.push_back(base16 + "2.");
+                        }
+                    } else {
+                        // Standard /24
+                        size_t last_dot = ip.find_last_of('.');
+                        if (last_dot != std::string::npos) {
+                            bases.push_back(ip.substr(0, last_dot + 1));
+                        }
+                    }
+                }
+                pAdapter = pAdapter->Next;
+            }
+        }
+        free(pAdapterInfo);
+    }
+#else
     char hostname[256];
     if (gethostname(hostname, sizeof(hostname)) == 0) {
         struct addrinfo hints = {0}, *res = nullptr;
@@ -55,6 +102,7 @@ std::vector<std::string> NetworkScanner::get_local_ipv4_bases() {
             freeaddrinfo(res);
         }
     }
+#endif
     
     // Add common fallback bases if empty
     if (bases.empty()) {
@@ -62,6 +110,11 @@ std::vector<std::string> NetworkScanner::get_local_ipv4_bases() {
         bases.push_back("192.168.1.");
         bases.push_back("192.168.178."); // FritzBox default
     }
+    
+    // Remove duplicates
+    std::sort(bases.begin(), bases.end());
+    bases.erase(std::unique(bases.begin(), bases.end()), bases.end());
+    
     return bases;
 }
 

@@ -16,8 +16,15 @@ class AdbWifiManager(private val context: Context) {
      * Aktiviert ADB over WiFi über Settings.Global.
      * Setzt zwingend die Berechtigung WRITE_SECURE_SETTINGS voraus (erteilt via ADB).
      */
-    fun enableAdbWifi(): Boolean {
+    suspend fun enableAdbWifi(): Boolean {
         return try {
+            // First turn it off to ensure daemon restarts when we turn it back on
+            Settings.Global.putInt(
+                context.contentResolver,
+                ADB_WIFI_ENABLED,
+                0
+            )
+            kotlinx.coroutines.delay(100)
             Settings.Global.putInt(
                 context.contentResolver,
                 ADB_WIFI_ENABLED,
@@ -28,14 +35,24 @@ class AdbWifiManager(private val context: Context) {
         } catch (e: SecurityException) {
             Log.e(TAG, "Failed to enable ADB over WiFi: Missing WRITE_SECURE_SETTINGS permission", e)
             false
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception while toggling ADB WiFi", e)
+            false
         }
     }
 
     /**
      * Startet das ADB TCP/IP Protokoll auf einem festen Port (Standard 5555).
      */
-    fun enableAdbTcpIp(port: Int = 5555): Boolean {
+    suspend fun enableAdbTcpIp(port: Int = 5555): Boolean {
         return try {
+            // Set to -1 first to trigger change observer
+            Settings.Global.putString(
+                context.contentResolver,
+                ADB_TCP_PORT,
+                "-1"
+            )
+            kotlinx.coroutines.delay(100)
             Settings.Global.putString(
                 context.contentResolver,
                 ADB_TCP_PORT,
@@ -45,6 +62,9 @@ class AdbWifiManager(private val context: Context) {
             true
         } catch (e: SecurityException) {
             Log.e(TAG, "Failed to set ADB TCP port: Missing WRITE_SECURE_SETTINGS permission", e)
+            false
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception while toggling ADB TCP port", e)
             false
         }
     }

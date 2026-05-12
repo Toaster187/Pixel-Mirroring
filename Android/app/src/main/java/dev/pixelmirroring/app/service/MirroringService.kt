@@ -40,7 +40,15 @@ class MirroringService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.i(TAG, "Starting MirroringService")
-        startForeground(NOTIFICATION_ID, NotificationHelper.createNotification(this))
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(
+                NOTIFICATION_ID, 
+                NotificationHelper.createNotification(this),
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, NotificationHelper.createNotification(this))
+        }
         startKtorServer()
         return START_STICKY
     }
@@ -96,13 +104,21 @@ class MirroringService : Service() {
             }
         }
         
-        try {
-            server?.start(wait = false)
-            Log.i(TAG, "Ktor Server started on port 18294")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to start Ktor server on port 18294. Port might be in use.", e)
-            // Cleanup server instance
-            server = null
+        var retryCount = 0
+        while (retryCount < 5) {
+            try {
+                server?.start(wait = false)
+                Log.i(TAG, "Ktor Server started on port 18294")
+                break
+            } catch (e: Exception) {
+                retryCount++
+                Log.e(TAG, "Failed to start Ktor server on port 18294. Retry $retryCount/5", e)
+                if (retryCount >= 5) {
+                    server = null
+                } else {
+                    try { Thread.sleep(2000) } catch (ie: InterruptedException) {}
+                }
+            }
         }
     }
 

@@ -30,10 +30,33 @@ int main(int argc, char* argv[]) {
     std::cout << "\nScanning for Android devices on the network..." << std::endl;
     pm::network::NetworkScanner scanner;
     
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<> distrib(100000, 999999);
-    std::string client_id = "desktop-client-" + std::to_string(distrib(gen));
+    std::string client_id;
+    std::string exe_dir = pm::adb::get_executable_dir();
+    std::string client_id_path = exe_dir + "/client_id.txt";
+    
+    FILE* f = fopen(client_id_path.c_str(), "r");
+    if (f) {
+        char buf[256];
+        if (fgets(buf, sizeof(buf), f)) {
+            client_id = buf;
+            // Remove newline
+            if (!client_id.empty() && client_id.back() == '\n') client_id.pop_back();
+        }
+        fclose(f);
+    }
+    
+    if (client_id.empty()) {
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_int_distribution<> distrib(100000, 999999);
+        client_id = "desktop-client-" + std::to_string(distrib(gen));
+        
+        FILE* fw = fopen(client_id_path.c_str(), "w");
+        if (fw) {
+            fputs(client_id.c_str(), fw);
+            fclose(fw);
+        }
+    }
     
     auto discovered = scanner.discover_and_connect(client_id, "Desktop-PC");
     
@@ -72,9 +95,27 @@ int main(int argc, char* argv[]) {
     pm::input::InputHandler input(&scrcpy);
 
     auto devices = adb.get_connected_devices();
-    if (!devices.empty()) {
+    std::string target_device_id;
+    if (discovered) {
+        for (const auto& dev : devices) {
+            if (dev.id.find(discovered->ip) != std::string::npos && dev.state == "device") {
+                target_device_id = dev.id;
+                break;
+            }
+        }
+    }
+    if (target_device_id.empty() && !devices.empty()) {
+        for (const auto& dev : devices) {
+            if (dev.state == "device") {
+                target_device_id = dev.id;
+                break;
+            }
+        }
+    }
+
+    if (!target_device_id.empty()) {
         pm::stream::ScrcpyClient::Config config;
-        config.device_id = devices[0].id;
+        config.device_id = target_device_id;
         
         if (scrcpy.start(config)) {
             renderer.init(window->get_native_handle());
