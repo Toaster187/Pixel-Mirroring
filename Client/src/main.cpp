@@ -1,5 +1,6 @@
 #include <iostream>
 #include <thread>
+#include <random>
 #include "adb/adb_client.h"
 #include "window/window_interface.h"
 #include "stream/scrcpy_client.h"
@@ -28,12 +29,31 @@ int main(int argc, char* argv[]) {
 
     std::cout << "\nScanning for Android devices on the network..." << std::endl;
     pm::network::NetworkScanner scanner;
-    // We should use a persistent client ID, but a random/hardcoded one is okay for now
-    auto discovered = scanner.discover_and_connect("desktop-client-1234", "Desktop-PC");
+    
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> distrib(100000, 999999);
+    std::string client_id = "desktop-client-" + std::to_string(distrib(gen));
+    
+    auto discovered = scanner.discover_and_connect(client_id, "Desktop-PC");
     
     if (discovered) {
         std::cout << "Attempting to connect ADB to " << discovered->ip << ":" << discovered->adb_port << "..." << std::endl;
         adb.connect_device(discovered->ip, discovered->adb_port);
+        
+        std::cout << "Waiting for ADB device to become ready..." << std::endl;
+        bool device_ready = false;
+        for (int i = 0; i < 10; ++i) {
+            auto devs = adb.get_connected_devices();
+            for (const auto& dev : devs) {
+                if (dev.id.find(discovered->ip) != std::string::npos && dev.state == "device") {
+                    device_ready = true;
+                    break;
+                }
+            }
+            if (device_ready) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
     } else {
         std::cout << "Could not discover the Android app. Make sure it is open and connected to WiFi." << std::endl;
     }

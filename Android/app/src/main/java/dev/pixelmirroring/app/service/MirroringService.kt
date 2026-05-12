@@ -60,7 +60,7 @@ class MirroringService : Service() {
                 post("/connect") {
                     val request = call.receive<ConnectRequest>()
                     
-                    val isAuthorized = runBlocking { clientStore.isClientPaired(request.clientId) }
+                    val isAuthorized = clientStore.isClientPaired(request.clientId)
                     
                     if (!isAuthorized) {
                         call.respond(HttpStatusCode.Forbidden)
@@ -68,21 +68,20 @@ class MirroringService : Service() {
                     }
                     
                     // Auto-pair if no one is paired yet
-                    runBlocking { 
-                        if (clientStore.getPairedClient() == null) {
-                            clientStore.savePairedClient(request.clientId, request.clientName)
-                        }
+                    if (clientStore.getPairedClient() == null) {
+                        clientStore.savePairedClient(request.clientId, request.clientName)
                     }
 
                     // Activate ADB WiFi
-                    val success = adbWifiManager.enableAdbWifi() && adbWifiManager.enableAdbTcpIp()
+                    val adbPort = (5555..5595).random()
+                    val success = adbWifiManager.enableAdbWifi() && adbWifiManager.enableAdbTcpIp(adbPort)
                     
                     val ips = NetworkScanner.getAllLocalIps(this@MirroringService)
                     
                     call.respond(ConnectResponse(
                         success = success,
                         ips = ips,
-                        adbPort = 5555,
+                        adbPort = adbPort,
                         deviceName = Build.MODEL
                     ))
                 }
@@ -95,8 +94,16 @@ class MirroringService : Service() {
                     ))
                 }
             }
-        }.start(wait = false)
-        Log.i(TAG, "Ktor Server started on port 18294")
+        }
+        
+        try {
+            server?.start(wait = false)
+            Log.i(TAG, "Ktor Server started on port 18294")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start Ktor server on port 18294. Port might be in use.", e)
+            // Cleanup server instance
+            server = null
+        }
     }
 
     override fun onDestroy() {

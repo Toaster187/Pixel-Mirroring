@@ -84,49 +84,59 @@ std::optional<DiscoveredDevice> NetworkScanner::discover_and_connect(const std::
         if (found) break;
         std::cout << "[NetworkScanner] Scanning subnet: " << base << "x" << std::endl;
         
-        // Use a thread pool or simple detached threads for scanning the subnet
-        std::vector<std::thread> threads;
-        for (int i = 1; i <= 254; ++i) {
+        // Scan the subnet in batches to prevent thread exhaustion
+        const int batch_size = 50;
+        for (int i = 1; i <= 254; i += batch_size) {
             if (found) break;
             
-            threads.emplace_back([&, base, i]() {
-                if (found) return;
-                std::string target_ip = base + std::to_string(i);
+            std::vector<std::thread> threads;
+            for (int j = 0; j < batch_size && (i + j) <= 254; ++j) {
+                if (found) break;
                 
-                httplib::Client cli(target_ip, 18294);
-                cli.set_connection_timeout(0, 300000); // 300ms
-                cli.set_read_timeout(0, 500000);       // 500ms
-                
-                auto res = cli.Post("/connect", req_str, "application/json");
-                
-                if (res && res->status == 200) {
-                    try {
-                        auto resp_json = json::parse(res->body);
-                        if (resp_json["success"].get<bool>()) {
-                            std::lock_guard<std::mutex> lock(result_mutex);
-                            if (!found) {
-                                DiscoveredDevice device;
-                                device.ip = target_ip;
-                                device.adb_port = resp_json["adbPort"].get<int>();
-                                device.device_name = resp_json["deviceName"].get<std::string>();
-                                for (const auto& ip : resp_json["ips"]) {
-                                    device.all_ips.push_back(ip.get<std::string>());
+                int current_ip_ending = i + j;
+                threads.emplace_back([&, base, current_ip_ending]() {
+                    if (found) return;
+                    std::string target_ip = base + std::to_string(current_ip_ending);
+                    
+                    httplib::Client cli(target_ip, 18294);
+                    cli.set_connection_timeout(0, 800000); // 800ms
+                    cli.set_read_timeout(1, 500000);       // 1.5s
+                    
+                    auto res = cli.Post("/connect", req_str, "application/json");
+                    
+                    if (res) {
+                        if (res->status == 403) {
+                            std::cout << "\n[NetworkScanner] Access denied on " << target_ip << ". Device is paired with another client." << std::endl;
+                        } else if (res->status == 200) {
+                            try {
+                                auto resp_json = json::parse(res->body);
+                                if (resp_json["success"].get<bool>()) {
+                                    std::lock_guard<std::mutex> lock(result_mutex);
+                                    if (!found) {
+                                        DiscoveredDevice device;
+                                        device.ip = target_ip;
+                                        device.adb_port = resp_json["adbPort"].get<int>();
+                                        device.device_name = resp_json["deviceName"].get<std::string>();
+                                        for (const auto& ip : resp_json["ips"]) {
+                                            device.all_ips.push_back(ip.get<std::string>());
+                                        }
+                                        discovered = device;
+                                        found = true;
+                                        std::cout << "[NetworkScanner] Found app on " << target_ip << std::endl;
+                                    }
                                 }
-                                discovered = device;
-                                found = true;
-                                std::cout << "[NetworkScanner] Found app on " << target_ip << std::endl;
+                            } catch (...) {
+                                // JSON parsing error or invalid response
                             }
                         }
-                    } catch (...) {
-                        // JSON parsing error or invalid response
                     }
+                });
+            }
+            
+            for (auto& t : threads) {
+                if (t.joinable()) {
+                    t.join();
                 }
-            });
-        }
-        
-        for (auto& t : threads) {
-            if (t.joinable()) {
-                t.join();
             }
         }
     }
