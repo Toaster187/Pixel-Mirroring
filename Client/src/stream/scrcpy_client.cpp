@@ -9,6 +9,14 @@
 
 #ifdef _WIN32
 #pragma comment(lib, "ws2_32.lib")
+#else
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#define INVALID_SOCKET -1
+#define SOCKET_ERROR -1
+#define closesocket close
 #endif
 
 namespace pm::stream {
@@ -165,10 +173,11 @@ bool ScrcpyClient::start_server_process() {
     // Dies müsste eigentlich asynchron laufen, da app_process blockiert.
     auto ready_promise = std::make_shared<std::promise<bool>>();
     auto future = ready_promise->get_future();
-    std::thread([cmd, this, ready_promise]() {
+    std::string device_id_copy = config_.device_id;
+    std::thread([cmd, device_id_copy, ready_promise]() {
         pm::adb::AdbClient a;
         bool ready_sent = false;
-        a.execute_shell_command_async(config_.device_id, cmd, [ready_promise, &ready_sent](const std::string& line) {
+        a.execute_shell_command_async(device_id_copy, cmd, [ready_promise, &ready_sent](const std::string& line) {
             if (!ready_sent && line.find("[server]") != std::string::npos) {
                 ready_promise->set_value(true);
                 ready_sent = true;
@@ -243,8 +252,14 @@ bool ScrcpyClient::connect_sockets() {
         FD_ZERO(&set);
         FD_SET(server_fd, &set);
         timeval timeout = {5, 0};
-        
-        if (select(0, &set, nullptr, nullptr, &timeout) > 0) {
+
+#ifdef _WIN32
+        int nfds = 0; // Windows ignores this parameter
+#else
+        int nfds = server_fd + 1; // POSIX requires highest fd + 1
+#endif
+
+        if (select(nfds, &set, nullptr, nullptr, &timeout) > 0) {
             sock = accept(server_fd, nullptr, nullptr);
             closesocket(server_fd);
             return sock != INVALID_SOCKET;
@@ -285,9 +300,18 @@ bool ScrcpyClient::connect_sockets() {
 bool ScrcpyClient::read_metadata() {
     // Read codec info (12 bytes: id, width, height)
     uint8_t codec_meta[12];
-    if (recv(video_socket_, (char*)codec_meta, 12, 0) != 12) {
-        std::cerr << "[Scrcpy] Failed to read codec meta" << std::endl;
-        return false;
+    int total_bytes_read = 0;
+    while (total_bytes_read < 12) {
+        int bytes_read = recv(video_socket_, (char*)codec_meta + total_bytes_read, 12 - total_bytes_read, 0);
+        if (bytes_read == 0) {
+            std::cerr << "[Scrcpy] Connection closed while reading codec meta" << std::endl;
+            return false;
+        }
+        if (bytes_read < 0) {
+            std::cerr << "[Scrcpy] Failed to read codec meta" << std::endl;
+            return false;
+        }
+        total_bytes_read += bytes_read;
     }
     
     video_codec_id_ = (codec_meta[0] << 24) | (codec_meta[1] << 16) | (codec_meta[2] << 8) | codec_meta[3];
@@ -316,7 +340,8 @@ void ScrcpyClient::video_thread_loop() {
     };
 
     std::vector<uint8_t> packet_data;
-    
+    const uint32_t MAX_PACKET_SIZE = 10 * 1024 * 1024; // 10 MB max packet size
+
     while (running_) {
         uint8_t header[12];
         if (!recv_all((char*)header, 12)) break;
@@ -324,9 +349,15 @@ void ScrcpyClient::video_thread_loop() {
         uint64_t pts = 0;
         for (int i = 0; i < 8; ++i) pts = (pts << 8) | header[i];
         uint32_t size = (header[8] << 24) | (header[9] << 16) | (header[10] << 8) | header[11];
-        
+
+        // Validate packet size
+        if (size == 0 || size > MAX_PACKET_SIZE) {
+            std::cerr << "[Scrcpy] Invalid packet size: " << size << " bytes" << std::endl;
+            break;
+        }
+
         bool is_config = (pts == ((uint64_t)-1)); // Scrcpy sends PTS -1 for config packets sometimes
-        
+
         packet_data.resize(size);
         if (!recv_all((char*)packet_data.data(), size)) break;
         

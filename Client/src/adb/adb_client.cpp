@@ -12,13 +12,10 @@
 
 #ifdef _WIN32
 #include <windows.h>
-#define POPEN _popen
-#define PCLOSE _pclose
 #else
 #include <unistd.h>
 #include <limits.h>
-#define POPEN popen
-#define PCLOSE pclose
+#include <sys/wait.h>
 #endif
 
 namespace pm::adb {
@@ -49,15 +46,20 @@ std::string get_adb_path() {
         return local_adb.string();
     }
     // Check scrcpy_download folder relative to exe
-    std::filesystem::path sibling_adb = std::filesystem::path(exe_dir) / ".." / "scrcpy_download" / "adb.exe";
+#ifdef _WIN32
+    std::string adb_filename = "adb.exe";
+#else
+    std::string adb_filename = "adb";
+#endif
+    std::filesystem::path sibling_adb = std::filesystem::path(exe_dir) / ".." / "scrcpy_download" / adb_filename;
     if (std::filesystem::exists(sibling_adb)) {
         return sibling_adb.string();
     }
-    
+
     std::filesystem::path current = std::filesystem::path(exe_dir);
     for (int i = 0; i < 3; ++i) {
         current = current.parent_path();
-        std::filesystem::path check_adb = current / "scrcpy_download" / "adb.exe";
+        std::filesystem::path check_adb = current / "scrcpy_download" / adb_filename;
         if (std::filesystem::exists(check_adb)) {
             return check_adb.string();
         }
@@ -88,22 +90,110 @@ bool AdbClient::init() {
 }
 
 std::string AdbClient::run_adb_command(const std::vector<std::string>& args) {
-    std::string command = "\"" + get_adb_path() + "\"";
+    std::string adb_path = get_adb_path();
+    std::string result;
+
+#ifdef _WIN32
+    // Build command line for Windows
+    std::string cmdline = "\"" + adb_path + "\"";
     for (const auto& arg : args) {
-        command += " " + arg;
+        cmdline += " ";
+        // Quote arguments that contain spaces
+        if (arg.find(' ') != std::string::npos) {
+            cmdline += "\"" + arg + "\"";
+        } else {
+            cmdline += arg;
+        }
     }
 
-    std::array<char, 128> buffer;
-    std::string result;
-    std::unique_ptr<FILE, decltype(&PCLOSE)> pipe(POPEN(command.c_str(), "r"), PCLOSE);
-    
-    if (!pipe) {
-        throw std::runtime_error("popen() failed!");
+    SECURITY_ATTRIBUTES saAttr;
+    saAttr.nLength = sizeof(SECURITY_ATTRIBUTES);
+    saAttr.bInheritHandle = TRUE;
+    saAttr.lpSecurityDescriptor = NULL;
+
+    HANDLE hChildStdoutRd, hChildStdoutWr;
+    if (!CreatePipe(&hChildStdoutRd, &hChildStdoutWr, &saAttr, 0)) {
+        throw std::runtime_error("CreatePipe failed");
     }
-    
-    while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
-        result += buffer.data();
+    SetHandleInformation(hChildStdoutRd, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOA si = {0};
+    si.cb = sizeof(STARTUPINFOA);
+    si.hStdOutput = hChildStdoutWr;
+    si.hStdError = hChildStdoutWr;
+    si.dwFlags |= STARTF_USESTDHANDLES;
+
+    PROCESS_INFORMATION pi = {0};
+
+    std::vector<char> cmdline_buf(cmdline.begin(), cmdline.end());
+    cmdline_buf.push_back('\0');
+
+    if (!CreateProcessA(NULL, cmdline_buf.data(), NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) {
+        CloseHandle(hChildStdoutRd);
+        CloseHandle(hChildStdoutWr);
+        throw std::runtime_error("CreateProcess failed");
     }
+
+    CloseHandle(hChildStdoutWr);
+
+    char buffer[4096];
+    DWORD bytesRead;
+    while (ReadFile(hChildStdoutRd, buffer, sizeof(buffer) - 1, &bytesRead, NULL) && bytesRead > 0) {
+        buffer[bytesRead] = '\0';
+        result += buffer;
+    }
+
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    CloseHandle(hChildStdoutRd);
+#else
+    // POSIX: use fork+execvp
+    int pipefd[2];
+    if (pipe(pipefd) == -1) {
+        throw std::runtime_error("pipe() failed");
+    }
+
+    pid_t pid = fork();
+    if (pid == -1) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        throw std::runtime_error("fork() failed");
+    }
+
+    if (pid == 0) {
+        // Child process
+        close(pipefd[0]); // Close read end
+        dup2(pipefd[1], STDOUT_FILENO);
+        dup2(pipefd[1], STDERR_FILENO);
+        close(pipefd[1]);
+
+        // Build argv
+        std::vector<const char*> argv;
+        argv.push_back(adb_path.c_str());
+        for (const auto& arg : args) {
+            argv.push_back(arg.c_str());
+        }
+        argv.push_back(nullptr);
+
+        execvp(adb_path.c_str(), const_cast<char* const*>(argv.data()));
+        _exit(127); // exec failed
+    } else {
+        // Parent process
+        close(pipefd[1]); // Close write end
+
+        char buffer[4096];
+        ssize_t bytesRead;
+        while ((bytesRead = read(pipefd[0], buffer, sizeof(buffer) - 1)) > 0) {
+            buffer[bytesRead] = '\0';
+            result += buffer;
+        }
+
+        close(pipefd[0]);
+        waitpid(pid, nullptr, 0);
+    }
+#endif
+
     return result;
 }
 
@@ -151,15 +241,22 @@ bool AdbClient::connect_device(const std::string& ip, int port) {
     // Add retry loop to handle daemon startup delay
     int max_retries = 10;
     for (int i = 0; i < max_retries; ++i) {
-        std::string output = run_adb_command({"connect", target});
-        
-        // Output looks like "connected to 192.168.1.5:5555" or "cannot connect to..."
-        if (output.find("connected to") != std::string::npos || output.find("already connected") != std::string::npos) {
-            std::cout << "[ADB] Successfully connected to " << target << std::endl;
-            return true;
+        try {
+            std::string output = run_adb_command({"connect", target});
+
+            // Output looks like "connected to 192.168.1.5:5555" or "cannot connect to..."
+            if (output.find("connected to") != std::string::npos || output.find("already connected") != std::string::npos) {
+                std::cout << "[ADB] Successfully connected to " << target << std::endl;
+                return true;
+            }
+
+            std::cerr << "[ADB] Attempt " << (i+1) << " failed to connect: " << output << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "[ADB] Attempt " << (i+1) << " threw exception: " << e.what() << std::endl;
+        } catch (...) {
+            std::cerr << "[ADB] Attempt " << (i+1) << " threw unknown exception" << std::endl;
         }
-        
-        std::cerr << "[ADB] Attempt " << (i+1) << " failed to connect: " << output << std::endl;
+
         if (i < max_retries - 1) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1000));
         }
@@ -172,13 +269,114 @@ std::string AdbClient::execute_shell_command(const std::string& device_id, const
 }
 
 void AdbClient::execute_shell_command_async(const std::string& device_id, const std::string& command, std::function<void(const std::string&)> on_line) {
-    std::string full_command = "\"" + get_adb_path() + "\" -s " + device_id + " shell " + command;
-    std::array<char, 128> buffer;
-    std::unique_ptr<FILE, decltype(&PCLOSE)> pipe(POPEN(full_command.c_str(), "r"), PCLOSE);
-    if (!pipe) return;
-    while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
-        if (on_line) on_line(buffer.data());
+    std::string adb_path = get_adb_path();
+
+#ifdef _WIN32
+    // Build command line for Windows
+    std::string cmdline = "\"" + adb_path + "\" -s " + device_id + " shell " + command;
+
+    SECURITY_ATTRIBUTES saAttr;
+    saAttr.nLength = sizeof(SECURITY_ATTRIBUTES);
+    saAttr.bInheritHandle = TRUE;
+    saAttr.lpSecurityDescriptor = NULL;
+
+    HANDLE hChildStdoutRd, hChildStdoutWr;
+    if (!CreatePipe(&hChildStdoutRd, &hChildStdoutWr, &saAttr, 0)) {
+        return;
     }
+    SetHandleInformation(hChildStdoutRd, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOA si = {0};
+    si.cb = sizeof(STARTUPINFOA);
+    si.hStdOutput = hChildStdoutWr;
+    si.hStdError = hChildStdoutWr;
+    si.dwFlags |= STARTF_USESTDHANDLES;
+
+    PROCESS_INFORMATION pi = {0};
+
+    std::vector<char> cmdline_buf(cmdline.begin(), cmdline.end());
+    cmdline_buf.push_back('\0');
+
+    if (!CreateProcessA(NULL, cmdline_buf.data(), NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) {
+        CloseHandle(hChildStdoutRd);
+        CloseHandle(hChildStdoutWr);
+        return;
+    }
+
+    CloseHandle(hChildStdoutWr);
+
+    char buffer[4096];
+    DWORD bytesRead;
+    std::string line;
+    while (ReadFile(hChildStdoutRd, buffer, sizeof(buffer) - 1, &bytesRead, NULL) && bytesRead > 0) {
+        buffer[bytesRead] = '\0';
+        line += buffer;
+        size_t pos;
+        while ((pos = line.find('\n')) != std::string::npos) {
+            if (on_line) on_line(line.substr(0, pos + 1));
+            line.erase(0, pos + 1);
+        }
+    }
+    if (!line.empty() && on_line) on_line(line);
+
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    CloseHandle(hChildStdoutRd);
+#else
+    // POSIX: use fork+execvp
+    int pipefd[2];
+    if (pipe(pipefd) == -1) {
+        return;
+    }
+
+    pid_t pid = fork();
+    if (pid == -1) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return;
+    }
+
+    if (pid == 0) {
+        // Child process
+        close(pipefd[0]); // Close read end
+        dup2(pipefd[1], STDOUT_FILENO);
+        dup2(pipefd[1], STDERR_FILENO);
+        close(pipefd[1]);
+
+        // Build argv
+        std::vector<const char*> argv;
+        argv.push_back(adb_path.c_str());
+        argv.push_back("-s");
+        argv.push_back(device_id.c_str());
+        argv.push_back("shell");
+        argv.push_back(command.c_str());
+        argv.push_back(nullptr);
+
+        execvp(adb_path.c_str(), const_cast<char* const*>(argv.data()));
+        _exit(127); // exec failed
+    } else {
+        // Parent process
+        close(pipefd[1]); // Close write end
+
+        char buffer[4096];
+        ssize_t bytesRead;
+        std::string line;
+        while ((bytesRead = read(pipefd[0], buffer, sizeof(buffer) - 1)) > 0) {
+            buffer[bytesRead] = '\0';
+            line += buffer;
+            size_t pos;
+            while ((pos = line.find('\n')) != std::string::npos) {
+                if (on_line) on_line(line.substr(0, pos + 1));
+                line.erase(0, pos + 1);
+            }
+        }
+        if (!line.empty() && on_line) on_line(line);
+
+        close(pipefd[0]);
+        waitpid(pid, nullptr, 0);
+    }
+#endif
 }
 
 bool AdbClient::push_file(const std::string& device_id, const std::string& local_path, const std::string& remote_path) {
@@ -203,12 +401,14 @@ bool AdbClient::reverse_port(const std::string& device_id, const std::string& re
 }
 
 bool AdbClient::remove_forward(const std::string& device_id, const std::string& local) {
-    run_adb_command({"-s", device_id, "forward", "--remove", local});
+    std::string output = run_adb_command({"-s", device_id, "forward", "--remove", local});
+    if (output.find("error:") != std::string::npos) return false;
     return true;
 }
 
 bool AdbClient::remove_reverse(const std::string& device_id, const std::string& remote) {
-    run_adb_command({"-s", device_id, "reverse", "--remove", remote});
+    std::string output = run_adb_command({"-s", device_id, "reverse", "--remove", remote});
+    if (output.find("error:") != std::string::npos) return false;
     return true;
 }
 

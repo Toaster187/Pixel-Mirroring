@@ -127,7 +127,12 @@ class MirroringService : Service() {
                 if (retryCount >= 5) {
                     server = null
                 } else {
-                    try { Thread.sleep(2000) } catch (ie: InterruptedException) {}
+                    try {
+                        Thread.sleep(2000)
+                    } catch (ie: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        Log.w(TAG, "Thread interrupted during server start retry", ie)
+                    }
                 }
             }
         }

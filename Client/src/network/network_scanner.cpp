@@ -40,6 +40,9 @@ std::vector<std::string> NetworkScanner::get_local_ipv4_bases() {
     ULONG outBufLen = 0;
     if (GetAdaptersInfo(NULL, &outBufLen) == ERROR_BUFFER_OVERFLOW) {
         PIP_ADAPTER_INFO pAdapterInfo = (IP_ADAPTER_INFO*)malloc(outBufLen);
+        if (pAdapterInfo == NULL) {
+            return bases;
+        }
         if (GetAdaptersInfo(pAdapterInfo, &outBufLen) == NO_ERROR) {
             PIP_ADAPTER_INFO pAdapter = pAdapterInfo;
             while (pAdapter) {

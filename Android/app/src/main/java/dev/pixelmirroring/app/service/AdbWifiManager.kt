@@ -47,7 +47,7 @@ class AdbWifiManager(private val context: Context) {
      * Versucht den dynamischen ADB Wireless Port via NSD (mDNS) zu finden.
      */
     suspend fun getDynamicAdbPort(): Int {
-        var discoveredPort = -1
+        @Volatile var discoveredPort = -1
         val nsdManager = context.getSystemService(Context.NSD_SERVICE) as? NsdManager
             ?: return -1
 
@@ -73,18 +73,26 @@ class AdbWifiManager(private val context: Context) {
             override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {}
         }
 
+        var listenerRegistered = false
         try {
             nsdManager.discoverServices("_adb-tls-connect._tcp.", NsdManager.PROTOCOL_DNS_SD, listener)
-            
+            listenerRegistered = true
+
             // Wait up to 3 seconds for port to be discovered
             for (i in 0..30) {
                 if (discoveredPort != -1) break
                 kotlinx.coroutines.delay(100)
             }
-            
-            nsdManager.stopServiceDiscovery(listener)
         } catch (e: Exception) {
             Log.e(TAG, "NSD Discovery failed", e)
+        } finally {
+            if (listenerRegistered) {
+                try {
+                    nsdManager.stopServiceDiscovery(listener)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to stop NSD discovery", e)
+                }
+            }
         }
         
         return discoveredPort
