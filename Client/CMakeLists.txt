@@ -29,10 +29,9 @@ add_executable(PixelMirroring
     src/adb/adb_client.cpp
     src/network/network_scanner.cpp
     # src/adb/device_manager.cpp
-    # src/stream/scrcpy_protocol.cpp
-    # src/stream/video_decoder.cpp
-    # src/stream/video_renderer.cpp
-    # src/input/input_handler.cpp
+    src/stream/scrcpy_client.cpp
+    src/stream/video_stubs.cpp
+    src/input/input_handler.cpp
     # src/config/settings.cpp
     ${PLATFORM_SOURCES}
 )
@@ -42,7 +41,9 @@ target_link_libraries(PixelMirroring PRIVATE httplib::httplib nlohmann_json::nlo
 
 if(WIN32)
     # Required for custom window frame and GDI drawing on Windows
-    target_link_libraries(PixelMirroring PRIVATE dwmapi uxtheme gdi32 user32)
+    target_link_libraries(PixelMirroring PRIVATE dwmapi uxtheme gdi32 gdiplus user32)
+    # No console window — we are GUI cave people
+    set_target_properties(PixelMirroring PROPERTIES WIN32_EXECUTABLE TRUE)
 elseif(APPLE)
     # Required for native Cocoa window
     find_library(COCOA_FRAMEWORK Cocoa)

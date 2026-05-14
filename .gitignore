@@ -22,9 +22,12 @@ local.properties
 Client/build/
 Client/PreviewWindow.exe
 *.obj
-*.exe
 *.pdb
 *.bin
+
+# ADB platform-tools (downloaded, not committed)
+scrcpy_download/adb.exe
+scrcpy_download/*.dll
 
 # Java / Android debug artifacts
 *.hprof

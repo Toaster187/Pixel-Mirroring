@@ -1,6 +1,15 @@
-#include <iostream>
 #include <thread>
 #include <random>
+#include <atomic>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <windows.h>
+#include <objidl.h>
+#include <gdiplus.h>
+#endif
+
 #include "adb/adb_client.h"
 #include "window/window_interface.h"
 #include "stream/scrcpy_client.h"
@@ -9,132 +18,182 @@
 #include "input/input_handler.h"
 #include "network/network_scanner.h"
 
-int main(int argc, char* argv[]) {
-    std::cout << "=== Pixel Mirroring Desktop Client ===" << std::endl;
+static int app_main() {
+#ifdef _WIN32
+    Gdiplus::GdiplusStartupInput gdiplusStartupInput;
+    ULONG_PTR gdiplusToken;
+    Gdiplus::GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, nullptr);
+#endif
 
-    pm::adb::AdbClient adb;
-    
-    if (!adb.init()) {
-        std::cerr << "Failed to initialize ADB." << std::endl;
+    // Show window immediately
+    auto window = pm::window::create_window(340, 604, "Pixel Mirroring");
+    if (!window->create()) {
+#ifdef _WIN32
+        Gdiplus::GdiplusShutdown(gdiplusToken);
+#endif
         return 1;
     }
+    window->set_aspect_ratio(340.0 / 604.0);
+    window->set_app_state(pm::window::AppState::SETUP);
+    window->set_status_text("");
 
-    std::cout << "Checking for USB devices for initial setup..." << std::endl;
-    
-    if (adb.auto_grant_secure_settings()) {
-        std::cout << "\nSetup complete! The Android app now has the necessary permissions." << std::endl;
-    } else {
-        std::cout << "\nNo USB device found, skipping auto-setup." << std::endl;
-    }
+    std::atomic<bool> should_stop{false};
+    pm::stream::ScrcpyClient scrcpy;
+    pm::stream::VideoRenderer renderer;
+    pm::input::InputHandler input(&scrcpy);
+    std::thread connection_thread;
 
-    std::cout << "\nScanning for Android devices on the network..." << std::endl;
-    pm::network::NetworkScanner scanner;
-    
+    // Read or generate client ID
     std::string client_id;
     std::string exe_dir = pm::adb::get_executable_dir();
     std::string client_id_path = exe_dir + "/client_id.txt";
-    
     FILE* f = fopen(client_id_path.c_str(), "r");
     if (f) {
         char buf[256];
         if (fgets(buf, sizeof(buf), f)) {
             client_id = buf;
-            // Remove newline
             if (!client_id.empty() && client_id.back() == '\n') client_id.pop_back();
         }
         fclose(f);
     }
-    
     if (client_id.empty()) {
         std::random_device rd;
         std::mt19937 gen(rd());
         std::uniform_int_distribution<> distrib(100000, 999999);
         client_id = "desktop-client-" + std::to_string(distrib(gen));
-        
         FILE* fw = fopen(client_id_path.c_str(), "w");
-        if (fw) {
-            fputs(client_id.c_str(), fw);
-            fclose(fw);
-        }
+        if (fw) { fputs(client_id.c_str(), fw); fclose(fw); }
     }
-    
-    auto discovered = scanner.discover_and_connect(client_id, "Desktop-PC");
-    
-    if (discovered) {
-        std::cout << "Attempting to connect ADB to " << discovered->ip << ":" << discovered->adb_port << "..." << std::endl;
-        adb.connect_device(discovered->ip, discovered->adb_port);
-        
-        std::cout << "Waiting for ADB device to become ready..." << std::endl;
-        bool device_ready = false;
-        for (int i = 0; i < 10; ++i) {
-            auto devs = adb.get_connected_devices();
-            for (const auto& dev : devs) {
-                if (dev.id.find(discovered->ip) != std::string::npos && dev.state == "device") {
-                    device_ready = true;
+
+    window->set_start_callback([&]() {
+        if (connection_thread.joinable()) return;
+
+        connection_thread = std::thread([&]() {
+            pm::adb::AdbClient adb;
+
+            // Step 1: Init ADB
+            window->set_status_text("ADB wird gestartet...");
+            adb.init();
+
+            // Step 2: Look for USB device
+            window->set_status_text("Suche USB-Geraet...");
+            auto devices = adb.get_connected_devices();
+
+            // Find USB device
+            std::string usb_device_id;
+            for (const auto& dev : devices) {
+                if (dev.is_usb() && dev.state == "device") {
+                    usb_device_id = dev.id;
                     break;
                 }
             }
-            if (device_ready) break;
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        }
-    } else {
-        std::cout << "Could not discover the Android app. Make sure it is open and connected to WiFi." << std::endl;
-    }
 
-    std::cout << "\nStarting Native UI..." << std::endl;
+            if (!usb_device_id.empty()) {
+                // USB device found — grant permissions
+                window->set_status_text("USB-Geraet gefunden! Berechtigungen...");
+                adb.auto_grant_secure_settings();
+                window->set_app_state(pm::window::AppState::CONNECTED);
+                window->set_status_text("Berechtigungen erteilt!");
+                std::this_thread::sleep_for(std::chrono::seconds(2));
 
-    auto window = pm::window::create_window(340, 604, "Pixel Mirroring");
-    if (!window->create()) {
-        std::cerr << "Failed to create window." << std::endl;
-        return 1;
-    }
+                // Now try to start scrcpy on USB device
+                if (!should_stop) {
+                    window->set_status_text("Starte Stream...");
+                    pm::stream::ScrcpyClient::Config config;
+                    config.device_id = usb_device_id;
 
-    // Initialize backend components
-    pm::stream::ScrcpyClient scrcpy;
-    pm::stream::VideoRenderer renderer;
-    pm::input::InputHandler input(&scrcpy);
+                    if (scrcpy.start(config)) {
+                        window->set_app_state(pm::window::AppState::STREAMING);
+                        renderer.init(window->get_native_handle());
+                        scrcpy.set_frame_callback([&](AVFrame* frame) {
+                            renderer.render_frame(nullptr);
+                        });
+                        window->set_render_callback([&]() {
+                            renderer.render_frame(nullptr);
+                        });
+                    } else {
+                        window->set_app_state(pm::window::AppState::STREAMING);
+                        window->set_status_text("Stream konnte nicht gestartet werden");
+                    }
+                }
+            } else {
+                // No USB device — try network discovery
+                window->set_status_text("Kein USB-Geraet. Scanne Netzwerk...");
 
-    auto devices = adb.get_connected_devices();
-    std::string target_device_id;
-    if (discovered) {
-        for (const auto& dev : devices) {
-            if (dev.id.find(discovered->ip) != std::string::npos && dev.state == "device") {
-                target_device_id = dev.id;
-                break;
+                pm::network::NetworkScanner scanner;
+                auto discovered = scanner.discover_and_connect(client_id, "Desktop-PC");
+
+                if (should_stop) return;
+
+                if (discovered) {
+                    window->set_status_text("Gefunden: " + discovered->device_name);
+                    adb.connect_device(discovered->ip, discovered->adb_port);
+
+                    // Wait for device ready
+                    bool ready = false;
+                    for (int i = 0; i < 10 && !should_stop; ++i) {
+                        auto devs = adb.get_connected_devices();
+                        for (const auto& dev : devs) {
+                            if (dev.id.find(discovered->ip) != std::string::npos && dev.state == "device") {
+                                ready = true; break;
+                            }
+                        }
+                        if (ready) break;
+                        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    }
+
+                    if (ready && !should_stop) {
+                        window->set_app_state(pm::window::AppState::CONNECTED);
+                        window->set_status_text(discovered->device_name);
+                        std::this_thread::sleep_for(std::chrono::seconds(1));
+
+                        pm::stream::ScrcpyClient::Config config;
+                        auto devs = adb.get_connected_devices();
+                        for (const auto& dev : devs) {
+                            if (dev.id.find(discovered->ip) != std::string::npos && dev.state == "device") {
+                                config.device_id = dev.id; break;
+                            }
+                        }
+                        if (!config.device_id.empty() && scrcpy.start(config)) {
+                            window->set_app_state(pm::window::AppState::STREAMING);
+                            renderer.init(window->get_native_handle());
+                            scrcpy.set_frame_callback([&](AVFrame*) { renderer.render_frame(nullptr); });
+                            window->set_render_callback([&]() { renderer.render_frame(nullptr); });
+                        } else {
+                            window->set_app_state(pm::window::AppState::SETUP);
+                            window->set_status_text("Stream fehlgeschlagen");
+                        }
+                    } else {
+                        window->set_app_state(pm::window::AppState::SETUP);
+                        window->set_status_text("Geraet nicht bereit");
+                    }
+                } else {
+                    window->set_app_state(pm::window::AppState::SETUP);
+                    window->set_status_text("Kein Geraet gefunden. Handy per USB verbinden.");
+                }
             }
-        }
-    }
-    if (target_device_id.empty() && !devices.empty()) {
-        for (const auto& dev : devices) {
-            if (dev.state == "device") {
-                target_device_id = dev.id;
-                break;
-            }
-        }
-    }
+        });
+    });
 
-    if (!target_device_id.empty()) {
-        pm::stream::ScrcpyClient::Config config;
-        config.device_id = target_device_id;
-        
-        if (scrcpy.start(config)) {
-            renderer.init(window->get_native_handle());
-            
-            scrcpy.set_frame_callback([&](AVFrame* frame) {
-                // Ignore compilation error for AVFrame here since it's a stub
-                renderer.render_frame(nullptr);
-            });
-            
-            window->set_render_callback([&]() {
-                renderer.render_frame(nullptr);
-            });
-        }
-    }
-
-    window->set_aspect_ratio(340.0 / 604.0); // Typical portrait aspect ratio
     window->show();
     window->process_messages();
 
+    should_stop = true;
     scrcpy.stop();
+    if (connection_thread.joinable()) connection_thread.join();
+
+#ifdef _WIN32
+    Gdiplus::GdiplusShutdown(gdiplusToken);
+#endif
     return 0;
 }
+
+#ifdef _WIN32
+int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
+    return app_main();
+}
+#else
+int main(int argc, char* argv[]) {
+    return app_main();
+}
+#endif

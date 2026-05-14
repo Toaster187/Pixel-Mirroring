@@ -113,7 +113,9 @@ std::string AdbClient::run_adb_command(const std::vector<std::string>& args) {
 
     HANDLE hChildStdoutRd, hChildStdoutWr;
     if (!CreatePipe(&hChildStdoutRd, &hChildStdoutWr, &saAttr, 0)) {
-        throw std::runtime_error("CreatePipe failed");
+        // Pipe no work. Sad caveman noises.
+        std::cerr << "[ADB] CreatePipe failed" << std::endl;
+        return "";
     }
     SetHandleInformation(hChildStdoutRd, HANDLE_FLAG_INHERIT, 0);
 
@@ -128,10 +130,12 @@ std::string AdbClient::run_adb_command(const std::vector<std::string>& args) {
     std::vector<char> cmdline_buf(cmdline.begin(), cmdline.end());
     cmdline_buf.push_back('\0');
 
-    if (!CreateProcessA(NULL, cmdline_buf.data(), NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) {
+    if (!CreateProcessA(NULL, cmdline_buf.data(), NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
         CloseHandle(hChildStdoutRd);
         CloseHandle(hChildStdoutWr);
-        throw std::runtime_error("CreateProcess failed");
+        // ADB process no spawn. Like trying to make fire in rain.
+        std::cerr << "[ADB] CreateProcess failed for: " << cmdline << std::endl;
+        return "";
     }
 
     CloseHandle(hChildStdoutWr);
@@ -151,14 +155,16 @@ std::string AdbClient::run_adb_command(const std::vector<std::string>& args) {
     // POSIX: use fork+execvp
     int pipefd[2];
     if (pipe(pipefd) == -1) {
-        throw std::runtime_error("pipe() failed");
+        std::cerr << "[ADB] pipe() failed" << std::endl;
+        return "";
     }
 
     pid_t pid = fork();
     if (pid == -1) {
         close(pipefd[0]);
         close(pipefd[1]);
-        throw std::runtime_error("fork() failed");
+        std::cerr << "[ADB] fork() failed" << std::endl;
+        return "";
     }
 
     if (pid == 0) {
@@ -297,7 +303,7 @@ void AdbClient::execute_shell_command_async(const std::string& device_id, const 
     std::vector<char> cmdline_buf(cmdline.begin(), cmdline.end());
     cmdline_buf.push_back('\0');
 
-    if (!CreateProcessA(NULL, cmdline_buf.data(), NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) {
+    if (!CreateProcessA(NULL, cmdline_buf.data(), NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
         CloseHandle(hChildStdoutRd);
         CloseHandle(hChildStdoutWr);
         return;

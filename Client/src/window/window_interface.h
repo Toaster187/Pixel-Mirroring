@@ -1,8 +1,17 @@
 #pragma once
 #include <string>
 #include <memory>
+#include <functional>
 
 namespace pm::window {
+
+// Cave man state machine — each state = different cave painting on phone screen
+enum class AppState {
+    SETUP,      // Show first-time setup instructions
+    SCANNING,   // Scanning network for Android device
+    CONNECTED,  // Found device, starting stream
+    STREAMING   // Video stream active
+};
 
 class IWindow {
 public:
@@ -28,6 +37,15 @@ public:
     
     // Sets a callback to be called whenever the window repaints its client area
     virtual void set_render_callback(std::function<void()> cb) = 0;
+    
+    // Sets the current app state (changes what is drawn in the phone area)
+    virtual void set_app_state(AppState state) = 0;
+    
+    // Sets the status text shown in the phone area
+    virtual void set_status_text(const std::string& text) = 0;
+    
+    // Sets a callback for when the user clicks the "Start" button in SETUP state
+    virtual void set_start_callback(std::function<void()> cb) = 0;
 };
 
 // Factory function to create the appropriate window implementation for the current OS.

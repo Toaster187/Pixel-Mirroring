@@ -26,10 +26,11 @@ Pixel-Mirroring/
 │   ├── CMakeLists.txt    ← Build-Config (CMake 3.25+)
 │   ├── vcpkg.json        ← Dependencies (SDL2, FFmpeg, nlohmann-json)
 │   └── src/
-│       ├── main.cpp      ← Entry Point
+│       ├── main.cpp      ← Entry Point (WinMain auf Windows, main auf POSIX)
 │       ├── adb/          ← ADB Protocol Client
 │       ├── stream/       ← scrcpy Protocol, Video Decoder/Renderer
 │       ├── input/        ← Input Forwarding (Mouse, Keyboard, Touch)
+│       ├── network/      ← Network Discovery (cpp-httplib, Subnet Scan)
 │       ├── window/       ← Platform-spezifische Fenster (Win32, Cocoa)
 │       └── tray/         ← System Tray (Win32, Cocoa)
 └── scrcpy_download/      ← scrcpy Server Binary
@@ -49,10 +50,10 @@ Pixel-Mirroring/
 ### Desktop Client
 - **Sprache:** C++20
 - **Build:** CMake 3.25+ mit vcpkg
-- **Abhängigkeiten:** SDL2, FFmpeg (libavcodec/libavformat/libavutil/libswscale), nlohmann-json
-- **Windows:** Win32 API, DWM, GDI32, UxTheme (Custom Borderless Window)
+- **Abhängigkeiten:** SDL2, FFmpeg (libavcodec/libavformat/libavutil/libswscale), nlohmann-json, cpp-httplib
+- **Windows:** Win32 API, GDI+ (Anti-Aliased Rendering), DWM, UxTheme (Custom Borderless Window), WIN32_EXECUTABLE (kein Konsolenfenster), AppState-Machine (SETUP→SCANNING→CONNECTED→STREAMING)
 - **macOS:** Cocoa/AppKit (Native Window)
-- **Namensraum:** `pm::` (Subnamespaces: `pm::adb`, `pm::stream`, `pm::window`, `pm::input`, `pm::tray`)
+- **Namensraum:** `pm::` (Subnamespaces: `pm::adb`, `pm::stream`, `pm::window`, `pm::input`, `pm::tray`, `pm::network`)
 
 ---
 
