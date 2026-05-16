@@ -407,7 +407,7 @@ bool start_stream(
     scrcpy.set_frame_callback([&](AVFrame* frame) {
         renderer.render_frame(frame);
     });
-    window.set_render_callback([&](struct SDL_Renderer* renderer_ptr, int x, int y, int w, int h) {
+    window.set_render_callback([&](SDL_Renderer* renderer_ptr, int x, int y, int w, int h) {
         renderer.paint(renderer_ptr, x, y, w, h);
     });
 

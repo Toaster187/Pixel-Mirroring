@@ -2,6 +2,8 @@
 #include <string>
 #include <memory>
 #include <functional>
+struct SDL_Renderer;
+struct SDL_Window;
 
 namespace pm::window {
 
@@ -42,7 +44,7 @@ public:
     virtual void* get_native_handle() = 0;
 
     // Set render callback. Paint latest frame in phone area.
-    virtual void set_render_callback(std::function<void(struct SDL_Renderer*, int, int, int, int)> cb) = 0;
+    virtual void set_render_callback(std::function<void(SDL_Renderer*, int, int, int, int)> cb) = 0;
 
     // Set video viewport callback. Receive current phone area size.
     virtual void set_video_viewport_callback(std::function<void(int, int, int, int)> cb) = 0;

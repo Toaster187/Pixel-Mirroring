@@ -1,10 +1,10 @@
 #include "video_renderer.h"
 
 #include <iostream>
+#include <cstring>
 
 extern "C" {
 #include <libavutil/frame.h>
-#include <libswscale/swscale.h>
 }
 
 #include <SDL2/SDL.h>
@@ -18,6 +18,7 @@ namespace pm::stream {
 
 namespace {
 #ifdef _WIN32
+// Cave man signal main thread: new frame ready, paint now
 constexpr UINT WM_VIDEO_RENDER = WM_APP + 2;
 #endif
 }
@@ -43,129 +44,110 @@ void VideoRenderer::render_frame(void* frame) {
         return;
     }
 
+    // Cave man only handle YUV420P — that what scrcpy send
+    // Other formats = no good, skip
+    if (av_frame->format != 0 /* AV_PIX_FMT_YUV420P */) {
+        std::cerr << "[Renderer] Unsupported pixel format: " << av_frame->format << std::endl;
+        return;
+    }
+
     {
         std::lock_guard<std::mutex> lock(m_frame_mutex);
+
+        // Resize if frame size changed
         if (width != m_frame_width || height != m_frame_height) {
             m_frame_width = width;
             m_frame_height = height;
-            m_bgra_buffer.assign(static_cast<size_t>(width) * height * 4, 0);
-            m_sws_ctx.reset();
-        }
-
-        m_sws_ctx.reset(sws_getCachedContext(
-            m_sws_ctx.release(),
-            width,
-            height,
-            static_cast<AVPixelFormat>(av_frame->format),
-            width,
-            height,
-            AV_PIX_FMT_BGRA,
-            SWS_LANCZOS,
-            nullptr,
-            nullptr,
-            nullptr
-        ));
-        if (!m_sws_ctx) {
-            std::cerr << "[Renderer] Could not create scaler" << std::endl;
-            return;
-        }
-
-        uint8_t* dst_data[4] = { m_bgra_buffer.data(), nullptr, nullptr, nullptr };
-        int dst_linesize[4] = { width * 4, 0, 0, 0 };
-        sws_scale(
-            m_sws_ctx.get(),
-            av_frame->data,
-            av_frame->linesize,
-            0,
-            height,
-            dst_data,
-            dst_linesize
-        );
-        m_has_frame = true;
-    }
-
-    request_render();
-}
-
-void VideoRenderer::paint(struct SDL_Renderer* renderer, int x, int y, int width, int height) {
-    if (!renderer || width <= 0 || height <= 0) {
-        return;
-    }
-
-    std::lock_guard<std::mutex> lock(m_frame_mutex);
-    if (!m_has_frame || m_bgra_buffer.empty() || m_frame_width <= 0 || m_frame_height <= 0) {
-        return;
-    }
-
-    const uint8_t* pixels = m_bgra_buffer.data();
-    int source_w = m_frame_width;
-    int source_h = m_frame_height;
-
-    if (width != m_frame_width || height != m_frame_height) {
-        if (width != m_scaled_width || height != m_scaled_height) {
-            m_scaled_width = width;
-            m_scaled_height = height;
-            m_scaled_buffer.assign(static_cast<size_t>(width) * height * 4, 0);
-            m_paint_sws_ctx.reset();
+            // Destroy old texture — size wrong now
             if (m_texture) {
                 SDL_DestroyTexture(m_texture);
                 m_texture = nullptr;
             }
         }
 
-        double src_aspect = static_cast<double>(m_frame_width) / m_frame_height;
-        double dst_aspect = static_cast<double>(width) / height;
+        // Copy Y plane
+        int y_size = av_frame->linesize[0] * height;
+        m_y_linesize = av_frame->linesize[0];
+        m_y_plane.resize(y_size);
+        std::memcpy(m_y_plane.data(), av_frame->data[0], y_size);
 
-        int target_w = width;
-        int target_h = height;
+        // Copy U plane (half height)
+        int uv_height = (height + 1) / 2;
+        int u_size = av_frame->linesize[1] * uv_height;
+        m_u_linesize = av_frame->linesize[1];
+        m_u_plane.resize(u_size);
+        std::memcpy(m_u_plane.data(), av_frame->data[1], u_size);
 
-        if (src_aspect > dst_aspect) {
-            target_h = static_cast<int>(width / src_aspect);
-        } else {
-            target_w = static_cast<int>(height * src_aspect);
+        // Copy V plane (half height)
+        int v_size = av_frame->linesize[2] * uv_height;
+        m_v_linesize = av_frame->linesize[2];
+        m_v_plane.resize(v_size);
+        std::memcpy(m_v_plane.data(), av_frame->data[2], v_size);
+
+        m_has_frame = true;
+    }
+
+    request_render();
+}
+
+void VideoRenderer::paint(SDL_Renderer* renderer, int x, int y, int width, int height) {
+    if (!renderer || width <= 0 || height <= 0) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(m_frame_mutex);
+    if (!m_has_frame || m_frame_width <= 0 || m_frame_height <= 0) {
+        return;
+    }
+
+    // Create YUV texture if needed — GPU handle color conversion
+    if (!m_texture || m_cached_renderer != renderer) {
+        if (m_texture) {
+            SDL_DestroyTexture(m_texture);
         }
-
-        int offset_x = (width - target_w) / 2;
-        int offset_y = (height - target_h) / 2;
-
-        m_paint_sws_ctx.reset(sws_getCachedContext(
-            m_paint_sws_ctx.release(),
+        m_texture = SDL_CreateTexture(
+            renderer,
+            SDL_PIXELFORMAT_IYUV,
+            SDL_TEXTUREACCESS_STREAMING,
             m_frame_width,
-            m_frame_height,
-            AV_PIX_FMT_BGRA,
-            target_w,
-            target_h,
-            AV_PIX_FMT_BGRA,
-            SWS_LANCZOS,
-            nullptr,
-            nullptr,
-            nullptr
-        ));
-        if (m_paint_sws_ctx && !m_scaled_buffer.empty()) {
-            std::fill(m_scaled_buffer.begin(), m_scaled_buffer.end(), 0);
-            const uint8_t* src_data[4] = { m_bgra_buffer.data(), nullptr, nullptr, nullptr };
-            int src_linesize[4] = { m_frame_width * 4, 0, 0, 0 };
-            
-            uint8_t* dst_ptr = m_scaled_buffer.data() + (offset_y * width + offset_x) * 4;
-            uint8_t* dst_data[4] = { dst_ptr, nullptr, nullptr, nullptr };
-            int dst_linesize[4] = { width * 4, 0, 0, 0 };
-            
-            sws_scale(m_paint_sws_ctx.get(), src_data, src_linesize, 0, m_frame_height, dst_data, dst_linesize);
-            pixels = m_scaled_buffer.data();
-            source_w = width;
-            source_h = height;
+            m_frame_height
+        );
+        m_cached_renderer = renderer;
+        if (!m_texture) {
+            std::cerr << "[Renderer] Could not create YUV texture: " << SDL_GetError() << std::endl;
+            return;
         }
     }
 
-    if (!m_texture && source_w > 0 && source_h > 0) {
-        m_texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, source_w, source_h);
+    // Upload YUV planes directly — no CPU conversion needed
+    SDL_UpdateYUVTexture(
+        m_texture,
+        nullptr,
+        m_y_plane.data(), m_y_linesize,
+        m_u_plane.data(), m_u_linesize,
+        m_v_plane.data(), m_v_linesize
+    );
+
+    // Calculate aspect-ratio-preserving destination rect
+    double src_aspect = static_cast<double>(m_frame_width) / m_frame_height;
+    double dst_aspect = static_cast<double>(width) / height;
+
+    int target_w = width;
+    int target_h = height;
+
+    if (src_aspect > dst_aspect) {
+        target_h = static_cast<int>(width / src_aspect);
+    } else {
+        target_w = static_cast<int>(height * src_aspect);
     }
-    
-    if (m_texture) {
-        SDL_UpdateTexture(m_texture, nullptr, pixels, source_w * 4);
-        SDL_Rect dst_rect = { x, y, width, height };
-        SDL_RenderCopy(renderer, m_texture, nullptr, &dst_rect);
-    }
+
+    int offset_x = x + (width - target_w) / 2;
+    int offset_y = y + (height - target_h) / 2;
+
+    SDL_Rect dst_rect = { offset_x, offset_y, target_w, target_h };
+
+    // GPU do scaling and YUV->RGB — cave man just copy and blit
+    SDL_RenderCopy(renderer, m_texture, nullptr, &dst_rect);
 }
 
 void VideoRenderer::update_viewport(int x, int y, int width, int height) {
@@ -177,18 +159,16 @@ void VideoRenderer::update_viewport(int x, int y, int width, int height) {
 
 void VideoRenderer::shutdown() {
     std::lock_guard<std::mutex> lock(m_frame_mutex);
-    m_sws_ctx.reset();
-    m_paint_sws_ctx.reset();
     if (m_texture) {
         SDL_DestroyTexture(m_texture);
         m_texture = nullptr;
     }
-    m_bgra_buffer.clear();
-    m_scaled_buffer.clear();
+    m_cached_renderer = nullptr;
+    m_y_plane.clear();
+    m_u_plane.clear();
+    m_v_plane.clear();
     m_frame_width = 0;
     m_frame_height = 0;
-    m_scaled_width = 0;
-    m_scaled_height = 0;
     m_has_frame = false;
     m_native_window_handle = nullptr;
 }

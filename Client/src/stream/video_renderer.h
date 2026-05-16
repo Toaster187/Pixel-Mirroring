@@ -3,18 +3,14 @@
 #include <mutex>
 #include <vector>
 #include <memory>
+#include <atomic>
 
-struct SwsContext;
-extern "C" void sws_freeContext(struct SwsContext* swsContext);
+struct SDL_Texture;
+struct SDL_Renderer;
 
 namespace pm::stream {
 
-struct SwsContextDeleter {
-    void operator()(SwsContext* ctx) const {
-        if (ctx) sws_freeContext(ctx);
-    }
-};
-
+// Cave man render frame on GPU — no CPU scaling, no double convert
 class VideoRenderer {
 public:
     VideoRenderer() = default;
@@ -22,7 +18,7 @@ public:
 
     bool init(void* native_window_handle);
     void render_frame(void* frame);
-    void paint(struct SDL_Renderer* renderer, int x, int y, int width, int height);
+    void paint(SDL_Renderer* renderer, int x, int y, int width, int height);
     void update_viewport(int x, int y, int width, int height);
     void shutdown();
 
@@ -30,21 +26,25 @@ private:
     void request_render();
 
     void* m_native_window_handle{nullptr};
-    struct SDL_Texture* m_texture{nullptr};
-    std::unique_ptr<SwsContext, SwsContextDeleter> m_sws_ctx{nullptr};
-    std::unique_ptr<SwsContext, SwsContextDeleter> m_paint_sws_ctx{nullptr};
+    SDL_Texture* m_texture{nullptr};
+    SDL_Renderer* m_cached_renderer{nullptr};
     std::mutex m_frame_mutex;
-    std::vector<uint8_t> m_bgra_buffer;
-    std::vector<uint8_t> m_scaled_buffer;
+
+    // YUV plane data — cave man copy planes, GPU do rest
+    std::vector<uint8_t> m_y_plane;
+    std::vector<uint8_t> m_u_plane;
+    std::vector<uint8_t> m_v_plane;
+    int m_y_linesize{0};
+    int m_u_linesize{0};
+    int m_v_linesize{0};
+
     int m_frame_width{0};
     int m_frame_height{0};
-    int m_scaled_width{0};
-    int m_scaled_height{0};
     int m_viewport_x{0};
     int m_viewport_y{0};
     int m_viewport_width{0};
     int m_viewport_height{0};
-    bool m_has_frame{false};
+    std::atomic<bool> m_has_frame{false};
 };
 
 } // namespace pm::stream

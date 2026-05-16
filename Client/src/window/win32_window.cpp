@@ -115,7 +115,7 @@ void Win32Window::set_aspect_ratio(double r) {
 void Win32Window::set_orientation(bool l) { is_landscape_ = l; is_max_height_ = false; }
 
 void Win32Window::set_video_viewport_callback(std::function<void(int, int, int, int)> cb) {
-    viewport_cb_ = std::move(cb);
+    m_viewport_cb_ = std::move(cb);
     notify_video_viewport();
 }
 
@@ -163,17 +163,17 @@ void Win32Window::update_region() {
 }
 
 void Win32Window::notify_video_viewport() {
-    if (!viewport_cb_) return;
+    if (!m_viewport_cb_) return;
 
     int w = rect_phone_.right - rect_phone_.left;
     int h = rect_phone_.bottom - rect_phone_.top;
     if (w <= 0 || h <= 0) return;
 
-    viewport_cb_(rect_phone_.left, rect_phone_.top, w, h);
+    m_viewport_cb_(rect_phone_.left, rect_phone_.top, w, h);
 }
 
 void Win32Window::send_pointer_event(PointerAction action, int x, int y) {
-    if (!pointer_cb_ || app_state_ != AppState::STREAMING) return;
+    if (!m_pointer_cb_ || app_state_ != AppState::STREAMING) return;
 
     int w = rect_phone_.right - rect_phone_.left;
     int h = rect_phone_.bottom - rect_phone_.top;
@@ -181,7 +181,7 @@ void Win32Window::send_pointer_event(PointerAction action, int x, int y) {
 
     x = (std::max)(0, (std::min)(x, w - 1));
     y = (std::max)(0, (std::min)(y, h - 1));
-    pointer_cb_(action, x, y, w, h);
+    m_pointer_cb_(action, x, y, w, h);
 }
 
 int Win32Window::hit_test_button(POINT pt) {
@@ -317,17 +317,7 @@ void Win32Window::handle_paint() {
         }
     }
 
-    if (app_state_ == AppState::STREAMING && m_render_cb_ && m_sdl_renderer) {
-        // Blit GDI+ UI first (top bubble)
-        BitBlt(hdc, 0, 0, w, h, mem, 0, 0, SRCCOPY);
-        
-        m_render_cb_(m_sdl_renderer, rect_phone_.left, rect_phone_.top,
-            rect_phone_.right - rect_phone_.left,
-            rect_phone_.bottom - rect_phone_.top);
-        SDL_RenderPresent(m_sdl_renderer);
-    } else {
-        BitBlt(hdc, 0, 0, w, h, mem, 0, 0, SRCCOPY);
-    }
+    BitBlt(hdc, 0, 0, w, h, mem, 0, 0, SRCCOPY);
 
     SelectObject(mem, old);
     DeleteObject(bmp);
@@ -538,8 +528,24 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_VIDEO_RENDER:
-        InvalidateRect(hwnd_, &rect_phone_, FALSE);
+        // Cave man render direct — no GDI+ repaint needed for video frames
+        if (app_state_ == AppState::STREAMING && m_render_cb_ && m_sdl_renderer) {
+            SDL_RenderClear(m_sdl_renderer);
+            m_render_cb_(m_sdl_renderer, rect_phone_.left, rect_phone_.top,
+                rect_phone_.right - rect_phone_.left,
+                rect_phone_.bottom - rect_phone_.top);
+            SDL_RenderPresent(m_sdl_renderer);
+        }
         return 0;
+    case WM_APP + 3: {
+        // Cave man run task on UI thread
+        auto* task = reinterpret_cast<std::function<void()>*>(lp);
+        if (task) {
+            (*task)();
+            delete task;
+        }
+        return 0;
+    }
     case WM_DESTROY: PostQuitMessage(0); return 0;
     case WM_PAINT: handle_paint(); return 0;
     case WM_ERASEBKGND: return 1;
@@ -589,6 +595,13 @@ void Win32Window::handle_sizing(WPARAM edge, LPARAM lp) {
     case WMSZ_TOPLEFT:
         r->left = r->right - ntw; r->top = r->bottom - nth; break;
     }
+}
+
+void Win32Window::post_task(std::function<void()> task) {
+    if (!hwnd_) return;
+    // Cave man allocate task on heap, UI thread delete after run
+    auto* heap_task = new std::function<void()>(std::move(task));
+    PostMessage(hwnd_, WM_APP + 3, 0, reinterpret_cast<LPARAM>(heap_task));
 }
 
 } // namespace pm::window
