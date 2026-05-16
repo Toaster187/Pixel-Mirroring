@@ -13,6 +13,12 @@ enum class AppState {
     STREAMING   // Video stream active
 };
 
+enum class PointerAction {
+    DOWN,
+    MOVE,
+    UP
+};
+
 class IWindow {
 public:
     virtual ~IWindow() = default;
@@ -34,9 +40,15 @@ public:
     
     // Returns the underlying OS window handle (HWND or NSWindow*)
     virtual void* get_native_handle() = 0;
-    
-    // Sets a callback to be called whenever the window repaints its client area
-    virtual void set_render_callback(std::function<void()> cb) = 0;
+
+    // Sets a callback to paint the latest video frame into the phone area.
+    virtual void set_render_callback(std::function<void(void*, int, int, int, int)> cb) = 0;
+
+    // Sets a callback that receives the current video viewport inside the window.
+    virtual void set_video_viewport_callback(std::function<void(int, int, int, int)> cb) = 0;
+
+    // Sets a callback for pointer input inside the video viewport.
+    virtual void set_pointer_callback(std::function<void(PointerAction, int, int, int, int)> cb) = 0;
     
     // Sets the current app state (changes what is drawn in the phone area)
     virtual void set_app_state(AppState state) = 0;

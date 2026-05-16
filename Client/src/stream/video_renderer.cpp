@@ -1,11 +1,9 @@
 #include "video_renderer.h"
 
-#include <algorithm>
 #include <iostream>
 
 extern "C" {
 #include <libavutil/frame.h>
-#include <libavutil/imgutils.h>
 #include <libswscale/swscale.h>
 }
 
@@ -17,16 +15,9 @@ extern "C" {
 namespace pm::stream {
 
 namespace {
-constexpr int WINDOW_TOOLBAR_HEIGHT = 42;
-
-int fit_size(int outer, int inner, int source_outer, int source_inner) {
-    if (source_outer <= 0 || source_inner <= 0 || outer <= 0 || inner <= 0) {
-        return 0;
-    }
-    return (source_outer * inner <= source_inner * outer)
-        ? source_outer * inner / source_inner
-        : outer;
-}
+#ifdef _WIN32
+constexpr UINT WM_VIDEO_RENDER = WM_APP + 2;
+#endif
 }
 
 VideoRenderer::~VideoRenderer() {
@@ -39,18 +30,18 @@ bool VideoRenderer::init(void* native_window_handle) {
 }
 
 void VideoRenderer::render_frame(void* frame) {
-    if (!native_window_handle_) {
+    if (!native_window_handle_ || !frame) {
         return;
     }
 
     AVFrame* av_frame = static_cast<AVFrame*>(frame);
-    if (av_frame) {
-        const int width = av_frame->width;
-        const int height = av_frame->height;
-        if (width <= 0 || height <= 0) {
-            return;
-        }
+    const int width = av_frame->width;
+    const int height = av_frame->height;
+    if (width <= 0 || height <= 0) {
+        return;
+    }
 
+    {
         std::lock_guard<std::mutex> lock(frame_mutex_);
         if (width != frame_width_ || height != frame_height_) {
             frame_width_ = width;
@@ -70,7 +61,7 @@ void VideoRenderer::render_frame(void* frame) {
             width,
             height,
             AV_PIX_FMT_BGRA,
-            SWS_BILINEAR,
+            SWS_LANCZOS,
             nullptr,
             nullptr,
             nullptr
@@ -94,31 +85,13 @@ void VideoRenderer::render_frame(void* frame) {
         has_frame_ = true;
     }
 
-    draw_latest_frame();
+    request_render();
 }
 
-void VideoRenderer::update_viewport(int window_w, int window_h) {
-    viewport_width_ = window_w;
-    viewport_height_ = window_h;
-}
-
-void VideoRenderer::shutdown() {
-    std::lock_guard<std::mutex> lock(frame_mutex_);
-    if (sws_ctx_) {
-        sws_freeContext(sws_ctx_);
-        sws_ctx_ = nullptr;
-    }
-    bgra_buffer_.clear();
-    frame_width_ = 0;
-    frame_height_ = 0;
-    has_frame_ = false;
-    native_window_handle_ = nullptr;
-}
-
-void VideoRenderer::draw_latest_frame() {
+void VideoRenderer::paint(void* hdc, int x, int y, int width, int height) {
 #ifdef _WIN32
-    HWND hwnd = static_cast<HWND>(native_window_handle_);
-    if (!hwnd) {
+    HDC target = static_cast<HDC>(hdc);
+    if (!target || width <= 0 || height <= 0) {
         return;
     }
 
@@ -127,57 +100,117 @@ void VideoRenderer::draw_latest_frame() {
         return;
     }
 
-    RECT client{};
-    GetClientRect(hwnd, &client);
-    int window_w = viewport_width_ > 0 ? viewport_width_ : client.right - client.left;
-    int window_h = viewport_height_ > 0 ? viewport_height_ : client.bottom - client.top;
-    int phone_x = 0;
-    int phone_y = WINDOW_TOOLBAR_HEIGHT;
-    int phone_w = window_w;
-    int phone_h = (std::max)(0, window_h - WINDOW_TOOLBAR_HEIGHT);
-    if (phone_w <= 0 || phone_h <= 0) {
-        return;
-    }
+    int old_mode = SetStretchBltMode(target, HALFTONE);
+    POINT old_origin{};
+    SetBrushOrgEx(target, 0, 0, &old_origin);
 
-    int draw_w = fit_size(phone_w, phone_h, frame_width_, frame_height_);
-    int draw_h = draw_w > 0 ? draw_w * frame_height_ / frame_width_ : 0;
-    if (draw_h > phone_h) {
-        draw_h = phone_h;
-        draw_w = draw_h * frame_width_ / frame_height_;
-    }
+    const uint8_t* pixels = bgra_buffer_.data();
+    int source_w = frame_width_;
+    int source_h = frame_height_;
 
-    int draw_x = phone_x + (phone_w - draw_w) / 2;
-    int draw_y = phone_y + (phone_h - draw_h) / 2;
+    if (width != frame_width_ || height != frame_height_) {
+        if (width != scaled_width_ || height != scaled_height_) {
+            scaled_width_ = width;
+            scaled_height_ = height;
+            scaled_buffer_.assign(static_cast<size_t>(width) * height * 4, 0);
+            if (paint_sws_ctx_) {
+                sws_freeContext(paint_sws_ctx_);
+                paint_sws_ctx_ = nullptr;
+            }
+        }
 
-    HDC hdc = GetDC(hwnd);
-    if (!hdc) {
-        return;
+        paint_sws_ctx_ = sws_getCachedContext(
+            paint_sws_ctx_,
+            frame_width_,
+            frame_height_,
+            AV_PIX_FMT_BGRA,
+            width,
+            height,
+            AV_PIX_FMT_BGRA,
+            SWS_LANCZOS,
+            nullptr,
+            nullptr,
+            nullptr
+        );
+        if (paint_sws_ctx_ && !scaled_buffer_.empty()) {
+            const uint8_t* src_data[4] = { bgra_buffer_.data(), nullptr, nullptr, nullptr };
+            int src_linesize[4] = { frame_width_ * 4, 0, 0, 0 };
+            uint8_t* dst_data[4] = { scaled_buffer_.data(), nullptr, nullptr, nullptr };
+            int dst_linesize[4] = { width * 4, 0, 0, 0 };
+            sws_scale(paint_sws_ctx_, src_data, src_linesize, 0, frame_height_, dst_data, dst_linesize);
+            pixels = scaled_buffer_.data();
+            source_w = width;
+            source_h = height;
+        }
     }
 
     BITMAPINFO bmi{};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = frame_width_;
-    bmi.bmiHeader.biHeight = -frame_height_;
+    bmi.bmiHeader.biWidth = source_w;
+    bmi.bmiHeader.biHeight = -source_h;
     bmi.bmiHeader.biPlanes = 1;
     bmi.bmiHeader.biBitCount = 32;
     bmi.bmiHeader.biCompression = BI_RGB;
 
     StretchDIBits(
-        hdc,
-        draw_x,
-        draw_y,
-        draw_w,
-        draw_h,
+        target,
+        x,
+        y,
+        width,
+        height,
         0,
         0,
-        frame_width_,
-        frame_height_,
-        bgra_buffer_.data(),
+        source_w,
+        source_h,
+        pixels,
         &bmi,
         DIB_RGB_COLORS,
         SRCCOPY
     );
-    ReleaseDC(hwnd, hdc);
+    SetBrushOrgEx(target, old_origin.x, old_origin.y, nullptr);
+    SetStretchBltMode(target, old_mode);
+#else
+    (void)hdc;
+    (void)x;
+    (void)y;
+    (void)width;
+    (void)height;
+#endif
+}
+
+void VideoRenderer::update_viewport(int x, int y, int width, int height) {
+    viewport_x_ = x;
+    viewport_y_ = y;
+    viewport_width_ = width;
+    viewport_height_ = height;
+}
+
+void VideoRenderer::shutdown() {
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+    if (sws_ctx_) {
+        sws_freeContext(sws_ctx_);
+        sws_ctx_ = nullptr;
+    }
+    if (paint_sws_ctx_) {
+        sws_freeContext(paint_sws_ctx_);
+        paint_sws_ctx_ = nullptr;
+    }
+    bgra_buffer_.clear();
+    scaled_buffer_.clear();
+    frame_width_ = 0;
+    frame_height_ = 0;
+    scaled_width_ = 0;
+    scaled_height_ = 0;
+    has_frame_ = false;
+    native_window_handle_ = nullptr;
+}
+
+void VideoRenderer::request_render() {
+#ifdef _WIN32
+    HWND hwnd = static_cast<HWND>(native_window_handle_);
+    if (hwnd) {
+        PostMessage(hwnd, WM_VIDEO_RENDER, 0, 0);
+    }
 #endif
 }
 

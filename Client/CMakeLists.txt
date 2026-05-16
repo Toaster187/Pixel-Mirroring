@@ -83,7 +83,19 @@ endif()
 
 target_include_directories(PixelMirroring PRIVATE ${FFMPEG_INCLUDE_DIRS})
 target_link_directories(PixelMirroring PRIVATE ${FFMPEG_LIBRARY_DIRS})
-target_link_libraries(PixelMirroring PRIVATE ${FFMPEG_LIBRARIES} httplib::httplib nlohmann_json::nlohmann_json)
+target_link_libraries(PixelMirroring PRIVATE
+    ${FFMPEG_LIBRARIES}
+    httplib::httplib
+    nlohmann_json::nlohmann_json
+)
+
+add_custom_command(TARGET PixelMirroring POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        $<TARGET_RUNTIME_DLLS:PixelMirroring>
+        $<TARGET_FILE_DIR:PixelMirroring>
+    COMMAND_EXPAND_LISTS
+    COMMENT "Copy runtime DLLs next to desktop client"
+)
 
 if(WIN32)
     # Required for custom window frame and GDI drawing on Windows

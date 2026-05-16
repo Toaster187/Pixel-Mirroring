@@ -24,7 +24,9 @@ public:
     void set_orientation(bool landscape) override;
     
     void* get_native_handle() override { return hwnd_; }
-    void set_render_callback(std::function<void()> cb) override { render_cb_ = std::move(cb); }
+    void set_render_callback(std::function<void(void*, int, int, int, int)> cb) override { render_cb_ = std::move(cb); }
+    void set_video_viewport_callback(std::function<void(int, int, int, int)> cb) override;
+    void set_pointer_callback(std::function<void(PointerAction, int, int, int, int)> cb) override { pointer_cb_ = std::move(cb); }
     void set_app_state(AppState state) override;
     void set_status_text(const std::string& text) override;
     void set_start_callback(std::function<void()> cb) override { start_cb_ = std::move(cb); }
@@ -46,6 +48,8 @@ private:
     void toggle_max_height();
     void recalc_layout();
     void update_region();
+    void notify_video_viewport();
+    void send_pointer_event(PointerAction action, int x, int y);
     int hit_test_button(POINT client_pt);
     bool is_start_button_hit(POINT client_pt);
 
@@ -74,7 +78,9 @@ private:
     int scan_animation_frame_{0};
     
     // Callbacks
-    std::function<void()> render_cb_;
+    std::function<void(void*, int, int, int, int)> render_cb_;
+    std::function<void(int, int, int, int)> viewport_cb_;
+    std::function<void(PointerAction, int, int, int, int)> pointer_cb_;
     std::function<void()> start_cb_;
 };
 

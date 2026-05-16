@@ -198,6 +198,7 @@ bool start_stream(
     pm::window::IWindow& window,
     pm::stream::ScrcpyClient& scrcpy,
     pm::stream::VideoRenderer& renderer,
+    pm::input::InputHandler& input,
     const std::string& device_id
 );
 
@@ -268,6 +269,7 @@ bool run_first_time_setup(
     pm::window::IWindow& window,
     pm::stream::ScrcpyClient& scrcpy,
     pm::stream::VideoRenderer& renderer,
+    pm::input::InputHandler& input,
     std::atomic<bool>& should_stop
 ) {
     clear_setup_state();
@@ -342,7 +344,7 @@ bool run_first_time_setup(
     window.set_app_state(pm::window::AppState::CONNECTED);
     window.set_status_text("Verbunden: " + device_ip);
     std::this_thread::sleep_for(std::chrono::seconds(1));
-    if (!start_stream(window, scrcpy, renderer, tcp_device->id)) {
+    if (!start_stream(window, scrcpy, renderer, input, tcp_device->id)) {
         clear_setup_state();
         return false;
     }
@@ -370,6 +372,7 @@ bool start_stream(
     pm::window::IWindow& window,
     pm::stream::ScrcpyClient& scrcpy,
     pm::stream::VideoRenderer& renderer,
+    pm::input::InputHandler& input,
     const std::string& device_id
 ) {
     window.set_status_text("Starte Video-Stream...");
@@ -380,8 +383,8 @@ bool start_stream(
     scrcpy.set_frame_callback([&](AVFrame* frame) {
         renderer.render_frame(frame);
     });
-    window.set_render_callback([&]() {
-        renderer.render_frame(nullptr);
+    window.set_render_callback([&](void* hdc, int x, int y, int w, int h) {
+        renderer.paint(hdc, x, y, w, h);
     });
 
     if (!scrcpy.start(config)) {
@@ -390,6 +393,9 @@ bool start_stream(
         return false;
     }
 
+    input.set_device_size(scrcpy.video_width(), scrcpy.video_height());
+    window.set_aspect_ratio((double)scrcpy.video_width() / (double)scrcpy.video_height());
+    window.set_orientation(scrcpy.video_width() > scrcpy.video_height());
     window.set_app_state(pm::window::AppState::STREAMING);
     return true;
 }
@@ -418,6 +424,12 @@ static int app_main() {
     pm::stream::ScrcpyClient scrcpy;
     pm::stream::VideoRenderer renderer;
     pm::input::InputHandler input(&scrcpy);
+    window->set_video_viewport_callback([&](int x, int y, int w, int h) {
+        renderer.update_viewport(x, y, w, h);
+    });
+    window->set_pointer_callback([&](pm::window::PointerAction action, int x, int y, int w, int h) {
+        input.handle_pointer(action, x, y, w, h);
+    });
     std::thread connection_thread;
     std::atomic<bool> connection_running{false};
     const std::string client_name = get_client_name();
@@ -459,7 +471,7 @@ static int app_main() {
 
             SetupState setup_state = load_setup_state();
             if (!setup_state.configured) {
-                run_first_time_setup(adb, *window, scrcpy, renderer, should_stop);
+                run_first_time_setup(adb, *window, scrcpy, renderer, input, should_stop);
                 return;
             }
 
@@ -482,7 +494,7 @@ static int app_main() {
             window->set_app_state(pm::window::AppState::CONNECTED);
             window->set_status_text(setup_state.device_name.empty() ? "Verbunden" : setup_state.device_name);
             std::this_thread::sleep_for(std::chrono::seconds(1));
-            if (!start_stream(*window, scrcpy, renderer, tcp_device->id) && !should_stop) {
+            if (!start_stream(*window, scrcpy, renderer, input, tcp_device->id) && !should_stop) {
                 window->set_app_state(pm::window::AppState::SETUP);
                 window->set_status_text("Stream fehlgeschlagen.");
             }

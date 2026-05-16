@@ -23,8 +23,8 @@ class ScrcpyClient {
 public:
     struct Config {
         std::string device_id;
-        int max_size = 1920;
-        int video_bit_rate = 8000000;
+        int max_size = 0;
+        int video_bit_rate = 20000000;
         int max_fps = 60;
         bool audio = false; 
         bool control = true;
@@ -38,6 +38,8 @@ public:
     bool start(const Config& config);
     void stop();
     bool is_running() const;
+    int video_width() const { return static_cast<int>(initial_width_); }
+    int video_height() const { return static_cast<int>(initial_height_); }
 
     // Callbacks
     using FrameCallback = std::function<void(AVFrame* frame)>;

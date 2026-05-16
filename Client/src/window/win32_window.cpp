@@ -14,6 +14,7 @@ namespace {
     const int BUBBLE_H = 36;
     const int BUBBLE_GAP = 6;
     const int MIN_PHONE_W = 140;
+    const UINT WM_VIDEO_RENDER = WM_APP + 2;
     const wchar_t* ICON_DRAG = L"\uE700";
     const wchar_t* ICON_MINIMIZE = L"\uE921";
     const wchar_t* ICON_MAXIMIZE = L"\uE922";
@@ -43,7 +44,10 @@ Win32Window::~Win32Window() {
     if (hwnd_) DestroyWindow(hwnd_);
 }
 
-void Win32Window::set_app_state(AppState s) { app_state_ = s; if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE); }
+void Win32Window::set_app_state(AppState s) {
+    app_state_ = s;
+    if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
+}
 void Win32Window::set_status_text(const std::string& t) { status_text_ = t; if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE); }
 
 bool Win32Window::create() {
@@ -57,7 +61,7 @@ bool Win32Window::create() {
     wc.lpszClassName = "PixelMirroringWindowClass";
     RegisterClassExA(&wc);
 
-    DWORD style = WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX;
+    DWORD style = WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
     int th = height_ + BUBBLE_H + BUBBLE_GAP;
     hwnd_ = CreateWindowExA(0, wc.lpszClassName, title_.c_str(), style,
         CW_USEDEFAULT, CW_USEDEFAULT, width_, th, nullptr, nullptr, hi, this);
@@ -80,8 +84,30 @@ void Win32Window::process_messages() {
     while (GetMessage(&msg, nullptr, 0, 0)) { TranslateMessage(&msg); DispatchMessage(&msg); }
 }
 
-void Win32Window::set_aspect_ratio(double r) { aspect_ratio_ = r; }
+void Win32Window::set_aspect_ratio(double r) {
+    aspect_ratio_ = r;
+    if (!hwnd_ || r <= 0.0) return;
+
+    RECT cr; GetClientRect(hwnd_, &cr);
+    RECT wr; GetWindowRect(hwnd_, &wr);
+    int phone_h = cr.bottom - cr.top - BUBBLE_H - BUBBLE_GAP;
+    if (phone_h <= 0) return;
+
+    int target_client_w = (std::max)(MIN_PHONE_W, (int)(phone_h * r + 0.5));
+    int frame_extra_w = (wr.right - wr.left) - (cr.right - cr.left);
+    int target_window_w = target_client_w + frame_extra_w;
+    int window_h = wr.bottom - wr.top;
+    int center_x = (wr.left + wr.right) / 2;
+
+    SetWindowPos(hwnd_, nullptr, center_x - target_window_w / 2, wr.top,
+        target_window_w, window_h, SWP_NOZORDER | SWP_NOACTIVATE);
+}
 void Win32Window::set_orientation(bool l) { is_landscape_ = l; is_max_height_ = false; }
+
+void Win32Window::set_video_viewport_callback(std::function<void(int, int, int, int)> cb) {
+    viewport_cb_ = std::move(cb);
+    notify_video_viewport();
+}
 
 void Win32Window::recalc_layout() {
     if (!hwnd_) return;
@@ -107,6 +133,8 @@ void Win32Window::recalc_layout() {
     int px = (rect_phone_.left + rect_phone_.right) / 2;
     int py = rect_phone_.top + (rect_phone_.bottom - rect_phone_.top) * 2 / 3;
     rect_start_btn_ = {px - sbw/2, py - sbh/2, px + sbw/2, py + sbh/2};
+
+    notify_video_viewport();
 }
 
 void Win32Window::update_region() {
@@ -122,6 +150,28 @@ void Win32Window::update_region() {
     CombineRgn(c, br, pr, RGN_OR);
     SetWindowRgn(hwnd_, c, TRUE);
     DeleteObject(br); DeleteObject(pr);
+}
+
+void Win32Window::notify_video_viewport() {
+    if (!viewport_cb_) return;
+
+    int w = rect_phone_.right - rect_phone_.left;
+    int h = rect_phone_.bottom - rect_phone_.top;
+    if (w <= 0 || h <= 0) return;
+
+    viewport_cb_(rect_phone_.left, rect_phone_.top, w, h);
+}
+
+void Win32Window::send_pointer_event(PointerAction action, int x, int y) {
+    if (!pointer_cb_ || app_state_ != AppState::STREAMING) return;
+
+    int w = rect_phone_.right - rect_phone_.left;
+    int h = rect_phone_.bottom - rect_phone_.top;
+    if (w <= 0 || h <= 0) return;
+
+    x = (std::max)(0, (std::min)(x, w - 1));
+    y = (std::max)(0, (std::min)(y, h - 1));
+    pointer_cb_(action, x, y, w, h);
 }
 
 int Win32Window::hit_test_button(POINT pt) {
@@ -257,15 +307,17 @@ void Win32Window::handle_paint() {
         }
     }
 
+    if (app_state_ == AppState::STREAMING && render_cb_) {
+        render_cb_(mem, rect_phone_.left, rect_phone_.top,
+            rect_phone_.right - rect_phone_.left,
+            rect_phone_.bottom - rect_phone_.top);
+    }
+
     BitBlt(hdc, 0, 0, w, h, mem, 0, 0, SRCCOPY);
     SelectObject(mem, old);
     DeleteObject(bmp);
     DeleteDC(mem);
     EndPaint(hwnd_, &ps);
-
-    if (app_state_ == AppState::STREAMING && render_cb_) {
-        render_cb_();
-    }
 }
 
 void Win32Window::draw_setup_screen(Gdiplus::Graphics& g) {
@@ -406,7 +458,7 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
         if (wp == TRUE) return 0;
         break;
     case WM_TIMER:
-        if (wp == 1) InvalidateRect(hwnd_, &rect_phone_, FALSE);
+        if (wp == 1 && app_state_ != AppState::STREAMING) InvalidateRect(hwnd_, &rect_phone_, FALSE);
         return 0;
     case WM_SIZE:
         if (wp != SIZE_MINIMIZED) { recalc_layout(); update_region(); }
@@ -421,6 +473,10 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
         if (btn == 1) ShowWindow(hwnd_, SW_MINIMIZE);
         else if (btn == 2) toggle_max_height();
         else if (btn == 3) PostMessage(hwnd_, WM_CLOSE, 0, 0);
+        else if (app_state_ == AppState::STREAMING && PtInRect(&rect_phone_, pt)) {
+            SetCapture(hwnd_);
+            send_pointer_event(PointerAction::DOWN, pt.x - rect_phone_.left, pt.y - rect_phone_.top);
+        }
         else if (is_start_button_hit(pt) && start_cb_) {
             // Visual feedback — immediately change state
             app_state_ = AppState::SCANNING;
@@ -437,6 +493,10 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_MOUSEMOVE: {
         POINT pt = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        if (app_state_ == AppState::STREAMING && (wp & MK_LBUTTON) != 0 && GetCapture() == hwnd_) {
+            send_pointer_event(PointerAction::MOVE, pt.x - rect_phone_.left, pt.y - rect_phone_.top);
+            return 0;
+        }
         int nh = hit_test_button(pt);
         bool sbh = is_start_button_hit(pt);
         if (nh != hovered_button_ || sbh != start_button_hovered_) {
@@ -448,11 +508,22 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     }
+    case WM_LBUTTONUP: {
+        POINT pt = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        if (app_state_ == AppState::STREAMING && GetCapture() == hwnd_) {
+            send_pointer_event(PointerAction::UP, pt.x - rect_phone_.left, pt.y - rect_phone_.top);
+            ReleaseCapture();
+        }
+        return 0;
+    }
     case WM_MOUSELEAVE:
         if (hovered_button_ != -1 || start_button_hovered_) {
             hovered_button_ = -1; start_button_hovered_ = false;
             InvalidateRect(hwnd_, nullptr, FALSE);
         }
+        return 0;
+    case WM_VIDEO_RENDER:
+        InvalidateRect(hwnd_, &rect_phone_, FALSE);
         return 0;
     case WM_DESTROY: PostQuitMessage(0); return 0;
     case WM_PAINT: handle_paint(); return 0;

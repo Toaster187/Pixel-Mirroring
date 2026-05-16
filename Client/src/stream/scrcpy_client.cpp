@@ -6,6 +6,13 @@
 #include <future>
 #include <chrono>
 #include <cstring>
+#include <cstdlib>
+#include <fstream>
+#include <sstream>
+
+extern "C" {
+#include <libavutil/frame.h>
+}
 
 #ifdef _WIN32
 #pragma comment(lib, "ws2_32.lib")
@@ -20,6 +27,30 @@
 #endif
 
 namespace pm::stream {
+
+namespace {
+void log_stream_event(const std::string& message) {
+    std::cout << message << std::endl;
+
+    std::filesystem::path log_dir;
+#ifdef _WIN32
+    const char* local_app_data = std::getenv("LOCALAPPDATA");
+    if (local_app_data && local_app_data[0] != '\0') {
+        log_dir = std::filesystem::path(local_app_data) / "PixelMirroring";
+    }
+#endif
+    if (log_dir.empty()) {
+        log_dir = pm::adb::get_executable_dir();
+    }
+
+    std::error_code ec;
+    std::filesystem::create_directories(log_dir, ec);
+    std::ofstream file(log_dir / "stream.log", std::ios::app);
+    if (file) {
+        file << message << "\n";
+    }
+}
+}
 
 ScrcpyClient::ScrcpyClient() {
     video_socket_ = INVALID_SOCKET;
@@ -166,9 +197,17 @@ bool ScrcpyClient::start_server_process() {
     cmd += "log_level=info ";
     cmd += "audio=false ";
     cmd += "max_size=" + std::to_string(config_.max_size) + " ";
+    cmd += "video_codec=h264 ";
+    cmd += "video_bit_rate=" + std::to_string(config_.video_bit_rate) + " ";
+    cmd += "max_fps=" + std::to_string(config_.max_fps) + " ";
+    cmd += "control=" + std::string(config_.control ? "true" : "false") + " ";
+    cmd += "send_dummy_byte=false ";
+    cmd += "send_device_meta=false ";
+    cmd += "send_codec_meta=true ";
+    cmd += "send_frame_meta=true ";
     cmd += "tunnel_forward=" + std::string(config_.tunnel_forward ? "true" : "false") + " ";
     
-    std::cout << "[Scrcpy] Executing server: " << cmd << std::endl;
+    log_stream_event("[Scrcpy] Executing server: " + cmd);
     
     // Dies müsste eigentlich asynchron laufen, da app_process blockiert.
     auto ready_promise = std::make_shared<std::promise<bool>>();
@@ -215,11 +254,7 @@ bool ScrcpyClient::connect_sockets() {
         // Retry connecting for up to 5 seconds
         for (int i = 0; i < 50; ++i) {
             if (connect(sock, (sockaddr*)&addr, sizeof(addr)) != SOCKET_ERROR) {
-                // For adb forward, read the dummy byte sent by the server
-                char dummy;
-                if (recv(sock, &dummy, 1, 0) == 1) {
-                    return true;
-                }
+                return true;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
@@ -318,7 +353,20 @@ bool ScrcpyClient::read_metadata() {
     initial_width_ = (codec_meta[4] << 24) | (codec_meta[5] << 16) | (codec_meta[6] << 8) | codec_meta[7];
     initial_height_ = (codec_meta[8] << 24) | (codec_meta[9] << 16) | (codec_meta[10] << 8) | codec_meta[11];
     
-    std::cout << "[Scrcpy] Codec: " << video_codec_id_ << ", Width: " << initial_width_ << ", Height: " << initial_height_ << std::endl;
+    {
+        std::ostringstream oss;
+        oss << "[Scrcpy] Metadata codec=" << video_codec_id_
+            << " size=" << initial_width_ << "x" << initial_height_
+            << " max_size=" << config_.max_size
+            << " bit_rate=" << config_.video_bit_rate
+            << " max_fps=" << config_.max_fps;
+        log_stream_event(oss.str());
+    }
+
+    if (initial_width_ == 0 || initial_height_ == 0) {
+        std::cerr << "[Scrcpy] Invalid video size in metadata" << std::endl;
+        return false;
+    }
 
     return true;
 }
@@ -341,6 +389,7 @@ void ScrcpyClient::video_thread_loop() {
 
     std::vector<uint8_t> packet_data;
     const uint32_t MAX_PACKET_SIZE = 10 * 1024 * 1024; // 10 MB max packet size
+    bool logged_first_frame = false;
 
     while (running_) {
         uint8_t header[12];
@@ -364,7 +413,16 @@ void ScrcpyClient::video_thread_loop() {
         
         if (decoder_.decode(packet_data.data(), size, is_config)) {
             if (frame_cb_) {
-                frame_cb_((AVFrame*)decoder_.get_frame());
+                AVFrame* frame = (AVFrame*)decoder_.get_frame();
+                if (!logged_first_frame && frame) {
+                    std::ostringstream oss;
+                    oss << "[Scrcpy] First decoded frame "
+                        << frame->width << "x" << frame->height
+                        << " format=" << frame->format;
+                    log_stream_event(oss.str());
+                    logged_first_frame = true;
+                }
+                frame_cb_(frame);
             }
         }
     }
@@ -378,44 +436,40 @@ void ScrcpyClient::control_thread_loop() {
 
 void ScrcpyClient::inject_touch(int action, float x, float y, int w, int h) {
     if (!running_ || control_socket_ == INVALID_SOCKET) return;
-    
-    uint8_t buf[34] = {0};
+
+    auto write16 = [](uint8_t* out, uint16_t value) {
+        out[0] = static_cast<uint8_t>((value >> 8) & 0xff);
+        out[1] = static_cast<uint8_t>(value & 0xff);
+    };
+    auto write32 = [](uint8_t* out, uint32_t value) {
+        out[0] = static_cast<uint8_t>((value >> 24) & 0xff);
+        out[1] = static_cast<uint8_t>((value >> 16) & 0xff);
+        out[2] = static_cast<uint8_t>((value >> 8) & 0xff);
+        out[3] = static_cast<uint8_t>(value & 0xff);
+    };
+    auto write64 = [](uint8_t* out, uint64_t value) {
+        for (int i = 0; i < 8; ++i) {
+            out[i] = static_cast<uint8_t>((value >> (56 - i * 8)) & 0xff);
+        }
+    };
+
+    constexpr uint32_t AMOTION_EVENT_BUTTON_PRIMARY = 1;
+    constexpr uint64_t POINTER_ID_MOUSE = 0xffffffffffffffffULL;
+
+    uint8_t buf[32] = {0};
     buf[0] = 2; // SC_CONTROL_MSG_TYPE_INJECT_TOUCH_EVENT
     buf[1] = action; // 0=DOWN, 1=UP, 2=MOVE
-    
-    // pointer_id (8 bytes) = 1
-    buf[9] = 1; 
-    
-    // x (4 bytes)
-    uint32_t px = static_cast<uint32_t>(x);
-    buf[10] = (px >> 24) & 0xff; buf[11] = (px >> 16) & 0xff; buf[12] = (px >> 8) & 0xff; buf[13] = px & 0xff;
-    
-    // y (4 bytes)
-    uint32_t py = static_cast<uint32_t>(y);
-    buf[14] = (py >> 24) & 0xff; buf[15] = (py >> 16) & 0xff; buf[16] = (py >> 8) & 0xff; buf[17] = py & 0xff;
-    
-    // width (2 bytes)
-    buf[18] = (w >> 8) & 0xff; buf[19] = w & 0xff;
-    
-    // height (2 bytes)
-    buf[20] = (h >> 8) & 0xff; buf[21] = h & 0xff;
-    
-    // pressure (4 bytes float)
-    float pressure = 1.0f;
-    uint32_t pressure_bits;
-    std::memcpy(&pressure_bits, &pressure, sizeof(pressure_bits));
-    buf[22] = (pressure_bits >> 24) & 0xff;
-    buf[23] = (pressure_bits >> 16) & 0xff;
-    buf[24] = (pressure_bits >> 8) & 0xff;
-    buf[25] = pressure_bits & 0xff;
-    
-    // action_button (4 bytes)
-    buf[29] = 0;
-    
-    // buttons (4 bytes)
-    buf[33] = 1;
-    
-    send(control_socket_, (const char*)buf, 34, 0);
+
+    write64(buf + 2, POINTER_ID_MOUSE);
+    write32(buf + 10, static_cast<uint32_t>(x));
+    write32(buf + 14, static_cast<uint32_t>(y));
+    write16(buf + 18, static_cast<uint16_t>(w));
+    write16(buf + 20, static_cast<uint16_t>(h));
+    write16(buf + 22, action == 1 ? 0 : 0xffff);
+    write32(buf + 24, action == 0 || action == 1 ? AMOTION_EVENT_BUTTON_PRIMARY : 0);
+    write32(buf + 28, action == 1 ? 0 : AMOTION_EVENT_BUTTON_PRIMARY);
+
+    send(control_socket_, (const char*)buf, sizeof(buf), 0);
 }
 
 void ScrcpyClient::inject_keycode(int action, int keycode) {
