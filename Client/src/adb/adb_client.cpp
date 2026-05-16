@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <thread>
 #include <chrono>
+#include <algorithm>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -57,15 +58,20 @@ std::string get_adb_path() {
     }
 
     std::filesystem::path current = std::filesystem::path(exe_dir);
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 6; ++i) {
         current = current.parent_path();
+        if (current.empty()) break;
         std::filesystem::path check_adb = current / "scrcpy_download" / adb_filename;
         if (std::filesystem::exists(check_adb)) {
             return check_adb.string();
         }
+        std::filesystem::path bundled_adb = current / "platform-tools" / adb_filename;
+        if (std::filesystem::exists(bundled_adb)) {
+            return bundled_adb.string();
+        }
     }
     
-    return "adb"; // fallback to PATH
+    return "adb"; // developer fallback only
 }
 
 bool Device::is_usb() const {
@@ -203,7 +209,7 @@ std::string AdbClient::run_adb_command(const std::vector<std::string>& args) {
     return result;
 }
 
-std::vector<Device> AdbClient::get_connected_devices() {
+std::vector<Device> AdbClient::get_devices() {
     std::vector<Device> devices;
     std::string output = run_adb_command({"devices", "-l"});
     
@@ -222,21 +228,32 @@ std::vector<Device> AdbClient::get_connected_devices() {
         std::string id, state;
         linestream >> id >> state;
 
-        if (state == "device") {
+        if (!id.empty() && !state.empty()) {
             Device dev;
             dev.id = id;
             dev.state = state;
-            
-            // Extract model if available
+
+            // Cave man read model mark from adb stone.
             std::smatch match;
             if (std::regex_search(line, match, std::regex("model:([^\\s]+)"))) {
                 dev.model = match[1].str();
             }
-            
+
             devices.push_back(dev);
         }
     }
     
+    return devices;
+}
+
+std::vector<Device> AdbClient::get_connected_devices() {
+    auto devices = get_devices();
+    devices.erase(
+        std::remove_if(devices.begin(), devices.end(), [](const Device& device) {
+            return device.state != "device";
+        }),
+        devices.end()
+    );
     return devices;
 }
 
@@ -268,6 +285,49 @@ bool AdbClient::connect_device(const std::string& ip, int port) {
         }
     }
     return false;
+}
+
+bool AdbClient::enable_tcpip(const std::string& device_id, int port) {
+    std::string output = run_adb_command({"-s", device_id, "tcpip", std::to_string(port)});
+    if (output.find("restarting in TCP mode") != std::string::npos ||
+        output.find("restarting in TCP") != std::string::npos) {
+        return true;
+    }
+
+    std::cerr << "[ADB] Failed to enable TCP/IP: " << output << std::endl;
+    return false;
+}
+
+bool AdbClient::install_app(const std::string& device_id, const std::string& apk_path) {
+    if (!std::filesystem::exists(apk_path)) {
+        std::cerr << "[ADB] APK not found: " << apk_path << std::endl;
+        return false;
+    }
+
+    std::string output = run_adb_command({"-s", device_id, "install", "-r", "-d", apk_path});
+    if (output.find("Success") != std::string::npos) {
+        return true;
+    }
+
+    std::cerr << "[ADB] App install failed: " << output << std::endl;
+    return false;
+}
+
+bool AdbClient::start_app(const std::string& device_id, const std::string& package_name) {
+    std::string output = run_adb_command({
+        "-s", device_id, "shell", "monkey -p " + package_name + " -c android.intent.category.LAUNCHER 1"
+    });
+    return output.find("Events injected: 1") != std::string::npos ||
+           output.find("monkey aborted") == std::string::npos;
+}
+
+bool AdbClient::start_service(const std::string& device_id, const std::string& service_name) {
+    std::string output = run_adb_command({
+        "-s", device_id, "shell", "am start-foreground-service -n " + service_name
+    });
+    return output.find("Error") == std::string::npos &&
+           output.find("Exception") == std::string::npos &&
+           output.find("not found") == std::string::npos;
 }
 
 std::string AdbClient::execute_shell_command(const std::string& device_id, const std::string& command) {
@@ -435,14 +495,18 @@ bool AdbClient::auto_grant_secure_settings() {
     }
 
     std::cout << "Found USB device: " << usb_device->model << " (" << usb_device->id << ")" << std::endl;
+    return grant_secure_settings(usb_device->id);
+}
+
+bool AdbClient::grant_secure_settings(const std::string& device_id) {
     std::cout << "Granting WRITE_SECURE_SETTINGS..." << std::endl;
 
     std::string output = execute_shell_command(
-        usb_device->id, 
+        device_id,
         "pm grant dev.pixelmirroring.app android.permission.WRITE_SECURE_SETTINGS"
     );
 
-    // Usually ADB returns empty on success for pm grant
+    // Usually ADB returns empty on success for pm grant.
     if (output.find("Exception") != std::string::npos || output.find("Error") != std::string::npos) {
         std::cerr << "Failed to grant permission: " << output << std::endl;
         return false;
@@ -450,6 +514,22 @@ bool AdbClient::auto_grant_secure_settings() {
 
     std::cout << "Permission granted successfully!" << std::endl;
     return true;
+}
+
+std::string AdbClient::get_device_ip(const std::string& device_id) {
+    std::string output = execute_shell_command(device_id, "ip route");
+    std::smatch route_match;
+    if (std::regex_search(output, route_match, std::regex("\\bsrc\\s+([0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+)"))) {
+        return route_match[1].str();
+    }
+
+    output = execute_shell_command(device_id, "ip -f inet addr show wlan0");
+    std::smatch wlan_match;
+    if (std::regex_search(output, wlan_match, std::regex("\\binet\\s+([0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+)/"))) {
+        return wlan_match[1].str();
+    }
+
+    return "";
 }
 
 } // namespace pm::adb

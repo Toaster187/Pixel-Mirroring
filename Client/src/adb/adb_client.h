@@ -35,8 +35,21 @@ public:
     // Returns a list of currently connected devices
     std::vector<Device> get_connected_devices();
 
+    // Cave man sees all phones, even sleepy or not trusted.
+    std::vector<Device> get_devices();
+
     // Connects to a device via TCP/IP
     bool connect_device(const std::string& ip, int port = 5555);
+
+    // Cave man tells ADB daemon to listen on air.
+    bool enable_tcpip(const std::string& device_id, int port = 5555);
+
+    // Cave man puts Android helper APK on phone.
+    bool install_app(const std::string& device_id, const std::string& apk_path);
+
+    // Cave man wakes Android helper app and service.
+    bool start_app(const std::string& device_id, const std::string& package_name);
+    bool start_service(const std::string& device_id, const std::string& service_name);
 
     // Executes a shell command on a specific device
     std::string execute_shell_command(const std::string& device_id, const std::string& command);
@@ -55,6 +68,10 @@ public:
 
     // Automatically finds a USB device and grants WRITE_SECURE_SETTINGS
     bool auto_grant_secure_settings();
+    bool grant_secure_settings(const std::string& device_id);
+
+    // Cave man reads phone IP from Android route stones.
+    std::string get_device_ip(const std::string& device_id);
 
 private:
     std::string run_adb_command(const std::vector<std::string>& args);

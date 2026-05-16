@@ -285,9 +285,9 @@ void Win32Window::draw_setup_screen(Gdiplus::Graphics& g) {
     Gdiplus::Font bodyF(&uiFF, 9, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
     Gdiplus::SolidBrush gray(Gdiplus::Color(255, 160, 160, 160));
     Gdiplus::RectF instrR(px + 20, py + ph * 0.30f, pw - 40, ph * 0.30f);
-    g.DrawString(L"1. \xD6""ffne die Pixel Mirroring App\r\n    auf deinem Android-Ger\xE4t\r\n\r\n"
-                 L"2. Verbinde das Handy per USB\r\n    (nur beim ersten Mal)\r\n\r\n"
-                 L"3. Dr\xFC""cke unten auf \"Verbinden\"",
+    g.DrawString(L"1. USB-Debugging am Handy\r\n    einmal aktivieren\r\n\r\n"
+                 L"2. Handy per USB verbinden\r\n    (nur fuer die Einrichtung)\r\n\r\n"
+                 L"3. Verbinden druecken - die\r\n    Android-App wird installiert",
                  -1, &bodyF, instrR, nullptr, &gray);
 
     // Start button
