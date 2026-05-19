@@ -21,6 +21,12 @@ enum class PointerAction {
     UP
 };
 
+enum class MenuAction {
+    FACTORY_RESET,
+    TOGGLE_FPS_LIMIT,
+    TOGGLE_RESOLUTION_LIMIT
+};
+
 class IWindow {
 public:
     virtual ~IWindow() = default;
@@ -52,6 +58,7 @@ public:
     // Set pointer callback. Handle click and drag in video.
     virtual void set_pointer_callback(std::function<void(PointerAction, int, int, int, int)> cb) = 0;
     
+    
     // Sets the current app state (changes what is drawn in the phone area)
     virtual void set_app_state(AppState state) = 0;
     
@@ -61,6 +68,13 @@ public:
     // Sets a callback for when the user clicks the "Start" button in SETUP state
     virtual void set_start_callback(std::function<void()> cb) = 0;
     virtual void post_task(std::function<void()> task) = 0;
+
+    // Set a callback for context menu actions
+    virtual void set_menu_callback(std::function<void(MenuAction)> cb) = 0;
+
+    // Set checkbox states on the menu options from outside
+    virtual void set_fps_limited(bool limited) = 0;
+    virtual void set_resolution_limited(bool limited) = 0;
 };
 
 // Factory function to create the appropriate window implementation for the current OS.

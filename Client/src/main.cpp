@@ -26,6 +26,7 @@
 #include "stream/video_renderer.h"
 #include "input/input_handler.h"
 #include "network/network_scanner.h"
+#include "settings.h"
 
 namespace {
 constexpr const char* ANDROID_PACKAGE = "dev.pixelmirroring.app";
@@ -207,6 +208,7 @@ std::optional<pm::adb::Device> wait_for_usb_authorization(
     pm::window::IWindow& window,
     std::atomic<bool>& should_stop
 ) {
+    bool requested_reconnect = false;
     for (int i = 0; i < 60 && !should_stop; ++i) {
         auto devices = adb.get_devices();
         if (auto ready = find_usb_device(devices, "device")) {
@@ -216,9 +218,14 @@ std::optional<pm::adb::Device> wait_for_usb_authorization(
         auto usb = find_usb_device(devices);
         if (!usb) {
             window.set_status_text("Warte auf USB-Geraet...");
+            requested_reconnect = false; // reset state
         } else {
             if (usb->state == "unauthorized") {
                 window.set_status_text("Bitte USB-Debugging auf dem Handy erlauben.");
+                if (!requested_reconnect) {
+                    adb.reconnect_offline();
+                    requested_reconnect = true;
+                }
             } else {
                 window.set_status_text("Warte auf USB-Geraet: " + usb->state);
             }
@@ -397,6 +404,11 @@ bool start_stream(
     pm::stream::ScrcpyClient::Config config;
     config.device_id = device_id;
 
+    // MEOW. WELD SETTINGS TO CONFIG.
+    pm::Settings settings = pm::load_settings();
+    config.max_fps = settings.max_fps;
+    config.max_size = settings.max_size;
+
     if (!renderer.init(window.get_native_handle())) {
         window.post_task([&window]() {
             window.set_app_state(pm::window::AppState::SETUP);
@@ -456,6 +468,40 @@ static int app_main() {
     window->set_aspect_ratio(340.0 / 604.0);
     window->set_app_state(pm::window::AppState::SETUP);
     window->set_status_text("");
+
+    // MEOW. INITIAL LOAD SETTINGS AND SYNCHRONIZE CHECKBOXES.
+    pm::Settings initial_settings = pm::load_settings();
+    window->set_fps_limited(initial_settings.max_fps == 30);
+    window->set_resolution_limited(initial_settings.max_size == 720);
+
+    // MEOW. WIRE CONTEXT MENU CALLBACK.
+    window->set_menu_callback([&](pm::window::MenuAction action) {
+        pm::Settings current_settings = pm::load_settings();
+        switch (action) {
+            case pm::window::MenuAction::FACTORY_RESET: {
+                clear_setup_state();
+                std::error_code ec;
+                std::filesystem::remove(get_client_id_path(), ec);
+                window->post_task([w = window.get()]() {
+                    w->set_app_state(pm::window::AppState::SETUP);
+                    w->set_status_text("Werkseinstellungen gesetzt.");
+                });
+                break;
+            }
+            case pm::window::MenuAction::TOGGLE_FPS_LIMIT: {
+                current_settings.max_fps = (current_settings.max_fps == 30) ? 60 : 30;
+                pm::save_settings(current_settings);
+                window->set_fps_limited(current_settings.max_fps == 30);
+                break;
+            }
+            case pm::window::MenuAction::TOGGLE_RESOLUTION_LIMIT: {
+                current_settings.max_size = (current_settings.max_size == 720) ? 0 : 720;
+                pm::save_settings(current_settings);
+                window->set_resolution_limited(current_settings.max_size == 720);
+                break;
+            }
+        }
+    });
 
     std::atomic<bool> should_stop{false};
     pm::stream::ScrcpyClient scrcpy;

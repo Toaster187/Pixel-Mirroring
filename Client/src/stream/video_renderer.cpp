@@ -44,9 +44,9 @@ void VideoRenderer::render_frame(void* frame) {
         return;
     }
 
-    // Cave man only handle YUV420P — that what scrcpy send
+    // Cave man only handle YUV420P or YUVJ420P — that what scrcpy send
     // Other formats = no good, skip
-    if (av_frame->format != 0 /* AV_PIX_FMT_YUV420P */) {
+    if (av_frame->format != 0 /* AV_PIX_FMT_YUV420P */ && av_frame->format != 12 /* AV_PIX_FMT_YUVJ420P */) {
         std::cerr << "[Renderer] Unsupported pixel format: " << av_frame->format << std::endl;
         return;
     }

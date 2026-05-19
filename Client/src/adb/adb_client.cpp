@@ -242,8 +242,11 @@ std::vector<Device> AdbClient::get_devices() {
             devices.push_back(dev);
         }
     }
-    
     return devices;
+}
+
+void AdbClient::reconnect_offline() {
+    run_adb_command({"reconnect", "offline"});
 }
 
 std::vector<Device> AdbClient::get_connected_devices() {

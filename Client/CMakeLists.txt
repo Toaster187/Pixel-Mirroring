@@ -24,6 +24,8 @@ endif()
 
 add_executable(PixelMirroring
     src/main.cpp
+    src/settings.h
+    src/settings.cpp
     src/adb/adb_client.cpp
     src/network/network_scanner.cpp
     # src/adb/device_manager.cpp

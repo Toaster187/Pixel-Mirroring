@@ -89,6 +89,16 @@ bool VideoDecoder::decode(const uint8_t* data, size_t size, bool) {
     bool got_frame = false;
     while (true) {
         ret = avcodec_receive_frame(codec_ctx_, frame_);
+        if (ret == 0) {
+            // Cave man got frame! Break loop, keep frame in frame_ so next receive not kill it!
+            if (frame_->width != last_width_ || frame_->height != last_height_) {
+                last_width_ = frame_->width;
+                last_height_ = frame_->height;
+                resolution_changed_ = true;
+            }
+            got_frame = true;
+            break;
+        }
         if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
             break;
         }
@@ -96,13 +106,6 @@ bool VideoDecoder::decode(const uint8_t* data, size_t size, bool) {
             log_ffmpeg_error("[Decoder] Could not receive frame", ret);
             break;
         }
-
-        if (frame_->width != last_width_ || frame_->height != last_height_) {
-            last_width_ = frame_->width;
-            last_height_ = frame_->height;
-            resolution_changed_ = true;
-        }
-        got_frame = true;
     }
 
     return got_frame;

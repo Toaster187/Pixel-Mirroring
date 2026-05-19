@@ -38,6 +38,9 @@ public:
     // Cave man sees all phones, even sleepy or not trusted.
     std::vector<Device> get_devices();
 
+    // Forces offline/unauthorized devices to reconnect to trigger prompt
+    void reconnect_offline();
+
     // Connects to a device via TCP/IP
     bool connect_device(const std::string& ip, int port = 5555);
 
