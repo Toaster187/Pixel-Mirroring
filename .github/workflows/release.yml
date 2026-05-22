@@ -112,7 +112,8 @@ jobs:
             Client/build/PixelMirroring-*.zip
             Client/build/PixelMirroring-*.exe
             Client/build/PixelMirroring-*.msi
-          draft: true
+          draft: false
           prerelease: false
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
