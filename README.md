@@ -201,6 +201,27 @@ Pixel-Mirroring/
 
 ---
 
-## 📜 Lizenz
+## 📜 Lizenz & Open-Source-Konformität
 
-Siehe [LICENSE](./LICENSE) für Details.
+Dieses Projekt ist als Open Source unter den Bedingungen der **Apache License 2.0** lizenziert. Der vollständige Hauptlizenztext ist in der Datei [LICENSE](./LICENSE) zu finden.
+
+Da das Projekt verschiedene Drittanbieter-Bibliotheken und Binärdateien verwendet (darunter SDL2, FFmpeg und die Android Platform Tools), wurde ein detailliertes Lizenzverzeichnis erstellt, um alle rechtlichen Anforderungen (z.B. Attributionen, Copyright-Hinweise und LGPL-Dynamic-Linking-Konformität) lückenlos zu erfüllen.
+
+Eine vollständige Liste aller Abhängigkeiten, ihrer jeweiligen Lizenzen und der geforderten Lizenztexte findest du in der ausführlichen Lizenzdokumentation:
+
+👉 **[LICENSE.md](./LICENSE.md)**
+
+### Übersicht der Hauptabhängigkeiten
+
+| Komponente | Lizenz | Verwendung |
+| :--- | :--- | :--- |
+| **Pixel Mirroring Client** | Apache 2.0 | Desktop C++ Client (Windows / macOS) |
+| **Pixel Mirroring App** | Apache 2.0 | Companion Android App (Kotlin / Compose) |
+| **FFmpeg** | LGPL v2.1+ | Hardware-beschleunigte Video-Dekodierung |
+| **SDL2** | zlib | Window-Management & Stream-Rendering |
+| **nlohmann-json** | MIT | Konfigurations-Parsing (JSON) |
+| **cpp-httplib** | MIT | Lokaler Netzwerk-Scan (Discovery) |
+| **Android Platform Tools** | Apache 2.0 | ADB-Kommunikation und APK-Setup |
+| **scrcpy-server** | Apache 2.0 | Offizieller scrcpy Video-Stream-Server |
+
+*Weitere Details zur Lizenzkonformität und rechtliche Disclaimer befinden sich direkt in [LICENSE.md](./LICENSE.md).*
