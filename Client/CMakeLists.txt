@@ -167,6 +167,16 @@ add_custom_command(TARGET PixelMirroring POST_BUILD
     COMMENT "Copy runtime DLLs next to desktop client"
 )
 
+if(DEFINED VCPKG_TARGET_TRIPLET)
+    # Ensure FFmpeg and other DLLs that might not be picked up by TARGET_RUNTIME_DLLS are copied
+    add_custom_command(TARGET PixelMirroring POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/bin"
+            "$<TARGET_FILE_DIR:PixelMirroring>"
+        COMMENT "Copy all vcpkg DLLs next to desktop client"
+    )
+endif()
+
 if(WIN32)
     # Required for custom window frame and GDI drawing on Windows
     target_link_libraries(PixelMirroring PRIVATE dwmapi uxtheme gdi32 gdiplus user32)
@@ -189,6 +199,13 @@ install(TARGETS PixelMirroring
 install(FILES $<TARGET_RUNTIME_DLLS:PixelMirroring>
     DESTINATION .
 )
+
+if(DEFINED VCPKG_TARGET_TRIPLET)
+    install(DIRECTORY "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/bin/"
+        DESTINATION .
+        FILES_MATCHING PATTERN "*.dll"
+    )
+endif()
 
 # Install companion Android APK from build target dir if it exists
 install(FILES "$<TARGET_FILE_DIR:PixelMirroring>/PixelMirroring.apk"
