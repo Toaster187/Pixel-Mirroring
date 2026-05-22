@@ -186,7 +186,7 @@
       same "printed page" as the copyright notice for easier
       identification within third-party archives.
 
-   Copyright [yyyy] [name of copyright owner]
+   Copyright 2026 Pixel Mirroring Contributors
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -199,3 +199,142 @@
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
    limitations under the License.
+
+
+========================================================================
+LIZENZEN UND DRITTANBIETER-KONFORMITÄT (THIRD-PARTY LICENSES)
+========================================================================
+
+Dieses Softwareprojekt (Pixel Mirroring) enthält und verlinkt verschiedene 
+Drittanbieter-Komponenten unter unterschiedlichen Open-Source-Lizenzen. 
+Nachfolgend sind alle verwendeten Abhängigkeiten, deren Lizenzen und 
+Konformitätsanforderungen dokumentiert.
+
+------------------------------------------------------------------------
+1. Desktop-Client (C++20) Abhängigkeiten
+------------------------------------------------------------------------
+
+A. SDL2 (Simple DirectMedia Layer)
+* Verwendung: Hardware-beschleunigtes Rendering und Event-Handling.
+* Lizenz: zlib License
+* Copyright: Copyright (C) 1997-2023 Sam Lantinga <slouken@libsdl.org>
+* Lizenztext:
+  This software is provided 'as-is', without any express or implied warranty. 
+  In no event will the authors be held liable for any damages arising from the 
+  use of this software.
+
+  Permission is granted to anyone to use this software for any purpose, 
+  including commercial applications, and to alter it and redistribute it 
+  freely, subject to the following restrictions:
+
+  1. The origin of this software must not be misrepresented; you must not 
+     claim that you wrote the original software. If you use this software 
+     in a product, an acknowledgment in the product documentation would be 
+     appreciated but is not required.
+  2. Altered source versions must be plainly marked as such, and must not be 
+     misrepresented as being the original software.
+  3. This notice may not be removed or altered from any source distribution.
+
+B. FFmpeg (libavcodec, libavformat, libavutil, etc.)
+* Verwendung: Dekodierung des H.264/H.265-Videostreams vom Android-Gerät.
+* Lizenz: GNU Lesser General Public License (LGPL), Version 2.1 oder höher
+* Copyright: Copyright (c) the FFmpeg developers.
+* Einhaltung der LGPL (Konformitäts-Erklärung):
+  1. Dynamische Verlinkung: Der Desktop-Client verlinkt FFmpeg ausschließlich 
+     dynamisch über DLLs (libavcodec.dll, libavformat.dll usw.). Dies stellt 
+     sicher, dass Nutzer die FFmpeg-Bibliotheken durch eigene, kompatible 
+     Versionen ersetzen können (gemäß LGPL v2.1, Sektion 6).
+  2. Unveränderter Code: Es wurden keine Modifikationen am FFmpeg-Quellcode 
+     vorgenommen.
+  3. Quellcode-Verweis: Der Quellcode von FFmpeg ist unter https://ffmpeg.org 
+     frei verfügbar.
+  4. Lizenz-Kopie: Der vollständige Text der LGPL v2.1 ist unter 
+     https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html einsehbar.
+
+C. nlohmann-json
+* Verwendung: JSON-Parsing für Konfigurationsdateien.
+* Lizenz: MIT License
+* Copyright: Copyright (c) 2013-2022 Niels Lohmann <https://nlohmann.me>
+* Lizenztext:
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+
+D. cpp-httplib
+* Verwendung: Subnetz-Scan und Netzwerk-Kommunikation.
+* Lizenz: MIT License
+* Copyright: Copyright (c) 2020 yhirose
+* Lizenztext: (Siehe oben unter C. Der gleiche MIT-Lizenztext gilt für cpp-httplib).
+
+E. Microsoft vcpkg (Git-Submodul)
+* Verwendung: C++ Paketmanager.
+* Lizenz: MIT License
+* Copyright: Copyright (c) Microsoft Corporation. All rights reserved.
+
+------------------------------------------------------------------------
+2. Mitgelieferte Binärdateien & Tools (Bundled Tools)
+------------------------------------------------------------------------
+
+A. Android Platform-Tools (ADB / AdbWinApi / AdbWinUsbApi)
+* Verzeichnis: Client/vendor/platform-tools/
+* Verwendung: ADB-Kommunikation mit dem Smartphone.
+* Lizenz: Apache License, Version 2.0
+* Copyright: Copyright (c) The Android Open Source Project
+* Konformität:
+  Die Platform-Tools enthalten eigene Lizenzen für Subkomponenten. Diese sind 
+  vollständig in der Datei Client/vendor/platform-tools/NOTICE.txt dokumentiert 
+  und werden unverändert im Paket mitgeliefert.
+
+B. scrcpy-server.jar
+* Verzeichnis: scrcpy_download/scrcpy-server.jar
+* Verwendung: Läuft auf dem Android-Gerät zum Video-Streaming.
+* Lizenz: Apache License, Version 2.0
+* Copyright: Copyright (c) Genymobile (Teil des scrcpy-Projekts)
+* Konformität: Dieses Projekt nutzt die offizielle, vorkompilierte 
+  scrcpy-server.jar von Genymobile ohne Änderungen.
+
+------------------------------------------------------------------------
+3. Android Companion-App (Kotlin / Compose) Abhängigkeiten
+------------------------------------------------------------------------
+
+A. AndroidX & Jetpack Compose Bibliotheken
+* Lizenz: Apache License, Version 2.0
+* Copyright: Copyright (c) The Android Open Source Project
+
+B. JetBrains Kotlin Standard-Bibliotheken & Coroutines
+* Lizenz: Apache License, Version 2.0
+* Copyright: Copyright (c) JetBrains s.r.o.
+
+C. Google Material Components for Android
+* Lizenz: Apache License, Version 2.0
+* Copyright: Copyright (c) Google LLC
+
+D. JUnit (Nur zu Testzwecken)
+* Lizenz: Eclipse Public License 1.0 (EPL 1.0)
+* Copyright: Copyright (c) JUnit contributors.
+
+------------------------------------------------------------------------
+4. Rechtlicher Disclaimer (Legal Disclaimer)
+------------------------------------------------------------------------
+
+Dieses Softwareprojekt wird "wie besehen" (AS IS) ohne jegliche ausdrückliche 
+oder implizierte Garantie zur Verfügung gestellt. Die Entwickler übernehmen 
+keinerlei Haftung für direkte, indirekte oder zufällige Schäden, die aus 
+der Nutzung, Installation oder Fehlfunktion dieser Software resultieren.
+
+Die Nutzung von ADB (Android Debug Bridge) und die Aktivierung von USB- 
+bzw. Wireless-Debugging geschehen auf eigene Verantwortung des Benutzers.
