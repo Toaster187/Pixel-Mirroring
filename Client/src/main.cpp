@@ -252,6 +252,8 @@ bool start_stream(
     const std::string& device_id
 );
 
+void unlock_device_if_needed(const std::string& device_id);
+
 std::optional<pm::adb::Device> wait_for_usb_authorization(
     pm::adb::AdbClient& adb,
     pm::window::IWindow& window,
@@ -432,6 +434,7 @@ bool run_first_time_setup(
         window.set_status_text("Verbunden: " + device_ip);
     });
     std::this_thread::sleep_for(std::chrono::seconds(1));
+    unlock_device_if_needed(tcp_device->id);
     if (!start_stream(window, scrcpy, renderer, input, tcp_device->id)) {
         clear_setup_state();
         return false;
@@ -511,6 +514,34 @@ bool start_stream(
     });
     return true;
 }
+
+void unlock_device_if_needed(const std::string& device_id) {
+    pm::Settings settings = pm::load_settings();
+    if (settings.m_pin.empty()) return;
+    
+    pm::adb::AdbClient adb;
+    
+    // Wake screen up
+    adb.execute_shell_command(device_id, "input keyevent 224");
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    
+    // ENTER dismisses fingerprint screen, shows PIN pad
+    adb.execute_shell_command(device_id, "input keyevent 66");
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    
+    // Blast PIN digits fast (KEYCODE_0=7 .. KEYCODE_9=16)
+    for (char c : settings.m_pin) {
+        int keycode = 7 + (c - '0');
+        adb.execute_shell_command(device_id, "input keyevent " + std::to_string(keycode));
+    }
+    
+    // Confirm PIN
+    adb.execute_shell_command(device_id, "input keyevent 66");
+    
+    // Wait for unlock animation
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+}
+
 }
 
 static int app_main() {
@@ -610,23 +641,8 @@ static int app_main() {
                 if (device_id.empty()) {
                     break;
                 }
-                std::thread([device_id, pin = current_settings.m_pin]() {
-                    pm::adb::AdbClient adb;
-                    
-                    // Wake up via ADB
-                    adb.execute_shell_command(device_id, "input keyevent WAKEUP");
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-                    
-                    // Swipe up via ADB (robust physical coordinates injection)
-                    adb.execute_shell_command(device_id, "input swipe 500 1500 500 200 300");
-                    std::this_thread::sleep_for(std::chrono::milliseconds(800));
-                    
-                    // Type PIN
-                    adb.execute_shell_command(device_id, "input text " + pin);
-                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-                    
-                    // Enter
-                    adb.execute_shell_command(device_id, "input keyevent 66");
+                std::thread([device_id]() {
+                    unlock_device_if_needed(device_id);
                 }).detach();
                 break;
             }
@@ -755,6 +771,7 @@ static int app_main() {
                 w->set_status_text(name.empty() ? "Verbunden" : name);
             });
             std::this_thread::sleep_for(std::chrono::seconds(1));
+            unlock_device_if_needed(tcp_device->id);
             if (start_stream(*window, scrcpy, renderer, input, tcp_device->id)) {
                 // Parse IP from device ID (e.g. 192.168.1.100:5555)
                 std::string device_ip = tcp_device->id;
