@@ -521,24 +521,24 @@ void unlock_device_if_needed(const std::string& device_id) {
     
     pm::adb::AdbClient adb;
     
-    // Wake screen up
+    // Cave man wake screen
     adb.execute_shell_command(device_id, "input keyevent 224");
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
     
-    // ENTER dismisses fingerprint screen, shows PIN pad
+    // Cave man hit ENTER to dismiss fingerprint, show PIN pad
     adb.execute_shell_command(device_id, "input keyevent 66");
     std::this_thread::sleep_for(std::chrono::milliseconds(800));
     
-    // Blast PIN digits fast (KEYCODE_0=7 .. KEYCODE_9=16)
+    // Cave man blast all PIN digits and final ENTER fast in one single stone throw
+    std::string pin_command = "input keyevent";
     for (char c : settings.m_pin) {
         int keycode = 7 + (c - '0');
-        adb.execute_shell_command(device_id, "input keyevent " + std::to_string(keycode));
+        pin_command += " " + std::to_string(keycode);
     }
+    pin_command += " 66"; // Confirm PIN
+    adb.execute_shell_command(device_id, pin_command);
     
-    // Confirm PIN
-    adb.execute_shell_command(device_id, "input keyevent 66");
-    
-    // Wait for unlock animation
+    // Cave man wait for unlock animation
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 }
 
