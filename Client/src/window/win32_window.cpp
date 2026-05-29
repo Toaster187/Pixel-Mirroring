@@ -151,7 +151,13 @@ bool Win32Window::create() {
     return true;
 }
 
-void Win32Window::show() { ShowWindow(hwnd_, SW_SHOW); UpdateWindow(hwnd_); visible_ = true; }
+void Win32Window::show() {
+    ShowWindow(hwnd_, SW_SHOW);
+    UpdateWindow(hwnd_);
+    visible_ = true;
+    // Cave man force redraw of SDL frame when window shown
+    PostMessage(hwnd_, WM_VIDEO_RENDER, 0, 0);
+}
 void Win32Window::hide() { ShowWindow(hwnd_, SW_HIDE); visible_ = false; }
 bool Win32Window::is_visible() const { return visible_; }
 
@@ -777,11 +783,14 @@ void Win32Window::show_context_menu(POINT pt) {
     constexpr UINT ID_TOGGLE_RES    = 1003;
     constexpr UINT ID_SET_PIN       = 1004;
     constexpr UINT ID_UNLOCK_DEVICE = 1005;
+    constexpr UINT ID_TOGGLE_COMPAT = 1006;
 
     AppendMenuW(menu, MF_STRING, ID_TOGGLE_FPS,
         fps_limited_ ? L"\u2713  FPS begrenzen (30)" : L"    FPS begrenzen (30)");
     AppendMenuW(menu, MF_STRING, ID_TOGGLE_RES,
         resolution_limited_ ? L"\u2713  Aufloesung begrenzen (720p)" : L"    Aufloesung begrenzen (720p)");
+    AppendMenuW(menu, MF_STRING, ID_TOGGLE_COMPAT,
+        compatibility_mode_ ? L"\u2713  Kompatibilitaetsmodus (langsame PIN)" : L"    Kompatibilitaetsmodus (langsame PIN)");
     AppendMenuW(menu, MF_STRING, ID_SET_PIN, L"    PIN zum Entsperren festlegen");
     if (app_state_ == AppState::STREAMING) {
         AppendMenuW(menu, MF_STRING, ID_UNLOCK_DEVICE, L"    Handy entsperren (Strg+U)");
@@ -801,6 +810,7 @@ void Win32Window::show_context_menu(POINT pt) {
         case ID_FACTORY_RESET: action = MenuAction::FACTORY_RESET; break;
         case ID_TOGGLE_FPS:    action = MenuAction::TOGGLE_FPS_LIMIT; break;
         case ID_TOGGLE_RES:    action = MenuAction::TOGGLE_RESOLUTION_LIMIT; break;
+        case ID_TOGGLE_COMPAT: action = MenuAction::TOGGLE_COMPATIBILITY_MODE; break;
         case ID_SET_PIN:       action = MenuAction::SET_PIN; break;
         case ID_UNLOCK_DEVICE: action = MenuAction::UNLOCK_DEVICE; break;
         default: return;

@@ -521,13 +521,39 @@ void unlock_device_if_needed(const std::string& device_id) {
     
     pm::adb::AdbClient adb;
     
+    // Cave man check if phone already open
+    std::string trust_state = adb.execute_shell_command(device_id, "dumpsys trust");
+    size_t current_pos = trust_state.find("(current):");
+    if (current_pos != std::string::npos) {
+        size_t line_end = trust_state.find("\n", current_pos);
+        std::string current_user_line = (line_end == std::string::npos)
+            ? trust_state.substr(current_pos)
+            : trust_state.substr(current_pos, line_end - current_pos);
+        if (current_user_line.find("deviceLocked=0") != std::string::npos) {
+            // Cave man see screen already open, do not key smash!
+            return;
+        }
+    }
+    
+    // Cave man determine delays. Default is 0ms, compat mode is wakeup=400ms, fingerprint=800ms
+    int wakeup_delay = 0;
+    int fingerprint_delay = 0;
+    if (settings.compatibility_mode) {
+        wakeup_delay = 400;
+        fingerprint_delay = 800;
+    }
+    
     // Cave man wake screen
     adb.execute_shell_command(device_id, "input keyevent 224");
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    if (wakeup_delay > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(wakeup_delay));
+    }
     
     // Cave man hit ENTER to dismiss fingerprint, show PIN pad
     adb.execute_shell_command(device_id, "input keyevent 66");
-    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    if (fingerprint_delay > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(fingerprint_delay));
+    }
     
     // Cave man blast all PIN digits and final ENTER fast in one single stone throw
     std::string pin_command = "input keyevent";
@@ -570,6 +596,7 @@ static int app_main() {
     pm::Settings initial_settings = pm::load_settings();
     window->set_fps_limited(initial_settings.max_fps == 30);
     window->set_resolution_limited(initial_settings.max_size == 720);
+    window->set_compatibility_mode(initial_settings.compatibility_mode);
 
     std::atomic<bool> should_stop{false};
     pm::stream::ScrcpyClient scrcpy;
@@ -600,6 +627,12 @@ static int app_main() {
                 current_settings.max_size = (current_settings.max_size == 720) ? 0 : 720;
                 pm::save_settings(current_settings);
                 window->set_resolution_limited(current_settings.max_size == 720);
+                break;
+            }
+            case pm::window::MenuAction::TOGGLE_COMPATIBILITY_MODE: {
+                current_settings.compatibility_mode = !current_settings.compatibility_mode;
+                pm::save_settings(current_settings);
+                window->set_compatibility_mode(current_settings.compatibility_mode);
                 break;
             }
             case pm::window::MenuAction::SET_PIN: {
@@ -656,10 +689,14 @@ static int app_main() {
                     window->show();
                     if (tray) {
                         tray->hide();
-                        // Wake phone. KEYCODE_WAKEUP 224
+                        // Cave man wake and unlock phone on restore
                         if (scrcpy.is_running()) {
-                            scrcpy.inject_keycode(0, 224); // WAKEUP down
-                            scrcpy.inject_keycode(1, 224); // WAKEUP up
+                            std::string device_id = scrcpy.get_device_id();
+                            if (!device_id.empty()) {
+                                std::thread([device_id]() {
+                                    unlock_device_if_needed(device_id);
+                                }).detach();
+                            }
                         }
                     }
                 }
