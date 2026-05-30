@@ -646,6 +646,13 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
                 }
                 return 0;
             }
+            if (wp == 'L' && (GetKeyState(VK_CONTROL) & 0x8000)) {
+                // Cave man lock screen and turn off light
+                if (menu_cb_) {
+                    menu_cb_(MenuAction::LOCK_DEVICE);
+                }
+                return 0;
+            }
         }
         if (app_state_ == AppState::STREAMING && m_key_cb_) {
             int ak = vk_to_android_keycode(wp);
@@ -793,6 +800,7 @@ void Win32Window::show_context_menu(POINT pt) {
     constexpr UINT ID_UNLOCK_DEVICE = 1005;
     constexpr UINT ID_TOGGLE_COMPAT = 1006;
     constexpr UINT ID_TOGGLE_LOWEST_BRIGHTNESS = 1007;
+    constexpr UINT ID_LOCK_DEVICE   = 1008;
 
     AppendMenuW(menu, MF_STRING, ID_TOGGLE_FPS,
         fps_limited_ ? L"\u2713  FPS begrenzen (30)" : L"    FPS begrenzen (30)");
@@ -805,6 +813,7 @@ void Win32Window::show_context_menu(POINT pt) {
     AppendMenuW(menu, MF_STRING, ID_SET_PIN, L"    PIN zum Entsperren festlegen");
     if (app_state_ == AppState::STREAMING) {
         AppendMenuW(menu, MF_STRING, ID_UNLOCK_DEVICE, L"    Handy entsperren (Strg+U)");
+        AppendMenuW(menu, MF_STRING, ID_LOCK_DEVICE,   L"    Handy sperren & Bildschirm aus (Strg+L)");
     }
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, ID_FACTORY_RESET, L"    Werkseinstellungen zuruecksetzen");
@@ -825,6 +834,7 @@ void Win32Window::show_context_menu(POINT pt) {
         case ID_TOGGLE_LOWEST_BRIGHTNESS: action = MenuAction::TOGGLE_LOWEST_BRIGHTNESS; break;
         case ID_SET_PIN:       action = MenuAction::SET_PIN; break;
         case ID_UNLOCK_DEVICE: action = MenuAction::UNLOCK_DEVICE; break;
+        case ID_LOCK_DEVICE:   action = MenuAction::LOCK_DEVICE; break;
         default: return;
     }
     if (menu_cb_) menu_cb_(action);

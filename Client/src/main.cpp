@@ -791,6 +791,21 @@ static int app_main() {
                 }).detach();
                 break;
             }
+            case pm::window::MenuAction::LOCK_DEVICE: {
+                if (!scrcpy.is_running()) {
+                    break;
+                }
+                std::string device_id = scrcpy.get_device_id();
+                if (device_id.empty()) {
+                    break;
+                }
+                std::thread([device_id]() {
+                    // Cave man lock screen and turn off light
+                    pm::adb::AdbClient adb;
+                    adb.execute_shell_command(device_id, "input keyevent 223");
+                }).detach();
+                break;
+            }
         }
     });
 
