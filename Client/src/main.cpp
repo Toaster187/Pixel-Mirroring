@@ -298,6 +298,7 @@ std::optional<pm::adb::Device> wait_for_usb_authorization(
     std::atomic<bool>& should_stop
 ) {
     bool requested_reconnect = false;
+    int no_device_seconds = 0;
     for (int i = 0; i < 60 && !should_stop; ++i) {
         auto devices = adb.get_devices();
         if (auto ready = find_usb_device(devices, "device")) {
@@ -306,17 +307,25 @@ std::optional<pm::adb::Device> wait_for_usb_authorization(
 
         auto usb = find_usb_device(devices);
         if (!usb) {
-            window.set_status_text("Warte auf USB-Geraet...");
+            window.post_task([&window]() { window.set_status_text("Warte auf USB-Geraet..."); });
             requested_reconnect = false; // reset state
+            no_device_seconds++;
+            if (no_device_seconds >= 10) {
+                // Break early if no USB device connected for 10 seconds
+                std::cerr << "[ADB] No USB device detected for 10s, aborting setup." << std::endl;
+                break;
+            }
         } else {
+            no_device_seconds = 0; // reset counter since device is present
             if (usb->state == "unauthorized") {
-                window.set_status_text("Bitte USB-Debugging auf dem Handy erlauben.");
+                window.post_task([&window]() { window.set_status_text("Bitte USB-Debugging auf dem Handy erlauben."); });
                 if (!requested_reconnect) {
                     adb.reconnect_offline();
                     requested_reconnect = true;
                 }
             } else {
-                window.set_status_text("Warte auf USB-Geraet: " + usb->state);
+                std::string usb_state = usb->state;
+                window.post_task([&window, usb_state]() { window.set_status_text("Warte auf USB-Geraet: " + usb_state); });
             }
         }
 
@@ -375,7 +384,7 @@ bool run_first_time_setup(
     auto usb_device = wait_for_usb_authorization(adb, window, should_stop);
     if (!usb_device || should_stop) {
         window.post_task([&window]() {
-            window.set_app_state(pm::window::AppState::SCANNING);
+            window.set_app_state(pm::window::AppState::SETUP);
             window.set_status_text("Kein USB-Geraet bereit. Bitte erneut verbinden.");
         });
         return false;
@@ -389,7 +398,7 @@ bool run_first_time_setup(
         auto apk_path = find_android_apk();
         if (!apk_path) {
             window.post_task([&window]() {
-                window.set_app_state(pm::window::AppState::SCANNING);
+                window.set_app_state(pm::window::AppState::SETUP);
                 window.set_status_text("Android-App fehlt im PC-Paket. Bitte APK manuell installieren.");
             });
             return false;
@@ -397,7 +406,7 @@ bool run_first_time_setup(
 
         if (!adb.install_app(usb_device->id, apk_path->string())) {
             window.post_task([&window]() {
-                window.set_app_state(pm::window::AppState::SCANNING);
+                window.set_app_state(pm::window::AppState::SETUP);
                 window.set_status_text("Android-App konnte nicht installiert werden.");
             });
             return false;
@@ -413,7 +422,7 @@ bool run_first_time_setup(
         window.post_task([&window]() { window.set_status_text("Berechtigungen werden gesetzt..."); });
         if (!adb.grant_secure_settings(usb_device->id)) {
             window.post_task([&window]() {
-                window.set_app_state(pm::window::AppState::SCANNING);
+                window.set_app_state(pm::window::AppState::SETUP);
                 window.set_status_text("WRITE_SECURE_SETTINGS konnte nicht gesetzt werden.");
             });
             return false;
@@ -429,7 +438,7 @@ bool run_first_time_setup(
     const std::string device_ip = adb.get_device_ip(usb_device->id);
     if (device_ip.empty()) {
         window.post_task([&window]() {
-            window.set_app_state(pm::window::AppState::SCANNING);
+            window.set_app_state(pm::window::AppState::SETUP);
             window.set_status_text("Keine WLAN-IP gefunden. Bitte WLAN pruefen.");
         });
         return false;
@@ -438,7 +447,7 @@ bool run_first_time_setup(
     window.post_task([&window]() { window.set_status_text("ADB ueber WLAN wird aktiviert..."); });
     if (!adb.enable_tcpip(usb_device->id, ADB_TCP_PORT)) {
         window.post_task([&window]() {
-            window.set_app_state(pm::window::AppState::SCANNING);
+            window.set_app_state(pm::window::AppState::SETUP);
             window.set_status_text("WLAN-ADB konnte nicht aktiviert werden.");
         });
         return false;
@@ -448,7 +457,7 @@ bool run_first_time_setup(
     window.post_task([&window, device_ip]() { window.set_status_text("Verbinde mit " + device_ip + "..."); });
     if (!adb.connect_device(device_ip, ADB_TCP_PORT)) {
         window.post_task([&window]() {
-            window.set_app_state(pm::window::AppState::SCANNING);
+            window.set_app_state(pm::window::AppState::SETUP);
             window.set_status_text("ADB-Verbindung per WLAN fehlgeschlagen.");
         });
         return false;
@@ -457,7 +466,7 @@ bool run_first_time_setup(
     auto tcp_device = wait_for_tcp_device(adb, device_ip, should_stop);
     if (!tcp_device || should_stop) {
         window.post_task([&window]() {
-            window.set_app_state(pm::window::AppState::SCANNING);
+            window.set_app_state(pm::window::AppState::SETUP);
             window.set_status_text("WLAN-ADB ist noch nicht bereit.");
         });
         return false;
@@ -539,7 +548,7 @@ bool start_stream(
 
     if (!renderer.init(window.get_native_handle())) {
         window.post_task([&window]() {
-            window.set_app_state(pm::window::AppState::SCANNING);
+            window.set_app_state(pm::window::AppState::SETUP);
             window.set_status_text("Stream-Fehler: Renderer init fehlgeschlagen.");
         });
         return false;
@@ -552,8 +561,10 @@ bool start_stream(
     });
 
     if (!scrcpy.start(config)) {
-        window.set_app_state(pm::window::AppState::SCANNING);
-        window.set_status_text("Stream konnte nicht gestartet werden.");
+        window.post_task([&window]() {
+            window.set_app_state(pm::window::AppState::SETUP);
+            window.set_status_text("Stream konnte nicht gestartet werden.");
+        });
         return false;
     }
 
@@ -561,7 +572,7 @@ bool start_stream(
     int h = scrcpy.video_height();
     if (w <= 0 || h <= 0) {
         window.post_task([&window]() {
-            window.set_app_state(pm::window::AppState::SCANNING);
+            window.set_app_state(pm::window::AppState::SETUP);
             window.set_status_text("Stream-Fehler: Ungueltige Video-Dimensionen.");
         });
         scrcpy.stop();
@@ -947,7 +958,7 @@ static int app_main() {
             );
             if (!tcp_device || should_stop) {
                 window->post_task([w = window.get(), automatic]() {
-                    w->set_app_state(pm::window::AppState::SCANNING);
+                    w->set_app_state(pm::window::AppState::SETUP);
                     w->set_status_text(automatic
                         ? "Geraet nicht erreichbar. Verbinden fuer erneuten Versuch."
                         : "Geraet nicht erreichbar. USB nur fuer Neueinrichtung.");
@@ -1044,7 +1055,7 @@ static int app_main() {
                 });
             } else if (!should_stop) {
                 window->post_task([w = window.get()]() {
-                    w->set_app_state(pm::window::AppState::SCANNING);
+                    w->set_app_state(pm::window::AppState::SETUP);
                     w->set_status_text("Stream fehlgeschlagen.");
                 });
             }

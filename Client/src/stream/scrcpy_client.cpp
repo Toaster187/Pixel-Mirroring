@@ -243,7 +243,7 @@ bool ScrcpyClient::start_server_process() {
         if (running_) {
             std::cerr << "[Scrcpy] Server process exited unexpectedly!" << std::endl;
             if (disconnect_cb_) {
-                disconnect_cb_(DisconnectReason::SERVER_DIED);
+                disconnect_cb_(DisconnectReason::SC_SERVER_DIED);
             }
         }
     });
@@ -433,7 +433,7 @@ void ScrcpyClient::video_thread_loop() {
     if (!decoder_.init(video_codec_id_)) {
         std::cerr << "[Scrcpy] Failed to initialize decoder" << std::endl;
         if (running_ && disconnect_cb_) {
-            disconnect_cb_(DisconnectReason::SOCKET_ERROR);
+            disconnect_cb_(DisconnectReason::SC_SOCKET_ERROR);
         }
         return;
     }
@@ -515,25 +515,25 @@ void ScrcpyClient::video_thread_loop() {
 
     if (running_ && disconnect_cb_) {
         if (packet_error) {
-            disconnect_cb_(DisconnectReason::PACKET_TOO_LARGE);
+            disconnect_cb_(DisconnectReason::SC_PACKET_TOO_LARGE);
         } else if (socket_error) {
 #ifdef _WIN32
             int err = WSAGetLastError();
             if (err == WSAETIMEDOUT) {
-                disconnect_cb_(DisconnectReason::TIMEOUT);
+                disconnect_cb_(DisconnectReason::SC_TIMEOUT);
             } else {
-                disconnect_cb_(DisconnectReason::SOCKET_ERROR);
+                disconnect_cb_(DisconnectReason::SC_SOCKET_ERROR);
             }
 #else
             int err = errno;
             if (err == EAGAIN || err == EWOULDBLOCK) {
-                disconnect_cb_(DisconnectReason::TIMEOUT);
+                disconnect_cb_(DisconnectReason::SC_TIMEOUT);
             } else {
-                disconnect_cb_(DisconnectReason::SOCKET_ERROR);
+                disconnect_cb_(DisconnectReason::SC_SOCKET_ERROR);
             }
 #endif
         } else {
-            disconnect_cb_(DisconnectReason::SOCKET_ERROR);
+            disconnect_cb_(DisconnectReason::SC_SOCKET_ERROR);
         }
     }
 }
@@ -581,7 +581,7 @@ void ScrcpyClient::inject_touch(int action, float x, float y, int w, int h) {
 
     if (send(control_socket_, (const char*)buf, sizeof(buf), 0) == SOCKET_ERROR) {
         if (running_ && disconnect_cb_) {
-            disconnect_cb_(DisconnectReason::SOCKET_ERROR);
+            disconnect_cb_(DisconnectReason::SC_SOCKET_ERROR);
         }
     }
 }
@@ -605,7 +605,7 @@ void ScrcpyClient::inject_keycode(int action, int keycode) {
     
     if (send(control_socket_, (const char*)buf, 14, 0) == SOCKET_ERROR) {
         if (running_ && disconnect_cb_) {
-            disconnect_cb_(DisconnectReason::SOCKET_ERROR);
+            disconnect_cb_(DisconnectReason::SC_SOCKET_ERROR);
         }
     }
 }
@@ -649,7 +649,7 @@ void ScrcpyClient::inject_scroll(float x, float y, int w, int h, float hscroll, 
 
     if (send(control_socket_, (const char*)buf, sizeof(buf), 0) == SOCKET_ERROR) {
         if (running_ && disconnect_cb_) {
-            disconnect_cb_(DisconnectReason::SOCKET_ERROR);
+            disconnect_cb_(DisconnectReason::SC_SOCKET_ERROR);
         }
     }
 }
@@ -673,7 +673,7 @@ void ScrcpyClient::inject_text(const std::string& text) {
 
     if (send(control_socket_, (const char*)buf.data(), static_cast<int>(buf.size()), 0) == SOCKET_ERROR) {
         if (running_ && disconnect_cb_) {
-            disconnect_cb_(DisconnectReason::SOCKET_ERROR);
+            disconnect_cb_(DisconnectReason::SC_SOCKET_ERROR);
         }
     }
 }

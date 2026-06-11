@@ -34,10 +34,10 @@ public:
     };
 
     enum class DisconnectReason {
-        SOCKET_ERROR,
-        SERVER_DIED,
-        TIMEOUT,
-        PACKET_TOO_LARGE
+        SC_SOCKET_ERROR,
+        SC_SERVER_DIED,
+        SC_TIMEOUT,
+        SC_PACKET_TOO_LARGE
     };
 
     ScrcpyClient();

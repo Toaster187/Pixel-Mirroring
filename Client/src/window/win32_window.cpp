@@ -452,6 +452,15 @@ void Win32Window::draw_setup_screen(Gdiplus::Graphics& g) {
     Gdiplus::Font btnF(&uiFF, 11, Gdiplus::FontStyleBold, Gdiplus::UnitPoint);
     Gdiplus::SolidBrush btnText(Gdiplus::Color(255, 255, 255, 255));
     g.DrawString(L"Verbinden", -1, &btnF, btnR, &sf, &btnText);
+
+    // If there is an error status, draw it!
+    if (!status_text_.empty()) {
+        Gdiplus::Font sf2(&uiFF, 9, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
+        Gdiplus::SolidBrush redBrush(Gdiplus::Color(255, 255, 100, 100)); // Soft red
+        std::wstring ws(status_text_.begin(), status_text_.end());
+        Gdiplus::RectF sr(px + 20.0f, btnR.GetBottom() + 15.0f, pw - 40.0f, 60.0f);
+        g.DrawString(ws.c_str(), -1, &sf2, sr, &sf, &redBrush);
+    }
 }
 
 void Win32Window::draw_scanning_screen(Gdiplus::Graphics& g) {
@@ -469,32 +478,73 @@ void Win32Window::draw_connected_screen(Gdiplus::Graphics& g) {
     float py = (float)rect_phone_.top;
     float cy = py + ph * 0.45f;
 
-    scan_animation_frame_++;
-    
-    // Modern spinner
-    float radius = 24.0f;
-    Gdiplus::RectF arcRect(px + pw / 2.0f - radius, cy - radius - 30.0f, radius * 2.0f, radius * 2.0f);
-    
-    Gdiplus::Pen bgPen(Gdiplus::Color(255, 40, 40, 40), 4.0f);
-    g.DrawEllipse(&bgPen, arcRect);
-    
-    float angle = fmodf((float)scan_animation_frame_ * 5.0f, 360.0f);
-    Gdiplus::Pen spinnerPen(Gdiplus::Color(255, 60, 150, 255), 4.0f);
-    spinnerPen.SetLineCap(Gdiplus::LineCapRound, Gdiplus::LineCapRound, Gdiplus::DashCapRound);
-    g.DrawArc(&spinnerPen, arcRect, angle - 90.0f, 120.0f);
+    bool is_error_or_prompt = false;
+    if (!status_text_.empty()) {
+        std::string lower = status_text_;
+        for (char& c : lower) {
+            c = (char)std::tolower((unsigned char)c);
+        }
+        if (lower.find("fehlt") != std::string::npos ||
+            lower.find("fehler") != std::string::npos ||
+            lower.find("nicht") != std::string::npos ||
+            lower.find("kein") != std::string::npos ||
+            lower.find("bitte") != std::string::npos ||
+            lower.find("warte") != std::string::npos ||
+            lower.find("fail") != std::string::npos ||
+            lower.find("error") != std::string::npos ||
+            lower.find("verloren") != std::string::npos ||
+            lower.find("unerreichbar") != std::string::npos) {
+            is_error_or_prompt = true;
+        }
+    }
 
     Gdiplus::FontFamily uiFF(L"Segoe UI");
+
+    if (is_error_or_prompt) {
+        // Soft red alert circle with a white "!" in the middle
+        float diameter = 48.0f;
+        Gdiplus::RectF alertRect(px + pw / 2.0f - diameter / 2.0f, cy - diameter - 10.0f, diameter, diameter);
+        
+        Gdiplus::SolidBrush redBrush(Gdiplus::Color(255, 255, 75, 75)); // Soft red
+        g.FillEllipse(&redBrush, alertRect);
+        
+        Gdiplus::Font alertFont(&uiFF, 20, Gdiplus::FontStyleBold, Gdiplus::UnitPoint);
+        Gdiplus::SolidBrush whiteBrush(Gdiplus::Color(255, 255, 255, 255));
+        g.DrawString(L"!", -1, &alertFont, alertRect, &sf, &whiteBrush);
+    } else {
+        scan_animation_frame_++;
+        
+        // Modern spinner
+        float radius = 24.0f;
+        Gdiplus::RectF arcRect(px + pw / 2.0f - radius, cy - radius - 30.0f, radius * 2.0f, radius * 2.0f);
+        
+        Gdiplus::Pen bgPen(Gdiplus::Color(255, 40, 40, 40), 4.0f);
+        g.DrawEllipse(&bgPen, arcRect);
+        
+        float angle = fmodf((float)scan_animation_frame_ * 5.0f, 360.0f);
+        Gdiplus::Pen spinnerPen(Gdiplus::Color(255, 60, 150, 255), 4.0f);
+        spinnerPen.SetLineCap(Gdiplus::LineCapRound, Gdiplus::LineCapRound, Gdiplus::DashCapRound);
+        g.DrawArc(&spinnerPen, arcRect, angle - 90.0f, 120.0f);
+    }
+
     Gdiplus::Font f(&uiFF, 12, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
     Gdiplus::SolidBrush white(Gdiplus::Color(255, 230, 230, 230));
     Gdiplus::RectF r(px, cy + 10.0f, pw, 30);
-    g.DrawString(L"Verbindung wird hergestellt...", -1, &f, r, &sf, &white);
+    if (is_error_or_prompt) {
+        g.DrawString(L"Aktion erforderlich", -1, &f, r, &sf, &white);
+    } else {
+        g.DrawString(L"Verbindung wird hergestellt...", -1, &f, r, &sf, &white);
+    }
 
     if (!status_text_.empty()) {
         Gdiplus::Font sf2(&uiFF, 9, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
-        Gdiplus::SolidBrush gray(Gdiplus::Color(255, 140, 140, 140));
+        Gdiplus::Color textColor = is_error_or_prompt 
+            ? Gdiplus::Color(255, 255, 100, 100)  // Soft red for error/action
+            : Gdiplus::Color(255, 140, 140, 140); // Gray for background progress
+        Gdiplus::SolidBrush statusBrush(textColor);
         std::wstring ws(status_text_.begin(), status_text_.end());
         Gdiplus::RectF sr(px + 10.0f, cy + 40.0f, pw - 20.0f, 60.0f);
-        g.DrawString(ws.c_str(), -1, &sf2, sr, &sf, &gray);
+        g.DrawString(ws.c_str(), -1, &sf2, sr, &sf, &statusBrush);
     }
 }
 
