@@ -19,6 +19,7 @@ extern "C" {
 #else
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #define INVALID_SOCKET -1
@@ -65,6 +66,10 @@ void ScrcpyClient::set_frame_callback(FrameCallback cb) {
     frame_cb_ = std::move(cb);
 }
 
+void ScrcpyClient::set_disconnect_callback(DisconnectCallback cb) {
+    disconnect_cb_ = std::move(cb);
+}
+
 bool ScrcpyClient::start(const Config& config) {
     config_ = config;
     
@@ -82,6 +87,9 @@ bool ScrcpyClient::start(const Config& config) {
     if (!start_server_process()) return false;
     if (!connect_sockets()) return false;
     if (!read_metadata()) return false;
+
+    auto now = std::chrono::steady_clock::now().time_since_epoch();
+    last_interaction_time_ms_ = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
 
     running_ = true;
     
@@ -101,6 +109,7 @@ void ScrcpyClient::stop() {
     
     if (video_thread_.joinable()) video_thread_.join();
     if (control_thread_.joinable()) control_thread_.join();
+    if (server_thread_.joinable()) server_thread_.join();
     
     video_socket_ = INVALID_SOCKET;
     control_socket_ = INVALID_SOCKET;
@@ -118,6 +127,11 @@ void ScrcpyClient::stop() {
 
 bool ScrcpyClient::is_running() const {
     return running_;
+}
+
+void ScrcpyClient::report_user_interaction() {
+    auto now = std::chrono::steady_clock::now().time_since_epoch();
+    last_interaction_time_ms_ = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
 }
 
 bool ScrcpyClient::setup_tunnel() {
@@ -213,7 +227,7 @@ bool ScrcpyClient::start_server_process() {
     auto ready_promise = std::make_shared<std::promise<bool>>();
     auto future = ready_promise->get_future();
     std::string device_id_copy = config_.device_id;
-    std::thread([cmd, device_id_copy, ready_promise]() {
+    server_thread_ = std::thread([this, cmd, device_id_copy, ready_promise]() {
         pm::adb::AdbClient a;
         bool ready_sent = false;
         a.execute_shell_command_async(device_id_copy, cmd, [ready_promise, &ready_sent](const std::string& line) {
@@ -225,11 +239,51 @@ bool ScrcpyClient::start_server_process() {
         if (!ready_sent) {
             try { ready_promise->set_value(false); } catch(...) {}
         }
-    }).detach();
+        
+        if (running_) {
+            std::cerr << "[Scrcpy] Server process exited unexpectedly!" << std::endl;
+            if (disconnect_cb_) {
+                disconnect_cb_(DisconnectReason::SERVER_DIED);
+            }
+        }
+    });
 
     if (future.wait_for(std::chrono::seconds(10)) != std::future_status::ready || !future.get()) {
         std::cerr << "[Scrcpy] Server did not print ready message, proceeding anyway..." << std::endl;
     }
+
+    return true;
+}
+
+static bool configure_socket(SOCKET sock) {
+    if (sock == INVALID_SOCKET) return false;
+
+    // 1. TCP_NODELAY
+    int nodelay = 1;
+    if (setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (const char*)&nodelay, sizeof(nodelay)) == SOCKET_ERROR) {
+        std::cerr << "[Scrcpy] Failed to set TCP_NODELAY" << std::endl;
+    }
+
+    // 2. SO_KEEPALIVE
+    int keepalive = 1;
+    if (setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, (const char*)&keepalive, sizeof(keepalive)) == SOCKET_ERROR) {
+        std::cerr << "[Scrcpy] Failed to set SO_KEEPALIVE" << std::endl;
+    }
+
+    // 3. SO_RCVTIMEO
+#ifdef _WIN32
+    DWORD timeout_ms = 5000;
+    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout_ms, sizeof(timeout_ms)) == SOCKET_ERROR) {
+        std::cerr << "[Scrcpy] Failed to set SO_RCVTIMEO" << std::endl;
+    }
+#else
+    struct timeval tv;
+    tv.tv_sec = 5;
+    tv.tv_usec = 0;
+    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv)) == SOCKET_ERROR) {
+        std::cerr << "[Scrcpy] Failed to set SO_RCVTIMEO" << std::endl;
+    }
+#endif
 
     return true;
 }
@@ -309,22 +363,26 @@ bool ScrcpyClient::connect_sockets() {
             std::cerr << "[Scrcpy] Failed to connect video socket" << std::endl;
             return false;
         }
+        configure_socket(video_socket_);
         if (config_.control) {
             if (!connect_to_port(control_socket_, local_port_)) {
                 std::cerr << "[Scrcpy] Failed to connect control socket" << std::endl;
                 return false;
             }
+            configure_socket(control_socket_);
         }
     } else {
         if (!accept_connection(video_socket_, local_port_)) {
             std::cerr << "[Scrcpy] Failed to accept video socket" << std::endl;
             return false;
         }
+        configure_socket(video_socket_);
         if (config_.control) {
             if (!accept_connection(control_socket_, local_port_)) {
                 std::cerr << "[Scrcpy] Failed to accept control socket" << std::endl;
                 return false;
             }
+            configure_socket(control_socket_);
         }
     }
 
@@ -374,6 +432,9 @@ bool ScrcpyClient::read_metadata() {
 void ScrcpyClient::video_thread_loop() {
     if (!decoder_.init(video_codec_id_)) {
         std::cerr << "[Scrcpy] Failed to initialize decoder" << std::endl;
+        if (running_ && disconnect_cb_) {
+            disconnect_cb_(DisconnectReason::SOCKET_ERROR);
+        }
         return;
     }
 
@@ -390,10 +451,31 @@ void ScrcpyClient::video_thread_loop() {
     std::vector<uint8_t> packet_data;
     const uint32_t MAX_PACKET_SIZE = 10 * 1024 * 1024; // 10 MB max packet size
     bool logged_first_frame = false;
+    bool socket_error = false;
+    bool packet_error = false;
 
     while (running_) {
+        // Apply inactivity frame rate cap (TCP backpressure) to save bandwidth/CPU
+        if (config_.inactivity_pause) {
+            auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()
+            ).count();
+            uint64_t last_int = last_interaction_time_ms_.load();
+            if (now_ms - last_int > 15000) { // 15 seconds of inactivity
+                static uint64_t last_frame_time_ms = 0;
+                if (now_ms - last_frame_time_ms < 500) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    continue;
+                }
+                last_frame_time_ms = now_ms;
+            }
+        }
+
         uint8_t header[12];
-        if (!recv_all((char*)header, 12)) break;
+        if (!recv_all((char*)header, 12)) {
+            socket_error = true;
+            break;
+        }
 
         uint64_t pts = 0;
         for (int i = 0; i < 8; ++i) pts = (pts << 8) | header[i];
@@ -402,6 +484,7 @@ void ScrcpyClient::video_thread_loop() {
         // Validate packet size
         if (size == 0 || size > MAX_PACKET_SIZE) {
             std::cerr << "[Scrcpy] Invalid packet size: " << size << " bytes" << std::endl;
+            packet_error = true;
             break;
         }
 
@@ -409,7 +492,10 @@ void ScrcpyClient::video_thread_loop() {
         bool is_config = (pts & SC_PACKET_FLAG_CONFIG) != 0;
 
         packet_data.resize(size);
-        if (!recv_all((char*)packet_data.data(), size)) break;
+        if (!recv_all((char*)packet_data.data(), size)) {
+            socket_error = true;
+            break;
+        }
         
         if (decoder_.decode(packet_data.data(), size, is_config)) {
             if (frame_cb_) {
@@ -424,6 +510,30 @@ void ScrcpyClient::video_thread_loop() {
                 }
                 frame_cb_(frame);
             }
+        }
+    }
+
+    if (running_ && disconnect_cb_) {
+        if (packet_error) {
+            disconnect_cb_(DisconnectReason::PACKET_TOO_LARGE);
+        } else if (socket_error) {
+#ifdef _WIN32
+            int err = WSAGetLastError();
+            if (err == WSAETIMEDOUT) {
+                disconnect_cb_(DisconnectReason::TIMEOUT);
+            } else {
+                disconnect_cb_(DisconnectReason::SOCKET_ERROR);
+            }
+#else
+            int err = errno;
+            if (err == EAGAIN || err == EWOULDBLOCK) {
+                disconnect_cb_(DisconnectReason::TIMEOUT);
+            } else {
+                disconnect_cb_(DisconnectReason::SOCKET_ERROR);
+            }
+#endif
+        } else {
+            disconnect_cb_(DisconnectReason::SOCKET_ERROR);
         }
     }
 }
@@ -469,7 +579,11 @@ void ScrcpyClient::inject_touch(int action, float x, float y, int w, int h) {
     write32(buf + 24, action == 0 || action == 1 ? AMOTION_EVENT_BUTTON_PRIMARY : 0);
     write32(buf + 28, action == 1 ? 0 : AMOTION_EVENT_BUTTON_PRIMARY);
 
-    send(control_socket_, (const char*)buf, sizeof(buf), 0);
+    if (send(control_socket_, (const char*)buf, sizeof(buf), 0) == SOCKET_ERROR) {
+        if (running_ && disconnect_cb_) {
+            disconnect_cb_(DisconnectReason::SOCKET_ERROR);
+        }
+    }
 }
 
 void ScrcpyClient::inject_keycode(int action, int keycode) {
@@ -489,7 +603,11 @@ void ScrcpyClient::inject_keycode(int action, int keycode) {
     // repeat BE = 0 (buf[6..9])
     // metaState BE = 0 (buf[10..13])
     
-    send(control_socket_, (const char*)buf, 14, 0);
+    if (send(control_socket_, (const char*)buf, 14, 0) == SOCKET_ERROR) {
+        if (running_ && disconnect_cb_) {
+            disconnect_cb_(DisconnectReason::SOCKET_ERROR);
+        }
+    }
 }
 
 void ScrcpyClient::inject_scroll(float x, float y, int w, int h, float hscroll, float vscroll) {
@@ -529,7 +647,11 @@ void ScrcpyClient::inject_scroll(float x, float y, int w, int h, float hscroll, 
     // buttons = 0 (4 bytes)
     write32(buf + 17, 0);
 
-    send(control_socket_, (const char*)buf, sizeof(buf), 0);
+    if (send(control_socket_, (const char*)buf, sizeof(buf), 0) == SOCKET_ERROR) {
+        if (running_ && disconnect_cb_) {
+            disconnect_cb_(DisconnectReason::SOCKET_ERROR);
+        }
+    }
 }
 
 void ScrcpyClient::inject_text(const std::string& text) {
@@ -549,7 +671,11 @@ void ScrcpyClient::inject_text(const std::string& text) {
     write32(buf.data() + 1, len);
     std::memcpy(buf.data() + 5, text.data(), len);
 
-    send(control_socket_, (const char*)buf.data(), static_cast<int>(buf.size()), 0);
+    if (send(control_socket_, (const char*)buf.data(), static_cast<int>(buf.size()), 0) == SOCKET_ERROR) {
+        if (running_ && disconnect_cb_) {
+            disconnect_cb_(DisconnectReason::SOCKET_ERROR);
+        }
+    }
 }
 
 } // namespace pm::stream

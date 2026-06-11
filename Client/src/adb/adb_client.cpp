@@ -148,12 +148,41 @@ std::string AdbClient::run_adb_command(const std::vector<std::string>& args) {
 
     char buffer[4096];
     DWORD bytesRead;
-    while (ReadFile(hChildStdoutRd, buffer, sizeof(buffer) - 1, &bytesRead, NULL) && bytesRead > 0) {
-        buffer[bytesRead] = '\0';
-        result += buffer;
+    DWORD bytesAvail = 0;
+    auto start_time = std::chrono::steady_clock::now();
+    const DWORD timeout_ms = 30000;
+
+    while (true) {
+        if (!PeekNamedPipe(hChildStdoutRd, NULL, 0, NULL, &bytesAvail, NULL)) {
+            break; // pipe broken / closed
+        }
+
+        if (bytesAvail > 0) {
+            if (ReadFile(hChildStdoutRd, buffer, sizeof(buffer) - 1, &bytesRead, NULL) && bytesRead > 0) {
+                buffer[bytesRead] = '\0';
+                result += buffer;
+            }
+        } else {
+            DWORD exitCode = 0;
+            if (GetExitCodeProcess(pi.hProcess, &exitCode) && exitCode != STILL_ACTIVE) {
+                // finished and no more data
+                break;
+            }
+
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start_time
+            ).count();
+            if (elapsed > timeout_ms) {
+                std::cerr << "[ADB] Command timed out, terminating process!" << std::endl;
+                TerminateProcess(pi.hProcess, 1);
+                WaitForSingleObject(pi.hProcess, 500);
+                break;
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
     }
 
-    WaitForSingleObject(pi.hProcess, INFINITE);
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
     CloseHandle(hChildStdoutRd);
@@ -284,7 +313,8 @@ bool AdbClient::connect_device(const std::string& ip, int port) {
         }
 
         if (i < max_retries - 1) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            int sleep_ms = (i < 3) ? 250 : ((i < 6) ? 750 : 1500);
+            std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
         }
     }
     return false;

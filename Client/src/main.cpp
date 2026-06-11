@@ -524,6 +524,7 @@ bool start_stream(
     pm::Settings settings = pm::load_settings();
     config.max_fps = settings.max_fps;
     config.max_size = settings.max_size;
+    config.video_bit_rate = settings.video_bit_rate;
     config.lowest_brightness = settings.m_lowest_brightness;
 
     if (settings.m_lowest_brightness) {
@@ -705,7 +706,12 @@ static int app_main() {
 
     SavedBrightness saved_brightness; // Cave man remember phone sun level
     std::atomic<bool> should_stop{false};
+    std::atomic<bool> disconnect_pending{false};
     pm::stream::ScrcpyClient scrcpy;
+    scrcpy.set_disconnect_callback([&](pm::stream::ScrcpyClient::DisconnectReason reason) {
+        std::cerr << "[Scrcpy] Disconnect callback triggered, reason=" << (int)reason << std::endl;
+        disconnect_pending = true;
+    });
     pm::stream::VideoRenderer renderer;
     pm::input::InputHandler input(&scrcpy);
 
@@ -855,9 +861,11 @@ static int app_main() {
         renderer.update_viewport(x, y, w, h);
     });
     window->set_pointer_callback([&](pm::window::PointerAction action, int x, int y, int w, int h) {
+        scrcpy.report_user_interaction();
         input.handle_pointer(action, x, y, w, h);
     });
     window->set_key_callback([&](int action, int keycode) {
+        scrcpy.report_user_interaction();
         // key down/up. cave man click keys.
         if (action == 0) {
             input.handle_key_down(keycode);
@@ -866,10 +874,12 @@ static int app_main() {
         }
     });
     window->set_text_callback([&](const std::string& text) {
+        scrcpy.report_user_interaction();
         // text write. cave man write words.
         input.handle_text(text);
     });
     window->set_scroll_callback([&](int x, int y, int w, int h, float hscroll, float vscroll) {
+        scrcpy.report_user_interaction();
         // scroll wheel. cave man scroll screen.
         input.handle_scroll(x, y, w, h, hscroll, vscroll);
     });
@@ -902,6 +912,7 @@ static int app_main() {
     start_connection = [&](bool automatic) {
         if (connection_running) return;
         
+        disconnect_pending = false;
         stop_screen_poll = true;
         if (screen_poll_thread.joinable()) {
             screen_poll_thread.join();
@@ -971,6 +982,24 @@ static int app_main() {
                     bool last_screen_on = true;
                     
                     while (!should_stop && !stop_screen_poll) {
+                        if (disconnect_pending || !scrcpy.is_running()) {
+                            std::cerr << "[Scrcpy] Stream disconnect detected, starting reconnect" << std::endl;
+                            if (saved_brightness.brightness >= 0) {
+                                pm::adb::AdbClient restore_adb;
+                                restore_brightness(restore_adb, saved_brightness);
+                                saved_brightness = {};
+                            }
+                            window->post_task([&]() {
+                                window->set_app_state(pm::window::AppState::SCANNING);
+                                window->set_status_text("Verbindung verloren. Reconnect...");
+                                start_connection(true);
+                            });
+                            if (scrcpy.is_running()) {
+                                scrcpy.stop();
+                            }
+                            break;
+                        }
+
                         // Cave man ask DisplayManager, not PowerManager — power lock = power button lag
                         // Newer Androids use mDisplayState instead of mGlobalDisplayState
                         std::string display_state = poll_adb.execute_shell_command(

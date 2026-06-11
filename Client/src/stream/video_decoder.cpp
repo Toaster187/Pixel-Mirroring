@@ -56,6 +56,8 @@ bool VideoDecoder::init(uint32_t codec_id) {
         return false;
     }
 
+    codec_ctx_->flags |= AV_CODEC_FLAG_LOW_DELAY;
+
     int ret = avcodec_open2(codec_ctx_, codec, nullptr);
     if (ret < 0) {
         log_ffmpeg_error("[Decoder] Could not open codec", ret);

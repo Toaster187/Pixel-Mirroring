@@ -30,6 +30,14 @@ public:
         bool control = true;
         bool tunnel_forward = false;
         bool lowest_brightness = true;
+        bool inactivity_pause = true;
+    };
+
+    enum class DisconnectReason {
+        SOCKET_ERROR,
+        SERVER_DIED,
+        TIMEOUT,
+        PACKET_TOO_LARGE
     };
 
     ScrcpyClient();
@@ -43,9 +51,14 @@ public:
     int video_height() const { return static_cast<int>(initial_height_); }
     const std::string& get_device_id() const { return config_.device_id; }
 
+    void report_user_interaction();
+
     // Callbacks
     using FrameCallback = std::function<void(AVFrame* frame)>;
     void set_frame_callback(FrameCallback cb);
+
+    using DisconnectCallback = std::function<void(DisconnectReason)>;
+    void set_disconnect_callback(DisconnectCallback cb);
 
     // Input Injection
     void inject_touch(int action, float x, float y, int w, int h);
@@ -70,9 +83,12 @@ private:
     
     std::thread video_thread_;
     std::thread control_thread_;
+    std::thread server_thread_;
     std::atomic<bool> running_{false};
+    std::atomic<uint64_t> last_interaction_time_ms_{0};
 
     FrameCallback frame_cb_;
+    DisconnectCallback disconnect_cb_;
 
     // Device Info
     std::string device_name_;

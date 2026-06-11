@@ -104,6 +104,10 @@ Settings load_settings() {
             try {
                 s.max_size = std::stoi(value);
             } catch (...) {}
+        } else if (key == "video_bit_rate") {
+            try {
+                s.video_bit_rate = std::stoi(value);
+            } catch (...) {}
         } else if (key == "compatibility_mode") {
             s.m_compatibility_mode = (value == "1");
         } else if (key == "turn_screen_off" || key == "lowest_brightness") {
@@ -123,6 +127,7 @@ void save_settings(const Settings& s) {
     }
     file << "max_fps=" << s.max_fps << "\n";
     file << "max_size=" << s.max_size << "\n";
+    file << "video_bit_rate=" << s.video_bit_rate << "\n";
     file << "compatibility_mode=" << (s.m_compatibility_mode ? "1" : "0") << "\n";
     file << "lowest_brightness=" << (s.m_lowest_brightness ? "1" : "0") << "\n";
     file << "pin=" << encrypt_pin(s.m_pin) << "\n";

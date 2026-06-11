@@ -30,6 +30,10 @@ class MirroringService : Service() {
     private val isScreenOn = AtomicBoolean(true)
     private var receiverRegistered = false
 
+    private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
+    private var wakeLock: android.os.PowerManager.WakeLock? = null
+    private var networkCallback: android.net.ConnectivityManager.NetworkCallback? = null
+
     private val screenStateReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
             if (intent?.action == android.content.Intent.ACTION_SCREEN_OFF) {
@@ -49,6 +53,54 @@ class MirroringService : Service() {
         val powerManager = getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager
         isScreenOn.set(powerManager.isInteractive)
         
+        // Acquire Partial WakeLock to prevent CPU sleep
+        try {
+            wakeLock = powerManager.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "PixelMirroring::WakeLock").apply {
+                acquire()
+            }
+            Log.i(TAG, "CPU WakeLock acquired")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to acquire CPU WakeLock", e)
+        }
+
+        // Acquire Low-Latency WifiLock to keep WiFi active and fast
+        try {
+            val wifiManager = applicationContext.getSystemService(android.content.Context.WIFI_SERVICE) as android.net.wifi.WifiManager
+            wifiLock = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                wifiManager.createWifiLock(android.net.wifi.WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "PixelMirroring::WifiLock")
+            } else {
+                @Suppress("DEPRECATION")
+                wifiManager.createWifiLock(android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF, "PixelMirroring::WifiLock")
+            }.apply {
+                acquire()
+            }
+            Log.i(TAG, "Low-Latency WiFi Lock acquired")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to acquire WiFi Lock", e)
+        }
+
+        // Monitor Network Connectivity Changes to rebind Discovery Server
+        try {
+            val connectivityManager = getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+            val networkRequest = android.net.NetworkRequest.Builder()
+                .addCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .build()
+            
+            networkCallback = object : android.net.ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: android.net.Network) {
+                    Log.i(TAG, "Network became available, rebinding discovery server...")
+                    rebindDiscoveryServer()
+                }
+                override fun onLost(network: android.net.Network) {
+                    Log.i(TAG, "Network connection lost")
+                }
+            }
+            connectivityManager.registerNetworkCallback(networkRequest, networkCallback!!)
+            Log.i(TAG, "NetworkCallback registered")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to register NetworkCallback", e)
+        }
+
         val filter = android.content.IntentFilter().apply {
             addAction(android.content.Intent.ACTION_SCREEN_OFF)
             addAction(android.content.Intent.ACTION_SCREEN_ON)
@@ -99,6 +151,14 @@ class MirroringService : Service() {
                     }
                 }
             }
+        }
+    }
+
+    private fun rebindDiscoveryServer() {
+        synchronized(this) {
+            server?.close()
+            server = null
+            startDiscoveryServer()
         }
     }
 
@@ -216,6 +276,35 @@ class MirroringService : Service() {
             unregisterReceiver(screenStateReceiver)
             receiverRegistered = false
         }
+        
+        networkCallback?.let {
+            try {
+                val connectivityManager = getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+                connectivityManager.unregisterNetworkCallback(it)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to unregister NetworkCallback", e)
+            }
+        }
+        networkCallback = null
+
+        wifiLock?.let {
+            try {
+                if (it.isHeld) it.release()
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to release WiFi Lock", e)
+            }
+        }
+        wifiLock = null
+
+        wakeLock?.let {
+            try {
+                if (it.isHeld) it.release()
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to release CPU WakeLock", e)
+            }
+        }
+        wakeLock = null
+
         server?.close()
         server = null
         super.onDestroy()
