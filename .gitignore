@@ -25,11 +25,11 @@ local.properties
 
 # C++ / Client build artifacts
 Client/build/
+Client/vcpkg_installed/
 Client/PreviewWindow.exe
 *.obj
 *.pdb
 *.bin
-
 
 
 # Java / Android debug artifacts
