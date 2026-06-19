@@ -219,6 +219,8 @@ std::vector<Device> AdbClient::get_devices() {
     // Skip the first line ("List of devices attached")
     std::getline(stream, line);
     
+    static const std::regex model_regex("model:([^\\s]+)");
+
     while (std::getline(stream, line)) {
         if (line.empty() || line.find_first_not_of(" \t\r\n") == std::string::npos) {
             continue;
@@ -235,7 +237,7 @@ std::vector<Device> AdbClient::get_devices() {
 
             // Cave man read model mark from adb stone.
             std::smatch match;
-            if (std::regex_search(line, match, std::regex("model:([^\\s]+)"))) {
+            if (std::regex_search(line, match, model_regex)) {
                 dev.model = match[1].str();
             }
 
