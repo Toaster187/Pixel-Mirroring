@@ -33,11 +33,14 @@ void log_stream_event(const std::string& message) {
     std::cout << message << std::endl;
 
     std::filesystem::path log_dir;
+#ifndef PM_PORTABLE_BUILD
 #ifdef _WIN32
+    // CAVE MAN NO WRITE APPDATA FOR PORTABLE. ONLY EXE DIR.
     const char* local_app_data = std::getenv("LOCALAPPDATA");
     if (local_app_data && local_app_data[0] != '\0') {
         log_dir = std::filesystem::path(local_app_data) / "PixelMirroring";
     }
+#endif
 #endif
     if (log_dir.empty()) {
         log_dir = pm::adb::get_executable_dir();

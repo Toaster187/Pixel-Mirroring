@@ -14,7 +14,9 @@ namespace pm {
 
 // MEOW. LOCAL CONFIG DIR FOR SETTINGS.
 static std::filesystem::path get_config_dir() {
+#ifndef PM_PORTABLE_BUILD
 #ifdef _WIN32
+    // CAVE MAN NO WRITE APPDATA FOR PORTABLE. ONLY EXE DIR.
     const char* local_app_data = std::getenv("LOCALAPPDATA");
     if (local_app_data && local_app_data[0] != '\0') {
         std::filesystem::path path = std::filesystem::path(local_app_data) / "PixelMirroring";
@@ -24,6 +26,7 @@ static std::filesystem::path get_config_dir() {
             return path;
         }
     }
+#endif
 #endif
     std::filesystem::path fallback = pm::adb::get_executable_dir();
     std::error_code ec;

@@ -15,6 +15,7 @@ Android/gradlew.bat
 
 # IDEs
 .idea/
+.vs/
 *.iml
 .vscode/
 *.swp
@@ -25,6 +26,7 @@ local.properties
 
 # C++ / Client build artifacts
 Client/build/
+Client/build_vs/
 Client/vcpkg_installed/
 Client/PreviewWindow.exe
 *.obj
