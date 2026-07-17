@@ -3,10 +3,15 @@ package dev.pixelmirroring.app.service
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkRequest
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.IBinder
 import android.os.SystemClock
 import android.util.Log
+import java.net.InetAddress
 import dev.pixelmirroring.app.data.PairedClientStore
 import dev.pixelmirroring.app.network.ConnectRequest
 import dev.pixelmirroring.app.network.ConnectResponse
@@ -35,7 +40,8 @@ class MirroringService : Service() {
     }
 
     private val json = Json { ignoreUnknownKeys = true }
-    private var server: DiscoveryHttpServer? = null
+    private val servers = mutableListOf<DiscoveryHttpServer>()
+    private val serversMutex = Mutex()
     private val adbWifiManager by lazy { AdbWifiManager(this) }
     private val clientStore by lazy { PairedClientStore(this) }
     private val pairingMutex = Mutex()
@@ -46,6 +52,8 @@ class MirroringService : Service() {
     private val sessionActive = AtomicBoolean(false)
     private val lastSeenElapsedMs = AtomicLong(0L)
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     private val screenStateReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
@@ -74,6 +82,31 @@ class MirroringService : Service() {
         receiverRegistered = true
 
         startSessionWatchdog()
+        registerNetworkCallback()
+    }
+
+    private fun registerNetworkCallback() {
+        val connectivityManager = getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val request = NetworkRequest.Builder()
+            .build()
+
+        networkCallback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                if (serviceScope.isActive) {
+                    Log.i(TAG, "Network available, restarting discovery servers")
+                    startDiscoveryServer()
+                }
+            }
+
+            override fun onLost(network: Network) {
+                if (serviceScope.isActive) {
+                    Log.i(TAG, "Network lost, restarting discovery servers")
+                    startDiscoveryServer()
+                }
+            }
+        }
+
+        connectivityManager.registerNetworkCallback(request, networkCallback!!)
     }
 
     private fun startSessionWatchdog() {
@@ -111,29 +144,44 @@ class MirroringService : Service() {
     }
 
     private fun startDiscoveryServer() {
-        if (server != null) return
+        serviceScope.launch {
+            serversMutex.withLock {
+                if (!isActive) return@withLock
+                servers.forEach { it.close() }
+                servers.clear()
 
-        var retryCount = 0
-        while (retryCount < 5) {
-            try {
-                server = DiscoveryHttpServer(port = 18294, requestHandler = ::handleRequest).also {
-                    it.start()
-                }
-                Log.i(TAG, "Discovery server started on port 18294")
-                break
-            } catch (e: Exception) {
-                retryCount++
-                Log.e(TAG, "Failed to start discovery server on port 18294. Retry $retryCount/5", e)
-                server?.close()
-                server = null
-                if (retryCount >= 5) {
-                    server = null
-                } else {
+                val ips = NetworkScanner.getAllLocalIps(this@MirroringService)
+                if (ips.isEmpty()) {
+                    Log.w(TAG, "No local IPs found to bind discovery server.")
                     try {
-                        Thread.sleep(2000)
-                    } catch (ie: InterruptedException) {
-                        Thread.currentThread().interrupt()
-                        Log.w(TAG, "Thread interrupted during server start retry", ie)
+                        val fallbackServer = DiscoveryHttpServer(host = InetAddress.getByName("127.0.0.1"), port = 18294, requestHandler = ::handleRequest)
+                        fallbackServer.start()
+                        servers.add(fallbackServer)
+                        Log.i(TAG, "Discovery server started on fallback 127.0.0.1:18294")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to start fallback discovery server", e)
+                    }
+                    return@withLock
+                }
+
+                for (ip in ips) {
+                    var retryCount = 0
+                    while (retryCount < 5 && isActive) {
+                        try {
+                            val server = DiscoveryHttpServer(host = InetAddress.getByName(ip), port = 18294, requestHandler = ::handleRequest)
+                            server.start()
+                            servers.add(server)
+                            Log.i(TAG, "Discovery server started on $ip:18294")
+                            break
+                        } catch (e: Exception) {
+                            retryCount++
+                            Log.e(TAG, "Failed to start discovery server on $ip:18294. Retry $retryCount/5", e)
+                            if (retryCount >= 5) {
+                                Log.e(TAG, "Given up starting discovery server on $ip:18294")
+                            } else {
+                                delay(2000)
+                            }
+                        }
                     }
                 }
             }
@@ -317,8 +365,24 @@ class MirroringService : Service() {
             unregisterReceiver(screenStateReceiver)
             receiverRegistered = false
         }
-        server?.close()
-        server = null
+        networkCallback?.let {
+            val connectivityManager = getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            try {
+                connectivityManager.unregisterNetworkCallback(it)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to unregister network callback", e)
+            }
+        }
+        // serviceScope.cancel() was already called above, so startDiscoveryServer coroutines will stop.
+        // We can close the servers immediately to unblock any pending accept() calls.
+        servers.toList().forEach {
+            try {
+                it.close()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error closing discovery server", e)
+            }
+        }
+        servers.clear()
         super.onDestroy()
     }
 }

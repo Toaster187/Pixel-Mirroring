@@ -5,6 +5,7 @@ import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.Closeable
 import java.io.InputStream
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
@@ -16,6 +17,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 class DiscoveryHttpServer(
+    private val host: InetAddress?,
     private val port: Int,
     private val requestHandler: (HttpRequest) -> HttpResponse
 ) : Closeable {
@@ -41,7 +43,7 @@ class DiscoveryHttpServer(
 
         val socket = ServerSocket()
         socket.reuseAddress = true
-        socket.bind(InetSocketAddress(port), SOCKET_BACKLOG)
+        socket.bind(InetSocketAddress(host, port), SOCKET_BACKLOG)
         serverSocket = socket
 
         workerPool = Executors.newCachedThreadPool()
