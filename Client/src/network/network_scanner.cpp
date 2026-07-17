@@ -121,6 +121,75 @@ std::vector<std::string> NetworkScanner::get_local_ipv4_bases() {
     return bases;
 }
 
+std::optional<DiscoveredDevice> NetworkScanner::post_connect(const std::string& target_ip, const std::string& req_str, int conn_timeout_ms, int read_timeout_ms) {
+    httplib::Client cli(target_ip, 18294);
+    cli.set_connection_timeout(conn_timeout_ms / 1000, (conn_timeout_ms % 1000) * 1000);
+    cli.set_read_timeout(read_timeout_ms / 1000, (read_timeout_ms % 1000) * 1000);
+
+    auto res = cli.Post("/connect", req_str, "application/json");
+    if (!res) {
+        return std::nullopt;
+    }
+
+    if (res->status == 403) {
+        std::cout << "\n[NetworkScanner] Access denied on " << target_ip << ". Device is paired with another client." << std::endl;
+        return std::nullopt;
+    }
+
+    if (res->status != 200) {
+        return std::nullopt;
+    }
+
+    try {
+        auto resp_json = json::parse(res->body);
+        if (!resp_json["success"].get<bool>()) {
+            return std::nullopt;
+        }
+        DiscoveredDevice device;
+        device.ip = target_ip;
+        device.adb_port = resp_json["adbPort"].get<int>();
+        device.device_name = resp_json["deviceName"].get<std::string>();
+        for (const auto& ip : resp_json["ips"]) {
+            device.all_ips.push_back(ip.get<std::string>());
+        }
+        return device;
+    } catch (...) {
+        // JSON parsing error or invalid response
+        return std::nullopt;
+    }
+}
+
+std::optional<DiscoveredDevice> NetworkScanner::request_connect(const std::string& ip, const std::string& client_id, const std::string& client_name) {
+    json req_body = {
+        {"clientId", client_id},
+        {"clientName", client_name}
+    };
+    // Ugg! Phone side sleeps 500ms+500ms toggling adbd, plus up to 3s mDNS wait, before it answers.
+    auto discovered = post_connect(ip, req_body.dump(), 1500, 8000);
+    if (discovered) {
+        std::cout << "[NetworkScanner] Woke ADB on known device " << ip << std::endl;
+    }
+    return discovered;
+}
+
+bool NetworkScanner::send_heartbeat(const std::string& ip, const std::string& client_id, const std::string& client_name) {
+    json req_body = {
+        {"clientId", client_id},
+        {"clientName", client_name}
+    };
+    std::string req_str = req_body.dump();
+
+    try {
+        httplib::Client cli(ip, 18294);
+        cli.set_connection_timeout(1, 0);  // 1s
+        cli.set_read_timeout(2, 0);        // 2s
+        auto res = cli.Post("/heartbeat", req_str, "application/json");
+        return res && res->status == 200;
+    } catch (...) {
+        return false;
+    }
+}
+
 std::optional<DiscoveredDevice> NetworkScanner::discover_and_connect(const std::string& client_id, const std::string& client_name) {
     auto bases = get_local_ipv4_bases();
     
@@ -153,37 +222,14 @@ std::optional<DiscoveredDevice> NetworkScanner::discover_and_connect(const std::
                 threads.emplace_back([&, base, current_ip_ending]() {
                     if (found) return;
                     std::string target_ip = base + std::to_string(current_ip_ending);
-                    
-                    httplib::Client cli(target_ip, 18294);
-                    cli.set_connection_timeout(0, 800000); // 800ms
-                    cli.set_read_timeout(3, 500000);       // 3.5s
-                    
-                    auto res = cli.Post("/connect", req_str, "application/json");
-                    
-                    if (res) {
-                        if (res->status == 403) {
-                            std::cout << "\n[NetworkScanner] Access denied on " << target_ip << ". Device is paired with another client." << std::endl;
-                        } else if (res->status == 200) {
-                            try {
-                                auto resp_json = json::parse(res->body);
-                                if (resp_json["success"].get<bool>()) {
-                                    std::lock_guard<std::mutex> lock(result_mutex);
-                                    if (!found) {
-                                        DiscoveredDevice device;
-                                        device.ip = target_ip;
-                                        device.adb_port = resp_json["adbPort"].get<int>();
-                                        device.device_name = resp_json["deviceName"].get<std::string>();
-                                        for (const auto& ip : resp_json["ips"]) {
-                                            device.all_ips.push_back(ip.get<std::string>());
-                                        }
-                                        discovered = device;
-                                        found = true;
-                                        std::cout << "[NetworkScanner] Found app on " << target_ip << std::endl;
-                                    }
-                                }
-                            } catch (...) {
-                                // JSON parsing error or invalid response
-                            }
+
+                    auto device = post_connect(target_ip, req_str, 800, 3500);
+                    if (device) {
+                        std::lock_guard<std::mutex> lock(result_mutex);
+                        if (!found) {
+                            discovered = device;
+                            found = true;
+                            std::cout << "[NetworkScanner] Found app on " << target_ip << std::endl;
                         }
                     }
                 });

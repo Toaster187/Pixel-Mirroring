@@ -14,7 +14,10 @@ object NotificationHelper {
     private const val CHANNEL_ID = "pixel_mirroring_service_channel"
     private const val CHANNEL_NAME = "Pixel Mirroring Service"
 
-    fun createNotification(context: Context): Notification {
+    fun createNotification(
+        context: Context,
+        contentText: String = "Bereit für Verbindung | Tap für Einstellungen"
+    ): Notification {
         val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -39,7 +42,7 @@ object NotificationHelper {
             // .setSmallIcon(R.mipmap.ic_launcher) // We use standard launcher icon or fallback
             .setSmallIcon(android.R.drawable.ic_menu_share)
             .setContentTitle("Pixel Mirroring")
-            .setContentText("Bereit für Verbindung | Tap für Einstellungen")
+            .setContentText(contentText)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .build()

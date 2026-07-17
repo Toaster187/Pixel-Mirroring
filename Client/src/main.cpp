@@ -37,6 +37,7 @@ namespace {
 constexpr const char* ANDROID_PACKAGE = "dev.pixelmirroring.app";
 constexpr const char* ANDROID_SERVICE = "dev.pixelmirroring.app/.service.MirroringService";
 constexpr int ADB_TCP_PORT = 5555;
+constexpr int HEARTBEAT_INTERVAL_MS = 15000;
 
 struct SetupState {
     bool configured = false;
@@ -337,11 +338,27 @@ std::optional<pm::adb::Device> connect_configured_device(
     const std::string& client_name,
     std::atomic<bool>& should_stop
 ) {
+    pm::network::NetworkScanner scanner;
+
+    // Ugg! Maybe the cave connection from before is still warm — no need to wake ADB again.
     if (!setup_state.device_ip.empty()) {
-        window.set_status_text("Verbinde mit " + setup_state.device_ip + "...");
-        if (adb.connect_device(setup_state.device_ip, ADB_TCP_PORT)) {
-            if (auto tcp = wait_for_tcp_device(adb, setup_state.device_ip, should_stop)) {
-                return tcp;
+        auto devices = adb.get_connected_devices();
+        if (auto tcp = find_tcp_device(devices, setup_state.device_ip)) {
+            return tcp;
+        }
+    }
+
+    if (should_stop) return std::nullopt;
+
+    // Ugg! ADB is off cold — poke the phone's discovery server to wake it up first.
+    if (!setup_state.device_ip.empty()) {
+        window.set_status_text("Wecke Geraet " + setup_state.device_ip + "...");
+        if (auto discovered = scanner.request_connect(setup_state.device_ip, client_id, client_name)) {
+            window.set_status_text("Verbinde mit " + discovered->ip + "...");
+            if (adb.connect_device(discovered->ip, discovered->adb_port)) {
+                if (auto tcp = wait_for_tcp_device(adb, discovered->ip, should_stop)) {
+                    return tcp;
+                }
             }
         }
     }
@@ -349,7 +366,6 @@ std::optional<pm::adb::Device> connect_configured_device(
     if (should_stop) return std::nullopt;
 
     window.set_status_text("Suche eingerichtetes Geraet im Netzwerk...");
-    pm::network::NetworkScanner scanner;
     auto discovered = scanner.discover_and_connect(client_id, client_name);
     if (!discovered || should_stop) {
         return std::nullopt;
@@ -880,6 +896,8 @@ static int app_main() {
     std::atomic<bool> connection_running{false};
     std::thread screen_poll_thread;
     std::atomic<bool> stop_screen_poll{false};
+    std::thread heartbeat_thread;
+    std::atomic<bool> stop_heartbeat{false};
     const std::string client_name = get_client_name();
 
     std::string client_id;
@@ -902,13 +920,36 @@ static int app_main() {
         if (fw) { fputs(client_id.c_str(), fw); fclose(fw); }
     }
 
+    auto stop_heartbeat_thread = [&]() {
+        stop_heartbeat = true;
+        if (heartbeat_thread.joinable()) {
+            heartbeat_thread.join();
+        }
+    };
+    auto start_heartbeat = [&](const std::string& ip) {
+        stop_heartbeat_thread();
+        stop_heartbeat = false;
+        heartbeat_thread = std::thread([&, ip]() {
+            // Cave man poke phone every 15s so phone knows PC still alive
+            pm::network::NetworkScanner hb_scanner;
+            while (!should_stop && !stop_heartbeat && scrcpy.is_running()) {
+                hb_scanner.send_heartbeat(ip, client_id, client_name); // failed beat = shrug, retry next round
+                for (int i = 0; i < HEARTBEAT_INTERVAL_MS / 100
+                     && !should_stop && !stop_heartbeat && scrcpy.is_running(); ++i) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+            }
+        });
+    };
+
     start_connection = [&](bool automatic) {
         if (connection_running) return;
-        
+
         stop_screen_poll = true;
         if (screen_poll_thread.joinable()) {
             screen_poll_thread.join();
         }
+        stop_heartbeat_thread();
 
         if (connection_thread.joinable()) {
             connection_thread.join();
@@ -925,7 +966,12 @@ static int app_main() {
 
             SetupState setup_state = load_setup_state();
             if (!setup_state.configured) {
-                run_first_time_setup(adb, *window, scrcpy, renderer, input, should_stop, &saved_brightness);
+                if (run_first_time_setup(adb, *window, scrcpy, renderer, input, should_stop, &saved_brightness)) {
+                    auto new_state = load_setup_state();
+                    if (new_state.configured && !new_state.device_ip.empty()) {
+                        start_heartbeat(new_state.device_ip);
+                    }
+                }
                 return;
             }
 
@@ -964,6 +1010,9 @@ static int app_main() {
                 return;
             }
             if (start_stream(*window, scrcpy, renderer, input, tcp_device->id, &saved_brightness)) {
+                std::string hb_ip = tcp_device->id.substr(0, tcp_device->id.rfind(':'));
+                start_heartbeat(hb_ip);
+
                 stop_screen_poll = false;
                 if (screen_poll_thread.joinable()) {
                     screen_poll_thread.join();
@@ -1039,6 +1088,7 @@ static int app_main() {
 
     should_stop = true;
     stop_screen_poll = true;
+    stop_heartbeat = true;
 
     // Cave man put sun brightness back before leaving cave, while tunnel still strong
     if (saved_brightness.brightness >= 0) {
@@ -1049,6 +1099,7 @@ static int app_main() {
     scrcpy.stop();
     if (connection_thread.joinable()) connection_thread.join();
     if (screen_poll_thread.joinable()) screen_poll_thread.join();
+    if (heartbeat_thread.joinable()) heartbeat_thread.join();
 
     if (tray) tray->hide();
 

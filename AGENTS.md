@@ -82,6 +82,16 @@ Wichtig:
 - Ohne gespeicherte Einrichtung bleibt USB der einzige Setup-Pfad.
 - Der gespeicherte Setup-Status liegt im Benutzerprofil unter `LOCALAPPDATA\PixelMirroring`.
 
+### ADB nur auf Anfrage (On-Demand) + 60s-Idle-Abschaltung
+
+ADB bleibt zwischen Sitzungen **nicht** mehr dauerhaft aktiviert (Sicherheitsluecke geschlossen):
+
+- Bei jedem Reconnect prueft der Client zuerst, ob bereits ein verbundenes TCP-Geraet existiert (warmer Reconnect innerhalb des Idle-Fensters). Sonst schickt er `POST /connect` (mit persistierter `clientId`) direkt an die gespeicherte Geraet-IP, um ADB aufzuwecken; erst wenn das fehlschlaegt, folgt der Subnetz-Scan.
+- Die Android-App (`MirroringService.kt`) prueft die Autorisierung per `clientId` (Trust-on-first-use, `PairedClientStore`) und aktiviert dann `adb_enabled`, `adb_wifi_enabled` und `adb_tcp_port`.
+- Waehrend des Streams sendet der Client alle ~15s `POST /heartbeat`, um die Session am Leben zu halten.
+- Ein Watchdog auf dem Handy deaktiviert ADB (alle drei Settings) nach 60s ohne `/connect` oder `/heartbeat` wieder.
+- Manuell aktiviertes Wireless-Debugging ohne aktive Client-Session wird vom Watchdog nie angefasst — nur Sessions, die die App selbst gestartet hat, werden wieder geschlossen.
+
 ---
 
 ## Desktop Client Details

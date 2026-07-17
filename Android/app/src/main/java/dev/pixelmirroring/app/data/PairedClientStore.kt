@@ -1,6 +1,7 @@
 package dev.pixelmirroring.app.data
 
 import android.content.Context
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -16,6 +17,7 @@ class PairedClientStore(private val context: Context) {
     companion object {
         val CLIENT_ID_KEY = stringPreferencesKey("client_id")
         val CLIENT_NAME_KEY = stringPreferencesKey("client_name")
+        val SESSION_ACTIVE_KEY = booleanPreferencesKey("session_active")
     }
 
     suspend fun savePairedClient(clientId: String, clientName: String) {
@@ -44,5 +46,16 @@ class PairedClientStore(private val context: Context) {
         // Wenn einer gekoppelt ist, muss die ID übereinstimmen.
         val paired = getPairedClient()
         return paired == null || paired.id == clientId
+    }
+
+    suspend fun setSessionActive(active: Boolean) {
+        context.dataStore.edit { preferences ->
+            preferences[SESSION_ACTIVE_KEY] = active
+        }
+    }
+
+    suspend fun isSessionActive(): Boolean {
+        val preferences = context.dataStore.data.first()
+        return preferences[SESSION_ACTIVE_KEY] ?: false
     }
 }

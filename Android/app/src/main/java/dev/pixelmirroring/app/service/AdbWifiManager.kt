@@ -12,6 +12,7 @@ class AdbWifiManager(private val context: Context) {
         private const val TAG = "AdbWifiManager"
         private const val ADB_WIFI_ENABLED = "adb_wifi_enabled"
         private const val ADB_TCP_PORT = "adb_tcp_port"
+        private const val ADB_ENABLED = "adb_enabled"
     }
 
     /**
@@ -145,7 +146,67 @@ class AdbWifiManager(private val context: Context) {
      * Prüft ob die App die nötige Berechtigung WRITE_SECURE_SETTINGS besitzt.
      */
     fun hasSecureSettingsPermission(): Boolean {
-        return context.checkSelfPermission(android.Manifest.permission.WRITE_SECURE_SETTINGS) == 
+        return context.checkSelfPermission(android.Manifest.permission.WRITE_SECURE_SETTINGS) ==
                android.content.pm.PackageManager.PERMISSION_GRANTED
+    }
+
+    /**
+     * Schaltet das globale USB-Debugging (Entwickleroptionen-Schalter) an oder aus.
+     */
+    fun setAdbEnabled(enabled: Boolean): Boolean {
+        return try {
+            Settings.Global.putInt(
+                context.contentResolver,
+                ADB_ENABLED,
+                if (enabled) 1 else 0
+            )
+            true
+        } catch (e: SecurityException) {
+            Log.e(TAG, "Failed to set adb_enabled: Missing WRITE_SECURE_SETTINGS permission", e)
+            false
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception while toggling adb_enabled", e)
+            false
+        }
+    }
+
+    /**
+     * Deaktiviert ADB over WiFi wieder. Cave man close the wifi door.
+     */
+    fun disableAdbWifi(): Boolean {
+        return try {
+            Settings.Global.putInt(
+                context.contentResolver,
+                ADB_WIFI_ENABLED,
+                0
+            )
+            true
+        } catch (e: SecurityException) {
+            Log.e(TAG, "Failed to disable ADB over WiFi: Missing WRITE_SECURE_SETTINGS permission", e)
+            false
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception while disabling ADB WiFi", e)
+            false
+        }
+    }
+
+    /**
+     * Deaktiviert das ADB TCP/IP Protokoll wieder.
+     */
+    fun disableAdbTcpIp(): Boolean {
+        return try {
+            Settings.Global.putString(
+                context.contentResolver,
+                ADB_TCP_PORT,
+                "-1"
+            )
+            true
+        } catch (e: SecurityException) {
+            Log.e(TAG, "Failed to disable ADB TCP port: Missing WRITE_SECURE_SETTINGS permission", e)
+            false
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception while disabling ADB TCP port", e)
+            false
+        }
     }
 }
