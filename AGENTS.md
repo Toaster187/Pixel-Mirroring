@@ -64,33 +64,36 @@ Pixel-Mirroring/
 
 ## Aktueller Verbindungsfluss
 
-Der wichtigste Punkt ist jetzt der Einrichtungszustand:
+**Übersicht der Zustände:** `SETUP` → `SCANNING` → `CONNECTED` → `STREAMING`
 
-1. Beim ersten Start zeigt der Windows-Client den Setup-Bildschirm.
-2. Der Nutzer aktiviert einmal USB-Debugging am Handy.
-3. Das Handy wird per USB verbunden.
-4. Der Client installiert die Android-App automatisch vom PC aus.
-5. Der Client vergibt `WRITE_SECURE_SETTINGS`.
-6. Der Client startet die Android-App und aktiviert ADB over WiFi.
-7. Erst wenn die Ersteinrichtung komplett erfolgreich war, wird sie gespeichert.
-8. Ab dann verbindet sich der Client beim Start automatisch.
-9. Der Button `Verbinden` ist dann nur noch fur einen erneuten Verbindungsversuch.
+### 1. Ersteinrichtung (USB-Setup, Einmalig)
 
-Wichtig:
+1. Benutzer aktiviert USB-Debugging am Android-Gerät
+2. Gerät wird per USB an den PC angeschlossen
+3. Desktop Client erkennt das Gerät automatisch via ADB
+4. Client installiert die Android App vom PC aus
+5. Client erteilt `WRITE_SECURE_SETTINGS` Berechtigung via ADB (keine Terminal-Eingabe nötig!)
+6. Client startet die Android App
+7. App aktiviert ADB over WiFi (setzt `Settings.Global.putInt("adb_wifi_enabled", 1)` selbst)
+8. Einrichtung ist komplett → wird dauerhaft unter `%LOCALAPPDATA%\PixelMirroring` gespeichert
 
-- Wenn die Ersteinrichtung fehlschlagt, darf der Client nicht stillschweigend in die Netzwerksuche wechseln.
-- Ohne gespeicherte Einrichtung bleibt USB der einzige Setup-Pfad.
-- Der gespeicherte Setup-Status liegt im Benutzerprofil unter `LOCALAPPDATA\PixelMirroring`.
+**Kritisch:** Falls Ersteinrichtung fehlschlägt, wird der Status NICHT gespeichert. USB bleibt der einzige Setup-Pfad.
 
-### ADB nur auf Anfrage (On-Demand) + 60s-Idle-Abschaltung
+### 2. Automatische Verbindung (Ab dem 2. Mal) — On-Demand ADB + 60s Idle-Abschaltung
 
-ADB bleibt zwischen Sitzungen **nicht** mehr dauerhaft aktiviert (Sicherheitsluecke geschlossen):
+ADB **bleibt nicht dauerhaft aktiviert** (Sicherheitslücke geschlossen). Stattdessen:
 
-- Bei jedem Reconnect prueft der Client zuerst, ob bereits ein verbundenes TCP-Geraet existiert (warmer Reconnect innerhalb des Idle-Fensters). Sonst schickt er `POST /connect` (mit persistierter `clientId`) direkt an die gespeicherte Geraet-IP, um ADB aufzuwecken; erst wenn das fehlschlaegt, folgt der Subnetz-Scan.
-- Die Android-App (`MirroringService.kt`) prueft die Autorisierung per `clientId` (Trust-on-first-use, `PairedClientStore`) und aktiviert dann `adb_enabled`, `adb_wifi_enabled` und `adb_tcp_port`.
-- Waehrend des Streams sendet der Client alle ~15s `POST /heartbeat`, um die Session am Leben zu halten.
-- Ein Watchdog auf dem Handy deaktiviert ADB (alle drei Settings) nach 60s ohne `/connect` oder `/heartbeat` wieder.
-- Manuell aktiviertes Wireless-Debugging ohne aktive Client-Session wird vom Watchdog nie angefasst — nur Sessions, die die App selbst gestartet hat, werden wieder geschlossen.
+- Desktop Client startet → prüft zuerst, ob bereits ein verbundenes TCP-Gerät existiert (warmer Reconnect innerhalb des Idle-Fensters)
+- Falls nicht: Client sendet `POST /connect` (mit persistierter `clientId`) direkt an die gespeicherte Geräte-IP zur Hand-Roll HTTP Discovery-Schnittstelle (`DiscoveryHttpServer.kt`)
+- Falls die gespeicherte IP nicht antwortet, folgt LAN-Subnetz-Scan
+- Android App (`MirroringService.kt`) prüft Autorisierung via `clientId` (Trust-on-first-use in `PairedClientStore`)
+- App aktiviert dann `adb_enabled`, `adb_wifi_enabled` und `adb_tcp_port`
+- Desktop Client verbindet sich via ADB TCP/IP
+- Client pusht und startet `scrcpy-server.jar`
+- Video+Control-Sockets werden direkt zur scrcpy-Server öffnet (ADB Shell wird umgangen für Mediendaten)
+- Während Stream: Client sendet alle ~15s `POST /heartbeat` um Session aktiv zu halten
+- **Watchdog auf dem Gerät:** ADB wird nach 60s ohne `/connect` oder `/heartbeat` automatisch deaktiviert (alle drei Settings)
+- **Wichtig:** Manuell aktiviertes Wireless Debugging wird vom Watchdog nie angefasst — nur Sessions, die die App selbst gestartet hat
 
 ---
 
