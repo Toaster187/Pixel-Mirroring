@@ -32,20 +32,28 @@ Das System besteht aus **zwei Komponenten**, die über das lokale Netzwerk kommu
 
 ## 🔄 Verbindungsablauf
 
-1. **Ersteinrichtung (Einmalig)**
-   - Android App installieren und Gerät per USB an den PC anschließen.
-   - Desktop Client starten. Dieser erkennt das Gerät und erteilt automatisch die `WRITE_SECURE_SETTINGS` Berechtigung via ADB. Keine Terminal-Eingabe durch den Nutzer nötig!
-   - Geräte koppeln.
+1. **Ersteinrichtung (Einmalig) — USB-Setup**
+   - Benutzer aktiviert USB-Debugging am Android-Gerät
+   - Gerät wird per USB an den PC angeschlossen
+   - Desktop Client erkennt das Gerät automatisch via ADB
+   - Client installiert die Android App vom PC aus
+   - Client erteilt `WRITE_SECURE_SETTINGS` Berechtigung via ADB
+   - Client startet die Android App
+   - App aktiviert ADB over WiFi (setzt `Settings.Global.putInt("adb_wifi_enabled", 1)` selbst)
+   - Einrichtung ist nun komplett und wird dauerhaft unter `%LOCALAPPDATA%\PixelMirroring` gespeichert
+   - **Wichtig:** Falls Ersteinrichtung fehlschlägt, wird der Status NICHT gespeichert — USB bleibt der einzige Setup-Pfad
 
-2. **Automatische Verbindung (Ab dem 2. Mal)**
-   - Desktop Client startet → sendet Discovery-Request an alle bekannten IPs (LAN + VPN)
-   - Android App empfängt Request im Background → verifiziert lokale Erreichbarkeit
-   - App aktiviert ADB over WiFi (via `Settings.Global`)
-   - App startet altes ADB TCP/IP Protokoll (`adb tcpip 5555`)
+2. **Automatische Verbindung (Ab dem 2. Mal) — On-Demand ADB**
+   - Desktop Client startet → prüft zuerst, ob ein bereits verbundenes TCP-Gerät existiert (warmer Reconnect)
+   - Falls nicht: Client sendet `POST /connect` mit persistierter `clientId` direkt an die gespeicherte Geräte-IP (zur Hand-Roll HTTP Discovery-Schnittstelle)
+   - Android App (`MirroringService.kt`) prüft Autorisierung via `clientId` (Trust-on-first-use in `PairedClientStore`)
+   - App aktiviert `adb_enabled`, `adb_wifi_enabled` und `adb_tcp_port`
    - Desktop Client verbindet sich via ADB TCP/IP
-   - Testbefehl wird ausgeführt (read-only Verifikation)
-   - scrcpy-Server wird gepusht und gestartet
+   - Client startet scrcpy-Server und öffnet Video+Control-Sockets
    - Video-Stream wird im Custom-Window angezeigt
+   - Client sendet alle ~15s `POST /heartbeat` um die Session aktiv zu halten
+   - Watchdog auf dem Gerät: ADB wird nach 60s ohne `/connect` oder `/heartbeat` automatisch deaktiviert (Sicherheit)
+   - **Nur Sessions, die die App selbst gestartet hat, werden automatisch geschlossen** — manuell aktiviertes Wireless Debugging wird nicht angefasst
 
 ---
 
