@@ -209,20 +209,19 @@ std::optional<DiscoveredDevice> NetworkScanner::discover_and_connect(const std::
         if (found) break;
         std::cout << "[NetworkScanner] Scanning subnet: " << base << "x" << std::endl;
         
-        // Scan the subnet in batches to prevent thread exhaustion
-        const int batch_size = 50;
-        for (int i = 1; i <= 254; i += batch_size) {
-            if (found) break;
-            
-            std::vector<std::thread> threads;
-            for (int j = 0; j < batch_size && (i + j) <= 254; ++j) {
-                if (found) break;
-                
-                int current_ip_ending = i + j;
-                threads.emplace_back([&, base, current_ip_ending]() {
-                    if (found) return;
-                    std::string target_ip = base + std::to_string(current_ip_ending);
+        // Use a fixed pool of threads to prevent thread exhaustion
+        // and eliminate the overhead of creating/destroying threads for every batch.
+        const int num_workers = 50;
+        std::atomic<int> current_ip_ending{1};
+        std::vector<std::thread> threads;
 
+        for (int w = 0; w < num_workers; ++w) {
+            threads.emplace_back([&, base]() {
+                while (!found) {
+                    int ip_ending = current_ip_ending.fetch_add(1);
+                    if (ip_ending > 254) break;
+
+                    std::string target_ip = base + std::to_string(ip_ending);
                     auto device = post_connect(target_ip, req_str, 800, 3500);
                     if (device) {
                         std::lock_guard<std::mutex> lock(result_mutex);
@@ -232,13 +231,13 @@ std::optional<DiscoveredDevice> NetworkScanner::discover_and_connect(const std::
                             std::cout << "[NetworkScanner] Found app on " << target_ip << std::endl;
                         }
                     }
-                });
-            }
-            
-            for (auto& t : threads) {
-                if (t.joinable()) {
-                    t.join();
                 }
+            });
+        }
+
+        for (auto& t : threads) {
+            if (t.joinable()) {
+                t.join();
             }
         }
     }
