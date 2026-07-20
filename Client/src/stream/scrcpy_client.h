@@ -45,13 +45,18 @@ public:
 
     // Callbacks
     using FrameCallback = std::function<void(AVFrame* frame)>;
+    using DisconnectCallback = std::function<void()>;
+    using ClipboardCallback = std::function<void(const std::string& text)>;
     void set_frame_callback(FrameCallback cb);
+    void set_disconnect_callback(DisconnectCallback cb);
+    void set_device_clipboard_callback(ClipboardCallback cb);
 
     // Input Injection
     void inject_touch(int action, float x, float y, int w, int h);
     void inject_keycode(int action, int keycode);
     void inject_scroll(float x, float y, int w, int h, float hscroll, float vscroll);
     void inject_text(const std::string& text);
+    void inject_set_clipboard(const std::string& text);
 
 private:
     bool setup_tunnel();
@@ -73,6 +78,8 @@ private:
     std::atomic<bool> running_{false};
 
     FrameCallback frame_cb_;
+    DisconnectCallback disconnect_cb_;
+    ClipboardCallback clipboard_cb_;
 
     // Device Info
     std::string device_name_;

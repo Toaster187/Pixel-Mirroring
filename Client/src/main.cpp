@@ -37,7 +37,7 @@ namespace {
 constexpr const char* ANDROID_PACKAGE = "dev.pixelmirroring.app";
 constexpr const char* ANDROID_SERVICE = "dev.pixelmirroring.app/.service.MirroringService";
 constexpr int ADB_TCP_PORT = 5555;
-constexpr int HEARTBEAT_INTERVAL_MS = 15000;
+constexpr int HEARTBEAT_INTERVAL_MS = 5000;
 
 struct SetupState {
     bool configured = false;
@@ -106,29 +106,154 @@ std::string get_client_name() {
     return "Desktop-PC";
 }
 
-std::string prompt_user_for_pin() {
+#ifdef _WIN32
+namespace {
+    std::string g_pin_result;
+    bool g_pin_done = false;
+    WNDPROC g_old_edit_proc;
+    
+    LRESULT CALLBACK PinEditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+        if (msg == WM_KEYDOWN) {
+            if (wp == VK_RETURN) {
+                char buf[128] = {0};
+                GetWindowTextA(hwnd, buf, sizeof(buf));
+                g_pin_result = buf;
+                g_pin_done = true;
+                PostMessage(GetParent(hwnd), WM_NULL, 0, 0);
+                return 0;
+            } else if (wp == VK_ESCAPE) {
+                g_pin_result = "";
+                g_pin_done = true;
+                PostMessage(GetParent(hwnd), WM_NULL, 0, 0);
+                return 0;
+            }
+        }
+        return CallWindowProcA(g_old_edit_proc, hwnd, msg, wp, lp);
+    }
+    
+    LRESULT CALLBACK PinDialogProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+        switch (msg) {
+            case WM_CREATE: {
+                HWND hEdit = CreateWindowExA(0, "EDIT", "", 
+                    WS_CHILD | WS_VISIBLE | ES_PASSWORD | ES_AUTOHSCROLL | ES_CENTER,
+                    20, 50, 160, 24, hwnd, nullptr, GetModuleHandle(nullptr), nullptr);
+                HFONT hFont = CreateFontA(18, 0,0,0, FW_NORMAL, 0,0,0, DEFAULT_CHARSET, 0,0,0,0, "Segoe UI");
+                SendMessage(hEdit, WM_SETFONT, (WPARAM)hFont, 0);
+                g_old_edit_proc = (WNDPROC)SetWindowLongPtrA(hEdit, GWLP_WNDPROC, (LONG_PTR)PinEditProc);
+                SetFocus(hEdit);
+                
+                HRGN rgn = CreateRoundRectRgn(0, 0, 200, 110, 16, 16);
+                SetWindowRgn(hwnd, rgn, TRUE);
+                return 0;
+            }
+            case WM_PAINT: {
+                PAINTSTRUCT ps;
+                HDC hdc = BeginPaint(hwnd, &ps);
+                RECT rc; GetClientRect(hwnd, &rc);
+                
+                HBRUSH bg = CreateSolidBrush(RGB(35, 35, 35));
+                FillRect(hdc, &rc, bg);
+                DeleteObject(bg);
+                
+                SetBkMode(hdc, TRANSPARENT);
+                SetTextColor(hdc, RGB(240, 240, 240));
+                HFONT hFont = CreateFontA(16, 0,0,0, FW_BOLD, 0,0,0, DEFAULT_CHARSET, 0,0,0,0, "Segoe UI");
+                HFONT oldFont = (HFONT)SelectObject(hdc, hFont);
+                RECT tr = {0, 15, 200, 40};
+                DrawTextA(hdc, "PIN eingeben:", -1, &tr, DT_CENTER | DT_TOP);
+                
+                SetTextColor(hdc, RGB(150, 150, 150));
+                HFONT smallFont = CreateFontA(12, 0,0,0, FW_NORMAL, 0,0,0, DEFAULT_CHARSET, 0,0,0,0, "Segoe UI");
+                SelectObject(hdc, smallFont);
+                RECT br = {0, 85, 200, 110};
+                DrawTextA(hdc, "Enter (OK)  |  Esc (Abbrechen)", -1, &br, DT_CENTER | DT_TOP);
+                
+                SelectObject(hdc, oldFont);
+                DeleteObject(hFont);
+                DeleteObject(smallFont);
+                EndPaint(hwnd, &ps);
+                return 0;
+            }
+            case WM_CTLCOLOREDIT: {
+                HDC hdc = (HDC)wp;
+                SetTextColor(hdc, RGB(255, 255, 255));
+                SetBkColor(hdc, RGB(60, 60, 60));
+                static HBRUSH hbr = CreateSolidBrush(RGB(60, 60, 60));
+                return (LRESULT)hbr;
+            }
+            case WM_ACTIVATE: {
+                if (LOWORD(wp) == WA_INACTIVE && !g_pin_done) {
+                    g_pin_result = "";
+                    g_pin_done = true;
+                    PostMessage(hwnd, WM_NULL, 0, 0);
+                }
+                return 0;
+            }
+        }
+        return DefWindowProcA(hwnd, msg, wp, lp);
+    }
+}
+#endif
+
+std::string prompt_user_for_pin(void* parent_hwnd = nullptr) {
     while (true) {
 #ifdef _WIN32
-        std::string command = "powershell -Command \"[void][System.Reflection.Assembly]::LoadWithPartialName('Microsoft.VisualBasic'); [Microsoft.VisualBasic.Interaction]::InputBox('PIN zum automatischen Entsperren eingeben (nur Ziffern):', 'PIN einrichten', '')\"";
-        FILE* pipe = _popen(command.c_str(), "r");
+        g_pin_result = "";
+        HINSTANCE hi = GetModuleHandle(nullptr);
+        WNDCLASSEXA wc = {sizeof(wc)};
+        wc.lpfnWndProc = PinDialogProc;
+        wc.hInstance = hi;
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.lpszClassName = "PixelMirroringPinDialog";
+        RegisterClassExA(&wc);
+        
+        HWND parent = (HWND)parent_hwnd;
+        int px = 0, py = 0;
+        if (parent) {
+            RECT pr; GetWindowRect(parent, &pr);
+            px = pr.left + (pr.right - pr.left) / 2 - 100;
+            py = pr.top + (pr.bottom - pr.top) / 2 - 55;
+        }
+        
+        HWND hwnd = CreateWindowExA(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, wc.lpszClassName, "PIN", 
+            WS_POPUP, px, py, 200, 110, parent, nullptr, hi, nullptr);
+            
+        if (parent) EnableWindow(parent, FALSE);
+        ShowWindow(hwnd, SW_SHOW);
+        UpdateWindow(hwnd);
+        
+        g_pin_done = false;
+        MSG msg;
+        while (GetMessage(&msg, nullptr, 0, 0)) {
+            if (g_pin_done) break;
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
+        
+        if (parent) EnableWindow(parent, TRUE);
+        DestroyWindow(hwnd);
+        UnregisterClassA(wc.lpszClassName, hi);
+        
+        if (parent) {
+            SetForegroundWindow(parent);
+            SetFocus(parent);
+        }
+        
+        std::string result = g_pin_result;
 #else
         std::string command = "osascript -e 'display dialog \"PIN zum automatischen Entsperren eingeben (nur Ziffern):\" default answer \"\" with title \"PIN einrichten\"' -e 'text returned of result' 2>/dev/null";
         FILE* pipe = popen(command.c_str(), "r");
-#endif
         if (!pipe) return "";
         char buffer[128];
         std::string result = "";
         while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
             result += buffer;
         }
-#ifdef _WIN32
-        _pclose(pipe);
-#else
         pclose(pipe);
-#endif
         while (!result.empty() && (result.back() == '\n' || result.back() == '\r' || result.back() == ' ' || result.back() == '\t')) {
             result.pop_back();
         }
+#endif
 
         if (result.empty()) return "";
 
@@ -145,7 +270,7 @@ std::string prompt_user_for_pin() {
         }
 
 #ifdef _WIN32
-        MessageBoxA(nullptr, "PIN darf nur aus Ziffern bestehen und maximal 16 Zeichen lang sein.", "Ungueltige Eingabe", MB_OK | MB_ICONERROR);
+        MessageBoxA((HWND)parent_hwnd, "PIN darf nur aus Ziffern bestehen und maximal 16 Zeichen lang sein.", "Ungueltige Eingabe", MB_OK | MB_ICONERROR);
 #endif
     }
 }
@@ -394,7 +519,7 @@ bool run_first_time_setup(
     auto usb_device = wait_for_usb_authorization(adb, window, should_stop);
     if (!usb_device || should_stop) {
         window.post_task([&window]() {
-            window.set_app_state(pm::window::AppState::SCANNING);
+            window.set_app_state(pm::window::AppState::SETUP);
             window.set_status_text("Kein USB-Geraet bereit. Bitte erneut verbinden.");
         });
         return false;
@@ -408,7 +533,7 @@ bool run_first_time_setup(
         auto apk_path = find_android_apk();
         if (!apk_path) {
             window.post_task([&window]() {
-                window.set_app_state(pm::window::AppState::SCANNING);
+                window.set_app_state(pm::window::AppState::SETUP);
                 window.set_status_text("Android-App fehlt im PC-Paket. Bitte APK manuell installieren.");
             });
             return false;
@@ -416,7 +541,7 @@ bool run_first_time_setup(
 
         if (!adb.install_app(usb_device->id, apk_path->string())) {
             window.post_task([&window]() {
-                window.set_app_state(pm::window::AppState::SCANNING);
+                window.set_app_state(pm::window::AppState::SETUP);
                 window.set_status_text("Android-App konnte nicht installiert werden.");
             });
             return false;
@@ -432,7 +557,7 @@ bool run_first_time_setup(
         window.post_task([&window]() { window.set_status_text("Berechtigungen werden gesetzt..."); });
         if (!adb.grant_secure_settings(usb_device->id)) {
             window.post_task([&window]() {
-                window.set_app_state(pm::window::AppState::SCANNING);
+                window.set_app_state(pm::window::AppState::SETUP);
                 window.set_status_text("WRITE_SECURE_SETTINGS konnte nicht gesetzt werden.");
             });
             return false;
@@ -448,7 +573,7 @@ bool run_first_time_setup(
     const std::string device_ip = adb.get_device_ip(usb_device->id);
     if (device_ip.empty()) {
         window.post_task([&window]() {
-            window.set_app_state(pm::window::AppState::SCANNING);
+            window.set_app_state(pm::window::AppState::SETUP);
             window.set_status_text("Keine WLAN-IP gefunden. Bitte WLAN pruefen.");
         });
         return false;
@@ -457,7 +582,7 @@ bool run_first_time_setup(
     window.post_task([&window]() { window.set_status_text("ADB ueber WLAN wird aktiviert..."); });
     if (!adb.enable_tcpip(usb_device->id, ADB_TCP_PORT)) {
         window.post_task([&window]() {
-            window.set_app_state(pm::window::AppState::SCANNING);
+            window.set_app_state(pm::window::AppState::SETUP);
             window.set_status_text("WLAN-ADB konnte nicht aktiviert werden.");
         });
         return false;
@@ -467,7 +592,7 @@ bool run_first_time_setup(
     window.post_task([&window, device_ip]() { window.set_status_text("Verbinde mit " + device_ip + "..."); });
     if (!adb.connect_device(device_ip, ADB_TCP_PORT)) {
         window.post_task([&window]() {
-            window.set_app_state(pm::window::AppState::SCANNING);
+            window.set_app_state(pm::window::AppState::SETUP);
             window.set_status_text("ADB-Verbindung per WLAN fehlgeschlagen.");
         });
         return false;
@@ -476,7 +601,7 @@ bool run_first_time_setup(
     auto tcp_device = wait_for_tcp_device(adb, device_ip, should_stop);
     if (!tcp_device || should_stop) {
         window.post_task([&window]() {
-            window.set_app_state(pm::window::AppState::SCANNING);
+            window.set_app_state(pm::window::AppState::SETUP);
             window.set_status_text("WLAN-ADB ist noch nicht bereit.");
         });
         return false;
@@ -725,6 +850,15 @@ static int app_main() {
     SavedBrightness saved_brightness; // Cave man remember phone sun level
     std::atomic<bool> should_stop{false};
     pm::stream::ScrcpyClient scrcpy;
+    scrcpy.set_disconnect_callback([w = window.get()]() {
+        w->post_task([w]() {
+#ifdef _WIN32
+            PostMessageA((HWND)w->get_native_handle(), WM_CLOSE, 0, 0);
+#else
+            exit(0);
+#endif
+        });
+    });
     pm::stream::VideoRenderer renderer;
     pm::input::InputHandler input(&scrcpy);
 
@@ -767,7 +901,7 @@ static int app_main() {
                 break;
             }
             case pm::window::MenuAction::SET_PIN: {
-                std::string new_pin = prompt_user_for_pin();
+                std::string new_pin = prompt_user_for_pin(window->get_native_handle());
                 if (!new_pin.empty()) {
                     current_settings.m_pin = new_pin;
                     pm::save_settings(current_settings);
@@ -892,6 +1026,17 @@ static int app_main() {
         // scroll wheel. cave man scroll screen.
         input.handle_scroll(x, y, w, h, hscroll, vscroll);
     });
+
+    scrcpy.set_device_clipboard_callback([w = window.get()](const std::string& text) {
+        w->post_task([w, text]() {
+            w->set_pc_clipboard(text);
+        });
+    });
+    window->set_os_clipboard_update_callback([&scrcpy](const std::string& text) {
+        if (scrcpy.is_running()) {
+            scrcpy.inject_set_clipboard(text);
+        }
+    });
     std::thread connection_thread;
     std::atomic<bool> connection_running{false};
     std::thread screen_poll_thread;
@@ -930,12 +1075,95 @@ static int app_main() {
         stop_heartbeat_thread();
         stop_heartbeat = false;
         heartbeat_thread = std::thread([&, ip]() {
-            // Cave man poke phone every 15s so phone knows PC still alive
+            // Cave man poke phone every 5s so phone knows PC still alive
+            // Heartbeat only keeps phone ADB awake — disconnect detection is
+            // handled by scrcpy video stream recv() failing
             pm::network::NetworkScanner hb_scanner;
             while (!should_stop && !stop_heartbeat && scrcpy.is_running()) {
-                hb_scanner.send_heartbeat(ip, client_id, client_name); // failed beat = shrug, retry next round
+                hb_scanner.send_heartbeat(ip, client_id, client_name);
                 for (int i = 0; i < HEARTBEAT_INTERVAL_MS / 100
                      && !should_stop && !stop_heartbeat && scrcpy.is_running(); ++i) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+            }
+        });
+    };
+
+    auto stop_screen_poll_thread = [&]() {
+        stop_screen_poll = true;
+        if (screen_poll_thread.joinable()) {
+            screen_poll_thread.join();
+        }
+    };
+
+    auto start_screen_poll = [&](const std::string& poll_ip, const std::string& device_id) {
+        stop_screen_poll_thread();
+        stop_screen_poll = false;
+
+        screen_poll_thread = std::thread([&, poll_ip, device_id]() {
+            pm::adb::AdbClient poll_adb;
+            bool last_screen_on = true;
+            
+            while (!should_stop && !stop_screen_poll) {
+                bool screen_on = true; // assume on unless check confirms off
+
+                // 1. Try HTTP /screen endpoint (fastest & most accurate)
+                if (!poll_ip.empty()) {
+                    httplib::Client cli(poll_ip, 18294);
+                    cli.set_connection_timeout(0, 500000); // 500ms
+                    cli.set_read_timeout(0, 500000);       // 500ms
+                    if (auto res = cli.Get("/screen")) {
+                        if (res->status == 200) {
+                            if (res->body.find("\"screenOn\":false") != std::string::npos ||
+                                res->body.find("\"screenOn\": false") != std::string::npos) {
+                                screen_on = false;
+                            }
+                        }
+                    }
+                }
+
+                // 2. ADB shell check fallback (broader pattern matching)
+                if (screen_on && !device_id.empty()) {
+                    // Cave man ask PowerManager instead. dumpsys display gives history log of past OFF events!
+                    std::string power_state = poll_adb.execute_shell_command(
+                        device_id, "dumpsys power | grep -iE 'mInteractive|mIsInteractive'");
+                    if (!power_state.empty()) {
+                        if (power_state.find("false") != std::string::npos ||
+                            power_state.find("OFF") != std::string::npos) {
+                            screen_on = false;
+                        }
+                    }
+                }
+
+                if (screen_on != last_screen_on) {
+                    last_screen_on = screen_on;
+                    
+                    if (!screen_on) {
+                        // Cave man put sun brightness back when screen goes off
+                        if (saved_brightness.brightness >= 0) {
+                            pm::adb::AdbClient restore_adb;
+                            restore_brightness(restore_adb, saved_brightness);
+                            saved_brightness = {}; // Cave man forget — already restored
+                        }
+                        
+                        window->post_task([&]() {
+                            // Cave man hide window to tray when phone screen off — no black screen!
+                            if (window->is_visible()) {
+                                window->hide();
+                                if (tray) tray->show();
+                            }
+                            window->set_app_state(pm::window::AppState::SETUP);
+                        });
+                        // Cave man stop everything to save battery when screen off
+                        if (scrcpy.is_running()) {
+                            scrcpy.stop();
+                        }
+                        break; // Kill the poll thread entirely! Fully disconnected.
+                    }
+                }
+                
+                // Cave man sleep 500ms before next poll
+                for (int i = 0; i < 5 && !should_stop && !stop_screen_poll; ++i) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 }
             }
@@ -945,10 +1173,7 @@ static int app_main() {
     start_connection = [&](bool automatic) {
         if (connection_running) return;
 
-        stop_screen_poll = true;
-        if (screen_poll_thread.joinable()) {
-            screen_poll_thread.join();
-        }
+        stop_screen_poll_thread();
         stop_heartbeat_thread();
 
         if (connection_thread.joinable()) {
@@ -970,6 +1195,7 @@ static int app_main() {
                     auto new_state = load_setup_state();
                     if (new_state.configured && !new_state.device_ip.empty()) {
                         start_heartbeat(new_state.device_ip);
+                        start_screen_poll(new_state.device_ip, new_state.device_ip + ":5555");
                     }
                 }
                 return;
@@ -985,11 +1211,16 @@ static int app_main() {
             );
             if (!tcp_device || should_stop) {
                 window->post_task([w = window.get(), automatic]() {
-                    w->set_app_state(pm::window::AppState::SCANNING);
+                    w->set_app_state(pm::window::AppState::SETUP);
                     w->set_status_text(automatic
                         ? "Geraet nicht erreichbar. Verbinden fuer erneuten Versuch."
-                        : "Geraet nicht erreichbar. USB nur fuer Neueinrichtung.");
+                        : "Neueinrichtung per USB beim naechsten Verbinden.");
                 });
+                if (!automatic) {
+                    // Cave man give up on wireless cave path. Clear setup stone
+                    // so next button press goes full USB setup with app install.
+                    clear_setup_state();
+                }
                 return;
             }
 
@@ -1012,62 +1243,10 @@ static int app_main() {
             if (start_stream(*window, scrcpy, renderer, input, tcp_device->id, &saved_brightness)) {
                 std::string hb_ip = tcp_device->id.substr(0, tcp_device->id.rfind(':'));
                 start_heartbeat(hb_ip);
-
-                stop_screen_poll = false;
-                if (screen_poll_thread.joinable()) {
-                    screen_poll_thread.join();
-                }
-
-                screen_poll_thread = std::thread([&, device_id = tcp_device->id]() {
-                    pm::adb::AdbClient poll_adb;
-                    bool last_screen_on = true;
-                    
-                    while (!should_stop && !stop_screen_poll) {
-                        // Cave man ask DisplayManager, not PowerManager — power lock = power button lag
-                        // Newer Androids use mDisplayState instead of mGlobalDisplayState
-                        std::string display_state = poll_adb.execute_shell_command(
-                            device_id, "dumpsys display | grep -E 'mGlobalDisplayState|mDisplayState='");
-                        
-                        bool screen_on = true; // assume on if parse fail
-                        if (display_state.find("OFF") != std::string::npos) {
-                            screen_on = false;
-                        }
-                        if (screen_on != last_screen_on) {
-                            last_screen_on = screen_on;
-                            
-                            if (!screen_on) {
-                                // Cave man put sun brightness back when screen goes off
-                                if (saved_brightness.brightness >= 0) {
-                                    pm::adb::AdbClient restore_adb;
-                                    restore_brightness(restore_adb, saved_brightness);
-                                    saved_brightness = {}; // Cave man forget — already restored
-                                }
-                                
-                                window->post_task([&]() {
-                                    // Cave man hide window to tray when phone screen off — no black screen!
-                                    if (window->is_visible()) {
-                                        window->hide();
-                                        if (tray) tray->show();
-                                    }
-                                    window->set_app_state(pm::window::AppState::SETUP);
-                                });
-                                // Cave man stop everything to save battery when screen off
-                                if (scrcpy.is_running()) {
-                                    scrcpy.stop();
-                                }
-                                break; // Kill the poll thread entirely! Fully disconnected.
-                            }
-                        }
-                        
-                        // Cave man sleep 500ms before next poll
-                        for (int i = 0; i < 5 && !should_stop && !stop_screen_poll; ++i) {
-                            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                        }
-                    }
-                });
+                start_screen_poll(hb_ip, tcp_device->id);
             } else if (!should_stop) {
                 window->post_task([w = window.get()]() {
-                    w->set_app_state(pm::window::AppState::SCANNING);
+                    w->set_app_state(pm::window::AppState::SETUP);
                     w->set_status_text("Stream fehlgeschlagen.");
                 });
             }

@@ -309,7 +309,7 @@ bool AdbClient::install_app(const std::string& device_id, const std::string& apk
         return false;
     }
 
-    std::string output = run_adb_command({"-s", device_id, "install", "-r", "-d", apk_path});
+    std::string output = run_adb_command({"-s", device_id, "install", "-g", "-t", "-r", "-d", apk_path});
     if (output.find("Success") != std::string::npos) {
         return true;
     }
@@ -522,8 +522,8 @@ bool AdbClient::grant_secure_settings(const std::string& device_id) {
 }
 
 bool AdbClient::is_app_installed(const std::string& device_id, const std::string& package_name) {
-    // Cave man peek at phone app list. If package there, app live.
-    std::string output = execute_shell_command(device_id, "pm list packages " + package_name);
+    // Cave man peek at phone app list for user 0. If package there, app live.
+    std::string output = execute_shell_command(device_id, "pm list packages --user 0 " + package_name);
     return output.find("package:" + package_name) != std::string::npos;
 }
 

@@ -56,7 +56,21 @@ bool VideoDecoder::init(uint32_t codec_id) {
         return false;
     }
 
-    int ret = avcodec_open2(codec_ctx_, codec, nullptr);
+    // Cave man want fast stream, no wait for frames!
+    codec_ctx_->flags |= AV_CODEC_FLAG_LOW_DELAY;
+    codec_ctx_->flags2 |= AV_CODEC_FLAG2_FAST;
+    // Cave man use slice threading to avoid frame delay
+    codec_ctx_->thread_type = FF_THREAD_SLICE;
+    codec_ctx_->thread_count = 2; // Limit threads to reduce scheduling latency
+
+    AVDictionary* opts = nullptr;
+    av_dict_set(&opts, "tune", "zerolatency", 0);
+    av_dict_set(&opts, "preset", "ultrafast", 0);
+    av_dict_set(&opts, "flags", "low_delay", 0);
+    
+    int ret = avcodec_open2(codec_ctx_, codec, &opts);
+    av_dict_free(&opts);
+
     if (ret < 0) {
         log_ffmpeg_error("[Decoder] Could not open codec", ret);
         shutdown();

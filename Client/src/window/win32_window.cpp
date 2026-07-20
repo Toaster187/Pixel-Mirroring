@@ -45,6 +45,24 @@ namespace {
         return "";
     }
 
+    std::string wstring_to_utf8(const std::wstring& wstr) {
+        if (wstr.empty()) return "";
+        int len = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), static_cast<int>(wstr.size()), nullptr, 0, nullptr, nullptr);
+        if (len <= 0) return "";
+        std::string str(len, 0);
+        WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), static_cast<int>(wstr.size()), &str[0], len, nullptr, nullptr);
+        return str;
+    }
+
+    std::wstring utf8_to_wstring(const std::string& str) {
+        if (str.empty()) return L"";
+        int len = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), static_cast<int>(str.size()), nullptr, 0);
+        if (len <= 0) return L"";
+        std::wstring wstr(len, 0);
+        MultiByteToWideChar(CP_UTF8, 0, str.c_str(), static_cast<int>(str.size()), &wstr[0], len);
+        return wstr;
+    }
+
     int vk_to_android_keycode(WPARAM wparam) {
         // map VK to android key. cave man press buttons.
         switch (wparam) {
@@ -82,7 +100,10 @@ Win32Window::~Win32Window() {
     if (icon_font_) DeleteObject(icon_font_);
     // Cave man destroy child window before parent
     if (hwnd_child_) DestroyWindow(hwnd_child_);
-    if (hwnd_) DestroyWindow(hwnd_);
+    if (hwnd_) {
+        RemoveClipboardFormatListener(hwnd_);
+        DestroyWindow(hwnd_);
+    }
 }
 
 void Win32Window::set_app_state(AppState s) {
@@ -111,6 +132,8 @@ bool Win32Window::create() {
     hwnd_ = CreateWindowExA(0, wc.lpszClassName, title_.c_str(), style,
         CW_USEDEFAULT, CW_USEDEFAULT, width_, th, nullptr, nullptr, hi, this);
     if (!hwnd_) return false;
+
+    AddClipboardFormatListener(hwnd_);
 
     // MEOW. REMOVE WINDOW 11 BORDER AND CORNER ARTIFACTS.
     COLORREF border_color = 0xFFFFFFFE; // DWM_COLOR_DONT_DRAW
@@ -452,6 +475,14 @@ void Win32Window::draw_setup_screen(Gdiplus::Graphics& g) {
     Gdiplus::Font btnF(&uiFF, 11, Gdiplus::FontStyleBold, Gdiplus::UnitPoint);
     Gdiplus::SolidBrush btnText(Gdiplus::Color(255, 255, 255, 255));
     g.DrawString(L"Verbinden", -1, &btnF, btnR, &sf, &btnText);
+
+    if (!status_text_.empty()) {
+        Gdiplus::Font errF(&uiFF, 9, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
+        Gdiplus::SolidBrush errColor(Gdiplus::Color(255, 255, 110, 110));
+        std::wstring ws(status_text_.begin(), status_text_.end());
+        Gdiplus::RectF sr(px + 10.0f, btnR.Y + btnR.Height + 15.0f, pw - 20.0f, 60.0f);
+        g.DrawString(ws.c_str(), -1, &errF, sr, &sf, &errColor);
+    }
 }
 
 void Win32Window::draw_scanning_screen(Gdiplus::Graphics& g) {
@@ -555,6 +586,46 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
     }
 
     switch (msg) {
+    case WM_CLIPBOARDUPDATE: {
+        if (!m_os_clipboard_cb_ || app_state_ != AppState::STREAMING) {
+            return 0;
+        }
+        if (!IsClipboardFormatAvailable(CF_UNICODETEXT)) {
+            return 0;
+        }
+        std::string clipboard_text;
+        bool success = false;
+        for (int retry = 0; retry < 3; ++retry) {
+            if (OpenClipboard(hwnd_)) {
+                HANDLE hData = GetClipboardData(CF_UNICODETEXT);
+                if (hData) {
+                    wchar_t* pText = static_cast<wchar_t*>(GlobalLock(hData));
+                    if (pText) {
+                        clipboard_text = wstring_to_utf8(pText);
+                        GlobalUnlock(hData);
+                        success = true;
+                    }
+                }
+                CloseClipboard();
+                if (success) break;
+            }
+            Sleep(10);
+        }
+        if (success && !clipboard_text.empty()) {
+            bool changed = false;
+            {
+                std::lock_guard<std::mutex> lock(clipboard_mutex_);
+                if (clipboard_text != last_clipboard_text_) {
+                    last_clipboard_text_ = clipboard_text;
+                    changed = true;
+                }
+            }
+            if (changed && m_os_clipboard_cb_) {
+                m_os_clipboard_cb_(clipboard_text);
+            }
+        }
+        return 0;
+    }
     case WM_NCCALCSIZE:
         // Cave man remove window frame — no border artifacts
         if (wp == TRUE) return 0;
@@ -791,11 +862,145 @@ void Win32Window::post_task(std::function<void()> task) {
     PostMessage(hwnd_, WM_APP + 3, 0, reinterpret_cast<LPARAM>(heap_task));
 }
 
-void Win32Window::show_context_menu(POINT pt) {
-    HMENU menu = CreatePopupMenu();
-    if (!menu) return;
+namespace {
+    struct MenuItem {
+        UINT id;
+        std::wstring text;
+        bool has_toggle;
+        bool is_toggled;
+        bool is_separator;
+    };
 
-    // MEOW. MENU IDs. SIMPLE.
+    std::vector<MenuItem> g_menu_items;
+    int g_hovered_item = -1;
+    UINT g_selected_action = 0;
+    bool g_menu_done = false;
+
+    LRESULT CALLBACK SettingsMenuProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+        switch (msg) {
+            case WM_CREATE: {
+                HRGN rgn = CreateRoundRectRgn(0, 0, 320, 280, 12, 12);
+                SetWindowRgn(hwnd, rgn, TRUE);
+                return 0;
+            }
+            case WM_PAINT: {
+                PAINTSTRUCT ps;
+                HDC hdc = BeginPaint(hwnd, &ps);
+                RECT rc; GetClientRect(hwnd, &rc);
+                
+                Gdiplus::Graphics g(hdc);
+                g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+                g.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
+
+                Gdiplus::SolidBrush bgBrush(Gdiplus::Color(255, 35, 35, 35));
+                g.FillRectangle(&bgBrush, 0, 0, rc.right, rc.bottom);
+
+                Gdiplus::FontFamily fontFamily(L"Segoe UI");
+                Gdiplus::Font font(&fontFamily, 10.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
+                Gdiplus::SolidBrush textBrush(Gdiplus::Color(255, 240, 240, 240));
+                Gdiplus::StringFormat format;
+                format.SetAlignment(Gdiplus::StringAlignmentNear);
+                format.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+
+                int y = 5;
+                for (size_t i = 0; i < g_menu_items.size(); ++i) {
+                    const auto& item = g_menu_items[i];
+                    if (item.is_separator) {
+                        Gdiplus::Pen sepPen(Gdiplus::Color(255, 70, 70, 70), 1.0f);
+                        g.DrawLine(&sepPen, 15, y + 5, rc.right - 15, y + 5);
+                        y += 11;
+                        continue;
+                    }
+
+                    if ((int)i == g_hovered_item) {
+                        Gdiplus::SolidBrush hoverBrush(Gdiplus::Color(255, 60, 60, 60));
+                        g.FillRectangle(&hoverBrush, 0, y, rc.right, 30);
+                    }
+
+                    Gdiplus::RectF textRect(15.0f, (float)y, (float)rc.right - 15.0f, 30.0f);
+                    
+                    if (item.has_toggle) {
+                        // Draw toggle box
+                        float boxW = 30.0f;
+                        float boxH = 16.0f;
+                        float boxX = textRect.Width - boxW - 15.0f;
+                        float boxY = y + 7.0f;
+                        
+                        Gdiplus::GraphicsPath path;
+                        AddRoundedRect(path, Gdiplus::RectF(boxX, boxY, boxW, boxH), boxH / 2.0f);
+                        
+                        if (item.is_toggled) {
+                            Gdiplus::SolidBrush toggleBg(Gdiplus::Color(255, 76, 175, 80)); // Green
+                            g.FillPath(&toggleBg, &path);
+                            Gdiplus::SolidBrush circle(Gdiplus::Color(255, 255, 255, 255));
+                            g.FillEllipse(&circle, boxX + boxW - 14.0f, boxY + 2.0f, 12.0f, 12.0f);
+                        } else {
+                            Gdiplus::SolidBrush toggleBg(Gdiplus::Color(255, 70, 70, 70)); // Dark grey
+                            g.FillPath(&toggleBg, &path);
+                            Gdiplus::Pen border(Gdiplus::Color(255, 100, 100, 100), 1.0f);
+                            g.DrawPath(&border, &path);
+                            Gdiplus::SolidBrush circle(Gdiplus::Color(255, 150, 150, 150));
+                            g.FillEllipse(&circle, boxX + 2.0f, boxY + 2.0f, 12.0f, 12.0f);
+                        }
+                        
+                        textRect.Width = boxX - 10.0f - 15.0f;
+                    }
+
+                    g.DrawString(item.text.c_str(), -1, &font, textRect, &format, &textBrush);
+                    y += 30;
+                }
+                
+                EndPaint(hwnd, &ps);
+                return 0;
+            }
+            case WM_MOUSEMOVE: {
+                POINT pt = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+                int y = 5;
+                int hovered = -1;
+                for (size_t i = 0; i < g_menu_items.size(); ++i) {
+                    if (g_menu_items[i].is_separator) {
+                        y += 11;
+                        continue;
+                    }
+                    RECT item_rc = {0, y, 320, y + 30};
+                    if (PtInRect(&item_rc, pt)) {
+                        hovered = (int)i;
+                        break;
+                    }
+                    y += 30;
+                }
+                if (hovered != g_hovered_item) {
+                    g_hovered_item = hovered;
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                    TRACKMOUSEEVENT tme = {sizeof(TRACKMOUSEEVENT), TME_LEAVE, hwnd, 0};
+                    TrackMouseEvent(&tme);
+                }
+                return 0;
+            }
+            case WM_MOUSELEAVE: {
+                g_hovered_item = -1;
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+            case WM_LBUTTONUP: {
+                if (g_hovered_item >= 0 && g_hovered_item < (int)g_menu_items.size()) {
+                    g_selected_action = g_menu_items[g_hovered_item].id;
+                    g_menu_done = true;
+                    PostMessage(hwnd, WM_NULL, 0, 0);
+                }
+                return 0;
+            }
+            case WM_KILLFOCUS: {
+                g_menu_done = true;
+                PostMessage(hwnd, WM_NULL, 0, 0);
+                return 0;
+            }
+        }
+        return DefWindowProcA(hwnd, msg, wp, lp);
+    }
+}
+
+void Win32Window::show_context_menu(POINT pt) {
     constexpr UINT ID_FACTORY_RESET = 1001;
     constexpr UINT ID_TOGGLE_FPS    = 1002;
     constexpr UINT ID_TOGGLE_RES    = 1003;
@@ -805,31 +1010,69 @@ void Win32Window::show_context_menu(POINT pt) {
     constexpr UINT ID_TOGGLE_LOWEST_BRIGHTNESS = 1007;
     constexpr UINT ID_LOCK_DEVICE   = 1008;
 
-    AppendMenuW(menu, MF_STRING, ID_TOGGLE_FPS,
-        fps_limited_ ? L"\u2713  FPS begrenzen (30)" : L"    FPS begrenzen (30)");
-    AppendMenuW(menu, MF_STRING, ID_TOGGLE_RES,
-        resolution_limited_ ? L"\u2713  Aufloesung begrenzen (720p)" : L"    Aufloesung begrenzen (720p)");
-    AppendMenuW(menu, MF_STRING, ID_TOGGLE_COMPAT,
-        compatibility_mode_ ? L"\u2713  Kompatibilitaetsmodus (langsame PIN)" : L"    Kompatibilitaetsmodus (langsame PIN)");
-    AppendMenuW(menu, MF_STRING, ID_TOGGLE_LOWEST_BRIGHTNESS,
-        lowest_brightness_ ? L"\u2713  Bildschirm auf niedrigste Helligkeit" : L"    Bildschirm auf niedrigste Helligkeit");
-    AppendMenuW(menu, MF_STRING, ID_SET_PIN, L"    PIN zum Entsperren festlegen");
+    g_menu_items.clear();
+    g_menu_items.push_back({ID_TOGGLE_FPS, L"FPS begrenzen (30)", true, fps_limited_, false});
+    g_menu_items.push_back({ID_TOGGLE_RES, L"Aufl\x00f6sung begrenzen (720p)", true, resolution_limited_, false});
+    g_menu_items.push_back({ID_TOGGLE_COMPAT, L"Kompatibilit\x00e4tsmodus (langsame PIN)", true, compatibility_mode_, false});
+    g_menu_items.push_back({ID_TOGGLE_LOWEST_BRIGHTNESS, L"Bildschirm auf niedrigste Helligkeit", true, lowest_brightness_, false});
+    g_menu_items.push_back({0, L"", false, false, true});
+    g_menu_items.push_back({ID_SET_PIN, L"PIN zum Entsperren festlegen", false, false, false});
     if (app_state_ == AppState::STREAMING) {
-        AppendMenuW(menu, MF_STRING, ID_UNLOCK_DEVICE, L"    Handy entsperren (Strg+U)");
-        AppendMenuW(menu, MF_STRING, ID_LOCK_DEVICE,   L"    Handy sperren & Bildschirm aus (Strg+L)");
+        g_menu_items.push_back({ID_UNLOCK_DEVICE, L"Handy entsperren (Strg+U)", false, false, false});
+        g_menu_items.push_back({ID_LOCK_DEVICE, L"Handy sperren & Bildschirm aus (Strg+L)", false, false, false});
     }
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, ID_FACTORY_RESET, L"    Werkseinstellungen zuruecksetzen");
+    g_menu_items.push_back({0, L"", false, false, true});
+    g_menu_items.push_back({ID_FACTORY_RESET, L"Werkseinstellungen zur\x00fc" L"cksetzen", false, false, false});
+
+    int height = 10;
+    for (const auto& item : g_menu_items) {
+        height += item.is_separator ? 11 : 30;
+    }
+
+    static bool class_registered = false;
+    if (!class_registered) {
+        WNDCLASSEXA wc = {sizeof(WNDCLASSEXA)};
+        wc.lpfnWndProc = SettingsMenuProc;
+        wc.hInstance = GetModuleHandle(nullptr);
+        wc.lpszClassName = "PixelMirroringSettingsMenu";
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        RegisterClassExA(&wc);
+        class_registered = true;
+    }
 
     ClientToScreen(hwnd_, &pt);
-    UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
-        pt.x, pt.y, 0, hwnd_, nullptr);
-    DestroyMenu(menu);
+    
+    g_selected_action = 0;
+    g_hovered_item = -1;
+    
+    HWND hMenu = CreateWindowExA(WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        "PixelMirroringSettingsMenu", "",
+        WS_POPUP | WS_VISIBLE,
+        pt.x, pt.y, 320, height,
+        hwnd_, nullptr, GetModuleHandle(nullptr), nullptr);
+        
+    // Fix region height since we dynamically calculate height
+    HRGN rgn = CreateRoundRectRgn(0, 0, 320, height, 12, 12);
+    SetWindowRgn(hMenu, rgn, TRUE);
+    
+    SetFocus(hMenu);
+    g_menu_done = false;
 
-    if (cmd == 0) return;  // User dismissed menu
+    MSG msg;
+    while (GetMessage(&msg, nullptr, 0, 0)) {
+        if (!IsWindow(hMenu) || g_menu_done) break;
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
+    
+    if (IsWindow(hMenu)) {
+        DestroyWindow(hMenu);
+    }
+
+    if (g_selected_action == 0) return;
 
     MenuAction action;
-    switch (cmd) {
+    switch (g_selected_action) {
         case ID_FACTORY_RESET: action = MenuAction::FACTORY_RESET; break;
         case ID_TOGGLE_FPS:    action = MenuAction::TOGGLE_FPS_LIMIT; break;
         case ID_TOGGLE_RES:    action = MenuAction::TOGGLE_RESOLUTION_LIMIT; break;
@@ -841,6 +1084,41 @@ void Win32Window::show_context_menu(POINT pt) {
         default: return;
     }
     if (menu_cb_) menu_cb_(action);
+}
+
+void Win32Window::set_pc_clipboard(const std::string& text) {
+    if (text.empty()) return;
+
+    {
+        std::lock_guard<std::mutex> lock(clipboard_mutex_);
+        if (text == last_clipboard_text_) return;
+        last_clipboard_text_ = text;
+    }
+
+    std::wstring wstr = utf8_to_wstring(text);
+    if (wstr.empty()) return;
+
+    size_t bytes = (wstr.size() + 1) * sizeof(wchar_t);
+
+    for (int retry = 0; retry < 3; ++retry) {
+        if (OpenClipboard(hwnd_)) {
+            EmptyClipboard();
+            HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, bytes);
+            if (hMem) {
+                void* ptr = GlobalLock(hMem);
+                if (ptr) {
+                    memcpy(ptr, wstr.c_str(), bytes);
+                    GlobalUnlock(hMem);
+                    SetClipboardData(CF_UNICODETEXT, hMem);
+                } else {
+                    GlobalFree(hMem);
+                }
+            }
+            CloseClipboard();
+            break;
+        }
+        Sleep(10);
+    }
 }
 
 } // namespace pm::window

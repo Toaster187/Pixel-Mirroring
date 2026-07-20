@@ -269,8 +269,7 @@ class MirroringService : Service() {
 
                 var adbPort = (5555..5595).random()
                 val success = runBlocking {
-                    val ok = adbWifiManager.setAdbEnabled(true) &&
-                        adbWifiManager.enableAdbWifi() &&
+                    val ok = adbWifiManager.enableAdbWifi() &&
                         adbWifiManager.enableAdbTcpIp(adbPort)
                     val dynamicPort = adbWifiManager.getDynamicAdbPort()
                     if (dynamicPort != -1) {
