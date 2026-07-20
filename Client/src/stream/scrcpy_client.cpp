@@ -21,6 +21,7 @@ extern "C" {
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <cerrno>
 #define INVALID_SOCKET -1
 #define SOCKET_ERROR -1
 #define closesocket close
@@ -68,6 +69,14 @@ void ScrcpyClient::set_frame_callback(FrameCallback cb) {
     frame_cb_ = std::move(cb);
 }
 
+void ScrcpyClient::set_disconnect_callback(DisconnectCallback cb) {
+    disconnect_cb_ = std::move(cb);
+}
+
+void ScrcpyClient::set_device_clipboard_callback(ClipboardCallback cb) {
+    clipboard_cb_ = std::move(cb);
+}
+
 bool ScrcpyClient::start(const Config& config) {
     config_ = config;
     
@@ -87,6 +96,24 @@ bool ScrcpyClient::start(const Config& config) {
     if (!read_metadata()) return false;
 
     running_ = true;
+
+    // Cave man set recv timeout so video thread wakes up if phone goes silent
+    // Without this, recv() blocks forever on dead TCP connection (no FIN/RST)
+#ifdef _WIN32
+    DWORD recv_timeout = 10000; // 10 seconds
+    setsockopt(video_socket_, SOL_SOCKET, SO_RCVTIMEO, (const char*)&recv_timeout, sizeof(recv_timeout));
+    if (config_.control && control_socket_ != INVALID_SOCKET) {
+        setsockopt(control_socket_, SOL_SOCKET, SO_RCVTIMEO, (const char*)&recv_timeout, sizeof(recv_timeout));
+    }
+#else
+    struct timeval recv_timeout;
+    recv_timeout.tv_sec = 10;
+    recv_timeout.tv_usec = 0;
+    setsockopt(video_socket_, SOL_SOCKET, SO_RCVTIMEO, &recv_timeout, sizeof(recv_timeout));
+    if (config_.control && control_socket_ != INVALID_SOCKET) {
+        setsockopt(control_socket_, SOL_SOCKET, SO_RCVTIMEO, &recv_timeout, sizeof(recv_timeout));
+    }
+#endif
     
     video_thread_ = std::thread(&ScrcpyClient::video_thread_loop, this);
     if (config_.control) {
@@ -97,17 +124,27 @@ bool ScrcpyClient::start(const Config& config) {
 }
 
 void ScrcpyClient::stop() {
-    running_ = false;
+    bool expected = true;
+    if (!running_.compare_exchange_strong(expected, false)) {
+        return;
+    }
     
-    if (video_socket_ != INVALID_SOCKET) closesocket(video_socket_);
-    if (control_socket_ != INVALID_SOCKET) closesocket(control_socket_);
+    if (video_socket_ != INVALID_SOCKET) {
+        closesocket(video_socket_);
+        video_socket_ = INVALID_SOCKET;
+    }
+    if (control_socket_ != INVALID_SOCKET) {
+        closesocket(control_socket_);
+        control_socket_ = INVALID_SOCKET;
+    }
     
-    if (video_thread_.joinable()) video_thread_.join();
-    if (control_thread_.joinable()) control_thread_.join();
+    if (video_thread_.get_id() != std::this_thread::get_id() && video_thread_.joinable()) {
+        video_thread_.join();
+    }
+    if (control_thread_.get_id() != std::this_thread::get_id() && control_thread_.joinable()) {
+        control_thread_.join();
+    }
     
-    video_socket_ = INVALID_SOCKET;
-    control_socket_ = INVALID_SOCKET;
-
     // Cleanup ADB ports
     pm::adb::AdbClient adb;
     std::string remote = "localabstract:scrcpy_" + scid_;
@@ -384,10 +421,29 @@ void ScrcpyClient::video_thread_loop() {
         int total = 0;
         while (total < len && running_) {
             int r = recv(video_socket_, buf + total, len - total, 0);
-            if (r <= 0) return false;
-            total += r;
+            if (r > 0) {
+                total += r;
+            } else if (r == 0) {
+                // Clean close — phone hung up
+                return false;
+            } else {
+                // Cave man check if just timeout or real death
+#ifdef _WIN32
+                int err = WSAGetLastError();
+                if (err == WSAETIMEDOUT) {
+#else
+                int err = errno;
+                if (err == EAGAIN || err == EWOULDBLOCK) {
+#endif
+                    // Timeout — phone just not sending right now, retry if still running
+                    if (running_) continue;
+                    return false;
+                }
+                // Real socket error — connection dead
+                return false;
+            }
         }
-        return true;
+        return running_;
     };
 
     std::vector<uint8_t> packet_data;
@@ -429,11 +485,71 @@ void ScrcpyClient::video_thread_loop() {
             }
         }
     }
+
+    bool was_running = running_;
+    running_ = false;
+    if (was_running && disconnect_cb_) {
+        disconnect_cb_();
+    }
 }
 
 void ScrcpyClient::control_thread_loop() {
+    auto recv_all = [this](char* buf, int len) -> bool {
+        int total = 0;
+        while (total < len && running_) {
+            int r = recv(control_socket_, buf + total, len - total, 0);
+            if (r > 0) {
+                total += r;
+            } else if (r == 0) {
+                return false;
+            } else {
+#ifdef _WIN32
+                int err = WSAGetLastError();
+                if (err == WSAETIMEDOUT) {
+#else
+                int err = errno;
+                if (err == EAGAIN || err == EWOULDBLOCK) {
+#endif
+                    if (running_) continue;
+                    return false;
+                }
+                return false;
+            }
+        }
+        return running_;
+    };
+
     while (running_) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        uint8_t type = 0;
+        if (!recv_all((char*)&type, 1)) break;
+
+        if (type == 0) { // SC_DEVICE_MSG_TYPE_CLIPBOARD
+            uint8_t len_buf[4];
+            if (!recv_all((char*)len_buf, 4)) break;
+            uint32_t len = (len_buf[0] << 24) | (len_buf[1] << 16) | (len_buf[2] << 8) | len_buf[3];
+            if (len > 0 && len < 10 * 1024 * 1024) {
+                std::string text(len, '\0');
+                if (!recv_all(&text[0], len)) break;
+                if (clipboard_cb_) {
+                    clipboard_cb_(text);
+                }
+            }
+        } else if (type == 1) { // SC_DEVICE_MSG_TYPE_ACK_CLIPBOARD
+            uint8_t seq_buf[8];
+            if (!recv_all((char*)seq_buf, 8)) break;
+        } else if (type == 2) { // SC_DEVICE_MSG_TYPE_UHID_OUTPUT
+            uint8_t uhid_buf[2];
+            if (!recv_all((char*)uhid_buf, 2)) break;
+            uint8_t size_buf[2];
+            if (!recv_all((char*)size_buf, 2)) break;
+            uint16_t size = (size_buf[0] << 8) | size_buf[1];
+            if (size > 0 && size < 65536) {
+                std::vector<char> data(size);
+                if (!recv_all(data.data(), size)) break;
+            }
+        } else {
+            break;
+        }
     }
 }
 
@@ -551,6 +667,27 @@ void ScrcpyClient::inject_text(const std::string& text) {
     buf[0] = 1; // SC_CONTROL_MSG_TYPE_INJECT_TEXT
     write32(buf.data() + 1, len);
     std::memcpy(buf.data() + 5, text.data(), len);
+
+    send(control_socket_, (const char*)buf.data(), static_cast<int>(buf.size()), 0);
+}
+
+void ScrcpyClient::inject_set_clipboard(const std::string& text) {
+    if (!running_ || control_socket_ == INVALID_SOCKET || text.empty()) return;
+
+    auto write32 = [](uint8_t* out, uint32_t value) {
+        out[0] = static_cast<uint8_t>((value >> 24) & 0xff);
+        out[1] = static_cast<uint8_t>((value >> 16) & 0xff);
+        out[2] = static_cast<uint8_t>((value >> 8) & 0xff);
+        out[3] = static_cast<uint8_t>(value & 0xff);
+    };
+
+    uint32_t len = static_cast<uint32_t>(text.size());
+    std::vector<uint8_t> buf(14 + len);
+    buf[0] = 9; // SC_CONTROL_MSG_TYPE_SET_CLIPBOARD
+    std::memset(&buf[1], 0, 8); // 8 bytes sequence = 0
+    buf[9] = 0; // paste = false
+    write32(buf.data() + 10, len);
+    std::memcpy(buf.data() + 14, text.data(), len);
 
     send(control_socket_, (const char*)buf.data(), static_cast<int>(buf.size()), 0);
 }

@@ -100,6 +100,10 @@ public:
     virtual void set_resolution_limited(bool limited) = 0;
     virtual void set_compatibility_mode(bool enabled) = 0;
     virtual void set_lowest_brightness(bool enabled) = 0;
+
+    // Clipboard callbacks & sync
+    virtual void set_os_clipboard_update_callback(std::function<void(const std::string&)> cb) = 0;
+    virtual void set_pc_clipboard(const std::string& text) = 0;
 };
 
 // Factory function to create the appropriate window implementation for the current OS.

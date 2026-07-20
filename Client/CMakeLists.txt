@@ -47,26 +47,23 @@ if(PM_PORTABLE_BUILD)
     target_compile_definitions(PixelMirroring PRIVATE PM_PORTABLE_BUILD)
 endif()
 
-set(PM_ANDROID_APK_CANDIDATES
-    "${CMAKE_SOURCE_DIR}/../Android/app/build/outputs/apk/debug/app-debug.apk"
-    "${CMAKE_SOURCE_DIR}/../Android/app/build/intermediates/apk/debug/app-debug.apk"
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/copy_apk.cmake" "
+set(CANDIDATES
+    \"${CMAKE_SOURCE_DIR}/../Android/app/build/outputs/apk/debug/app-debug.apk\"
+    \"${CMAKE_SOURCE_DIR}/../Android/app/build/intermediates/apk/debug/app-debug.apk\"
 )
-
-foreach(PM_ANDROID_APK_CANDIDATE IN LISTS PM_ANDROID_APK_CANDIDATES)
-    if(EXISTS "${PM_ANDROID_APK_CANDIDATE}")
-        set(PM_ANDROID_APK "${PM_ANDROID_APK_CANDIDATE}")
+foreach(CAND IN LISTS CANDIDATES)
+    if(EXISTS \"\${CAND}\")
+        execute_process(COMMAND \${CMAKE_COMMAND} -E copy_if_different \"\${CAND}\" \"\${DEST}/PixelMirroring.apk\")
         break()
     endif()
 endforeach()
+")
 
-if(PM_ANDROID_APK)
-    add_custom_command(TARGET PixelMirroring POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${PM_ANDROID_APK}"
-            "$<TARGET_FILE_DIR:PixelMirroring>/PixelMirroring.apk"
-        COMMENT "Copy Android companion APK next to desktop client"
-    )
-endif()
+add_custom_command(TARGET PixelMirroring POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -D DEST="$<TARGET_FILE_DIR:PixelMirroring>" -P "${CMAKE_CURRENT_BINARY_DIR}/copy_apk.cmake"
+    COMMENT "Copy Android companion APK next to desktop client if it exists"
+)
 
 # --- Bootstrap Android Platform-Tools (ADB) ---
 # Cave man need ADB to talk to fire-box phone. If no ADB, cave man go get it!
@@ -259,7 +256,7 @@ if(WIN32)
     set(CPACK_NSIS_DISPLAY_NAME "Pixel Mirroring")
     set(CPACK_NSIS_HELP_LINK "https://github.com/Toasterfritzi/Pixel-Mirroring")
     set(CPACK_NSIS_URL_INFO_ABOUT "https://github.com/Toasterfritzi/Pixel-Mirroring")
-    set(CPACK_NSIS_MODIFY_PATH ON)
+    set(CPACK_NSIS_MODIFY_PATH OFF)
     
     # WiX specific settings (Official Windows Installer)
     set(CPACK_WIX_UPGRADE_GUID "D9F369E9-1A1A-4BE6-B6DF-D7E31BEF8CFD")

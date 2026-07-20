@@ -1,6 +1,5 @@
-# Gradle
+# Gradle & Android Build Artifacts
 .gradle/
-build/
 Android/.gradle/
 Android/.gradle-home/
 Android/.kotlin/
@@ -12,31 +11,57 @@ Android/app/.externalNativeBuild/
 Android/gradle/
 Android/gradlew
 Android/gradlew.bat
+build/
+**/build/
+**/build*/
+*.apk
+*.aab
+*.dex
+*.class
+captures/
 
-# IDEs
-.idea/
-.vs/
-*.iml
-.vscode/
-*.swp
-*.swo
-
-# Local config
-local.properties
-
-# C++ / Client build artifacts
-Client/build/
-Client/build_vs/
+# C++ / Desktop Client Build Artifacts & Dependencies
+Client/build*/
 Client/vcpkg_installed/
-Client/PreviewWindow.exe
+**/vcpkg_installed/
+**/vcpkg_downloads/
+cmake-build-*/
+out/
 *.obj
+*.o
 *.pdb
 *.bin
+*.ilk
+*.exp
+*.lib
+*.a
+*.tlog
+*.recipe
+Client/PreviewWindow.exe
 
+# IDEs & Editors
+.idea/
+.vs/
+.vscode/
+*.iml
+*.user
+*.vcxproj.user
+*.suo
+*.swp
+*.swo
+*~
 
-# Java / Android debug artifacts
+# Local Configuration & Environment
+local.properties
+.env
+.env.local
+
+# Java / Android Debug & Log Files
 *.hprof
+*.log
 
-# OS
+# OS Generated Files
 .DS_Store
 Thumbs.db
+desktop.ini
+$RECYCLE.BIN/

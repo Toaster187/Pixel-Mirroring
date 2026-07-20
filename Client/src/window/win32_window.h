@@ -7,6 +7,7 @@
 #include <gdiplus.h>
 #include <string>
 #include <functional>
+#include <mutex>
 #include "window_interface.h"
 
 struct SDL_Renderer;
@@ -46,6 +47,8 @@ public:
     void set_resolution_limited(bool limited) override { resolution_limited_ = limited; }
     void set_compatibility_mode(bool enabled) override { compatibility_mode_ = enabled; }
     void set_lowest_brightness(bool enabled) override { lowest_brightness_ = enabled; }
+    void set_os_clipboard_update_callback(std::function<void(const std::string&)> cb) override { m_os_clipboard_cb_ = std::move(cb); }
+    void set_pc_clipboard(const std::string& text) override;
 
 private:
     static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
@@ -112,6 +115,9 @@ private:
     bool resolution_limited_{false};
     bool compatibility_mode_{false};
     bool lowest_brightness_{true};
+    std::function<void(const std::string&)> m_os_clipboard_cb_;
+    std::string last_clipboard_text_;
+    std::mutex clipboard_mutex_;
 };
 
 } // namespace pm::window
