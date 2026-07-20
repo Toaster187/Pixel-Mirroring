@@ -862,6 +862,15 @@ static int app_main() {
     pm::stream::VideoRenderer renderer;
     pm::input::InputHandler input(&scrcpy);
 
+    auto run_on_device = [&scrcpy](auto action) {
+        if (!scrcpy.is_running()) return;
+        std::string device_id = scrcpy.get_device_id();
+        if (device_id.empty()) return;
+        std::thread([device_id, action]() {
+            action(device_id);
+        }).detach();
+    };
+
     // MEOW. WIRE CONTEXT MENU CALLBACK.
     window->set_menu_callback([&](pm::window::MenuAction action) {
         pm::Settings current_settings = pm::load_settings();
@@ -932,31 +941,17 @@ static int app_main() {
                     window->set_status_text("PIN nicht eingerichtet.");
                     break;
                 }
-                if (!scrcpy.is_running()) {
-                    break;
-                }
-                std::string device_id = scrcpy.get_device_id();
-                if (device_id.empty()) {
-                    break;
-                }
-                std::thread([device_id, w = window.get()]() {
-                    unlock_device_if_needed(device_id, w);
-                }).detach();
+                run_on_device([w = window.get()](const std::string& id) {
+                    unlock_device_if_needed(id, w);
+                });
                 break;
             }
             case pm::window::MenuAction::LOCK_DEVICE: {
-                if (!scrcpy.is_running()) {
-                    break;
-                }
-                std::string device_id = scrcpy.get_device_id();
-                if (device_id.empty()) {
-                    break;
-                }
-                std::thread([device_id]() {
+                run_on_device([](const std::string& id) {
                     // Cave man lock screen and turn off light
                     pm::adb::AdbClient adb;
-                    adb.execute_shell_command(device_id, "input keyevent 223");
-                }).detach();
+                    adb.execute_shell_command(id, "input keyevent 223");
+                });
                 break;
             }
         }
@@ -979,12 +974,9 @@ static int app_main() {
 #endif
             // Cave man wake and unlock phone on restore
             if (scrcpy.is_running()) {
-                std::string device_id = scrcpy.get_device_id();
-                if (!device_id.empty()) {
-                    std::thread([device_id, w = window.get()]() {
-                        unlock_device_if_needed(device_id, w);
-                    }).detach();
-                }
+                run_on_device([w = window.get()](const std::string& id) {
+                    unlock_device_if_needed(id, w);
+                });
             } else {
                 window->set_app_state(pm::window::AppState::SCANNING);
                 window->set_status_text("Starte neue Verbindung...");
