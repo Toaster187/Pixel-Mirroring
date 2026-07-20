@@ -246,23 +246,30 @@ set(CPACK_PACKAGE_VERSION_MINOR ${PROJECT_VERSION_MINOR})
 set(CPACK_PACKAGE_VERSION_PATCH ${PROJECT_VERSION_PATCH})
 
 if(WIN32)
-    set(CPACK_GENERATOR "ZIP;NSIS;WIX")
+    # Determine if this is a portable or full installer build
+    if(PM_PORTABLE_BUILD)
+        set(CPACK_GENERATOR "ZIP")
+        set(CPACK_PACKAGE_FILE_NAME "PixelMirroring-${PROJECT_VERSION}-portable-x64")
+    else()
+        set(CPACK_GENERATOR "ZIP;NSIS")
+        set(CPACK_PACKAGE_FILE_NAME "PixelMirroring-${PROJECT_VERSION}-x64")
+    endif()
     
     # Executables to create shortcuts for
     set(CPACK_PACKAGE_EXECUTABLES "PixelMirroring" "Pixel Mirroring")
     
-    # NSIS specific settings
-    set(CPACK_NSIS_PACKAGE_NAME "Pixel Mirroring")
+    # NSIS specific settings (Full installer for system installation)
+    set(CPACK_NSIS_PACKAGE_NAME "Pixel Mirroring ${PROJECT_VERSION}")
     set(CPACK_NSIS_DISPLAY_NAME "Pixel Mirroring")
     set(CPACK_NSIS_HELP_LINK "https://github.com/Toasterfritzi/Pixel-Mirroring")
     set(CPACK_NSIS_URL_INFO_ABOUT "https://github.com/Toasterfritzi/Pixel-Mirroring")
+    # Do NOT add to PATH - user should not modify system PATH
     set(CPACK_NSIS_MODIFY_PATH OFF)
-    
-    # WiX specific settings (Official Windows Installer)
-    set(CPACK_WIX_UPGRADE_GUID "D9F369E9-1A1A-4BE6-B6DF-D7E31BEF8CFD")
-    set(CPACK_WIX_PROGRAM_MENU_FOLDER "Pixel Mirroring")
+    # Install to Program Files by default
+    set(CPACK_NSIS_INSTALL_ROOT "$PROGRAMFILES")
 else()
     set(CPACK_GENERATOR "TGZ")
+    set(CPACK_PACKAGE_FILE_NAME "PixelMirroring-${PROJECT_VERSION}-x64")
 endif()
 
 include(CPack)
