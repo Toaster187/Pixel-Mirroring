@@ -37,6 +37,7 @@ private:
     AVStream* m_video_stream{nullptr};
     SwsContext* m_video_scaler{nullptr};
     std::filesystem::path m_video_path;
+    int64_t m_start_time_us{0};
     int64_t m_next_pts{0};
     bool m_recording{false};
     bool m_video_has_frames{false};

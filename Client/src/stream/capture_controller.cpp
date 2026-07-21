@@ -15,16 +15,37 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 
+#ifdef _WIN32
+#include <shlobj.h>
+#endif
+
 namespace pm::stream {
 
 namespace {
 constexpr AVRational CAPTURE_FPS = {60, 1};
 
 std::filesystem::path capture_directory() {
-    std::filesystem::path path = pm::get_settings_path().parent_path() / "captures";
+#ifdef _WIN32
+    char path[MAX_PATH];
+    if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_MYPICTURES, NULL, 0, path))) {
+        std::filesystem::path full_path = std::filesystem::path(path) / "PixelMirroring";
+        std::error_code ec;
+        std::filesystem::create_directories(full_path, ec);
+        return ec ? std::filesystem::current_path() : full_path;
+    }
+#else
+    const char* home = std::getenv("HOME");
+    if (home) {
+        std::filesystem::path full_path = std::filesystem::path(home) / "Pictures" / "PixelMirroring";
+        std::error_code ec;
+        std::filesystem::create_directories(full_path, ec);
+        return ec ? std::filesystem::current_path() : full_path;
+    }
+#endif
+    std::filesystem::path fallback = pm::get_settings_path().parent_path() / "captures";
     std::error_code ec;
-    std::filesystem::create_directories(path, ec);
-    return ec ? std::filesystem::current_path() : path;
+    std::filesystem::create_directories(fallback, ec);
+    return ec ? std::filesystem::current_path() : fallback;
 }
 
 std::string capture_timestamp() {
@@ -56,6 +77,11 @@ std::filesystem::path CaptureController::make_capture_path(const char* prefix, c
     return capture_directory() / (std::string(prefix) + "_" + capture_timestamp() + extension);
 }
 
+int64_t get_time_us() {
+    auto now = std::chrono::steady_clock::now().time_since_epoch();
+    return std::chrono::duration_cast<std::chrono::microseconds>(now).count();
+}
+
 void CaptureController::on_frame(const AVFrame* frame) {
     if (!frame || frame->width <= 0 || frame->height <= 0) return;
 
@@ -72,15 +98,26 @@ void CaptureController::on_frame(const AVFrame* frame) {
 
 std::optional<std::filesystem::path> CaptureController::take_screenshot() {
     std::lock_guard<std::mutex> lock(m_mutex);
-    if (!m_last_frame) return std::nullopt;
+    
+    std::ofstream debug(capture_directory() / "debug.txt", std::ios::app);
+    debug << "take_screenshot called\n";
 
-    const AVCodec* png = avcodec_find_encoder(AV_CODEC_ID_PNG);
-    if (!png) return std::nullopt;
+    if (!m_last_frame) {
+        debug << "m_last_frame is null\n";
+        return std::nullopt;
+    }
 
-    AVCodecContext* codec = avcodec_alloc_context3(png);
+    const AVCodec* bmp = avcodec_find_encoder(AV_CODEC_ID_BMP);
+    if (!bmp) {
+        debug << "avcodec_find_encoder(AV_CODEC_ID_BMP) failed\n";
+        return std::nullopt;
+    }
+
+    AVCodecContext* codec = avcodec_alloc_context3(bmp);
     AVFrame* rgb = av_frame_alloc();
     AVPacket* packet = av_packet_alloc();
     if (!codec || !rgb || !packet) {
+        debug << "alloc failed\n";
         avcodec_free_context(&codec);
         av_frame_free(&rgb);
         av_packet_free(&packet);
@@ -89,29 +126,40 @@ std::optional<std::filesystem::path> CaptureController::take_screenshot() {
 
     codec->width = m_last_frame->width;
     codec->height = m_last_frame->height;
-    codec->pix_fmt = AV_PIX_FMT_RGB24;
+    codec->pix_fmt = AV_PIX_FMT_BGR24;
     codec->time_base = {1, 1};
     rgb->format = codec->pix_fmt;
     rgb->width = codec->width;
     rgb->height = codec->height;
 
     std::optional<std::filesystem::path> result;
-    if (avcodec_open2(codec, png, nullptr) >= 0 && av_frame_get_buffer(rgb, 1) >= 0) {
-        SwsContext* scaler = sws_getContext(
-            m_last_frame->width, m_last_frame->height, static_cast<AVPixelFormat>(m_last_frame->format),
-            rgb->width, rgb->height, AV_PIX_FMT_RGB24, SWS_POINT, nullptr, nullptr, nullptr);
-        if (scaler && sws_scale(scaler, m_last_frame->data, m_last_frame->linesize, 0,
-                m_last_frame->height, rgb->data, rgb->linesize) > 0 &&
-            avcodec_send_frame(codec, rgb) >= 0 && avcodec_receive_packet(codec, packet) >= 0) {
-            const auto path = make_capture_path("Screenshot", ".png");
-            std::ofstream output(path, std::ios::binary);
-            if (output) {
-                output.write(reinterpret_cast<const char*>(packet->data), packet->size);
-                if (output.good()) result = path;
-            }
-        }
-        sws_freeContext(scaler);
-    }
+
+    if (avcodec_open2(codec, bmp, nullptr) >= 0) {
+        if (av_frame_get_buffer(rgb, 1) >= 0) {
+            SwsContext* scaler = sws_getContext(
+                m_last_frame->width, m_last_frame->height, static_cast<AVPixelFormat>(m_last_frame->format),
+                rgb->width, rgb->height, AV_PIX_FMT_BGR24, SWS_POINT, nullptr, nullptr, nullptr);
+            if (scaler) {
+                if (sws_scale(scaler, m_last_frame->data, m_last_frame->linesize, 0,
+                    m_last_frame->height, rgb->data, rgb->linesize) > 0) {
+                    if (avcodec_send_frame(codec, rgb) >= 0) {
+                        if (avcodec_receive_packet(codec, packet) >= 0) {
+                            const auto path = make_capture_path("Screenshot", ".bmp");
+                            std::ofstream output(path, std::ios::binary);
+                            if (output) {
+                                output.write(reinterpret_cast<const char*>(packet->data), packet->size);
+                                if (output.good()) {
+                                    result = path;
+                                    debug << "Screenshot success\n";
+                                } else { debug << "output write failed\n"; }
+                            } else { debug << "output open failed\n"; }
+                        } else { debug << "avcodec_receive_packet failed\n"; }
+                    } else { debug << "avcodec_send_frame failed\n"; }
+                } else { debug << "sws_scale failed\n"; }
+                sws_freeContext(scaler);
+            } else { debug << "sws_getContext failed\n"; }
+        } else { debug << "av_frame_get_buffer failed\n"; }
+    } else { debug << "avcodec_open2 failed\n"; }
 
     av_packet_free(&packet);
     av_frame_free(&rgb);
@@ -153,17 +201,24 @@ bool CaptureController::is_recording() const {
 }
 
 bool CaptureController::open_video_locked(const AVFrame* frame) {
+    std::ofstream debug(capture_directory() / "debug.txt", std::ios::app);
+    debug << "open_video_locked called\n";
     m_video_path = make_capture_path("Aufnahme", ".mp4");
     if (avformat_alloc_output_context2(&m_format_context, nullptr, "mp4", m_video_path.string().c_str()) < 0 ||
         !m_format_context) {
+        debug << "avformat_alloc_output_context2 failed\n";
         close_video_locked();
         return false;
     }
 
     const AVCodec* encoder = avcodec_find_encoder(AV_CODEC_ID_H264);
+    if (!encoder) {
+        debug << "avcodec_find_encoder(AV_CODEC_ID_H264) failed\n";
+    }
     m_video_stream = avformat_new_stream(m_format_context, encoder);
     m_video_codec = encoder ? avcodec_alloc_context3(encoder) : nullptr;
     if (!m_video_stream || !m_video_codec) {
+        debug << "stream or codec alloc failed\n";
         close_video_locked();
         return false;
     }
@@ -173,8 +228,8 @@ bool CaptureController::open_video_locked(const AVFrame* frame) {
     m_video_codec->width = frame->width;
     m_video_codec->height = frame->height;
     m_video_codec->pix_fmt = AV_PIX_FMT_YUV420P;
-    m_video_codec->time_base = av_inv_q(CAPTURE_FPS);
-    m_video_codec->framerate = CAPTURE_FPS;
+    m_video_codec->time_base = {1, 1000};
+    m_video_codec->framerate = {60, 1};
     m_video_codec->bit_rate = 16'000'000;
     m_video_codec->gop_size = 60;
     m_video_codec->max_b_frames = 0;
@@ -199,7 +254,7 @@ bool CaptureController::open_video_locked(const AVFrame* frame) {
         return false;
     }
 
-    m_next_pts = 0;
+    m_start_time_us = get_time_us();
     m_video_has_frames = false;
     m_recording = true;
     return true;
@@ -223,7 +278,14 @@ bool CaptureController::encode_video_frame_locked(const AVFrame* frame) {
         input->width, input->height, AV_PIX_FMT_YUV420P, SWS_POINT, nullptr, nullptr, nullptr);
     const bool scaled = m_video_scaler && sws_scale(m_video_scaler, frame->data, frame->linesize, 0,
         frame->height, input->data, input->linesize) > 0;
-    input->pts = m_next_pts++;
+        
+    int64_t now_us = get_time_us();
+    int64_t duration_us = now_us - m_start_time_us;
+    if (duration_us < 0) duration_us = 0;
+    
+    // Scale from microseconds to milliseconds (our time_base is 1/1000)
+    input->pts = av_rescale_q(duration_us, {1, 1000000}, m_video_codec->time_base);
+    
     bool success = scaled && avcodec_send_frame(m_video_codec, input) >= 0;
     av_frame_free(&input);
     if (!success) return false;

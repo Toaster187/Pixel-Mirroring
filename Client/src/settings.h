@@ -11,7 +11,7 @@ struct Settings {
     std::string m_pin = ""; // Saved PIN. Encrypted on Windows.
     bool m_compatibility_mode = false; // CAVE MAN USE SLOW PIN UNLOCK COMPATIBILITY.
     bool m_lowest_brightness = true;   // CAVE MAN MAKE SCREEN BRIGHTNESS VERY LOW AT START
-    bool m_send_captures_to_phone = false; // CAVE MAN PUSH FINISHED CAPTURE BACK TO PHONE
+    bool m_send_captures_to_phone = true; // CAVE MAN PUSH FINISHED CAPTURE BACK TO PHONE
 };
 
 Settings load_settings();

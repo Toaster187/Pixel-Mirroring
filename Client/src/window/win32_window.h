@@ -8,6 +8,7 @@
 #include <string>
 #include <functional>
 #include <mutex>
+#include <chrono>
 #include "window_interface.h"
 
 struct SDL_Renderer;
@@ -48,7 +49,8 @@ public:
     void set_compatibility_mode(bool enabled) override { compatibility_mode_ = enabled; }
     void set_lowest_brightness(bool enabled) override { lowest_brightness_ = enabled; }
     void set_capture_send_to_phone(bool enabled) override { capture_send_to_phone_ = enabled; }
-    void set_recording(bool recording) override { recording_ = recording; if (hwnd_) InvalidateRect(hwnd_, &rect_bubble_, FALSE); }
+    void set_recording(bool recording) override;
+    void trigger_screenshot_flash() override;
     void set_os_clipboard_update_callback(std::function<void(const std::string&)> cb) override { m_os_clipboard_cb_ = std::move(cb); }
     void set_pc_clipboard(const std::string& text) override;
 
@@ -95,6 +97,9 @@ private:
     // Layout rectangles
     RECT rect_phone_{0};
     RECT rect_bubble_{0};
+    RECT rect_recording_bubble_{0};
+    RECT rect_recording_stop_{0};
+    RECT rect_screenshot_bubble_{0};
     RECT rect_capture_{0}, rect_drag_{0}, rect_min_{0}, rect_max_{0}, rect_close_{0};
     RECT rect_start_btn_{0};
     
@@ -120,6 +125,10 @@ private:
     bool lowest_brightness_{true};
     bool capture_send_to_phone_{false};
     bool recording_{false};
+    std::chrono::steady_clock::time_point recording_start_time_;
+    bool screenshot_flash_{false};
+    std::chrono::steady_clock::time_point screenshot_flash_start_;
+    int screenshot_flash_frames_{0};
     std::function<void(const std::string&)> m_os_clipboard_cb_;
     std::string last_clipboard_text_;
     std::mutex clipboard_mutex_;

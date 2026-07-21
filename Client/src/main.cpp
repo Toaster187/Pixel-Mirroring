@@ -39,6 +39,27 @@ constexpr const char* ANDROID_SERVICE = "dev.pixelmirroring.app/.service.Mirrori
 constexpr int ADB_TCP_PORT = 5555;
 constexpr int HEARTBEAT_INTERVAL_MS = 5000;
 
+#ifdef _WIN32
+int GetEncoderClsid(const WCHAR* format, CLSID* pClsid) {
+    UINT num = 0;
+    UINT size = 0;
+    Gdiplus::GetImageEncodersSize(&num, &size);
+    if (size == 0) return -1;
+    Gdiplus::ImageCodecInfo* pImageCodecInfo = (Gdiplus::ImageCodecInfo*)(malloc(size));
+    if (pImageCodecInfo == nullptr) return -1;
+    Gdiplus::GetImageEncoders(num, size, pImageCodecInfo);
+    for (UINT j = 0; j < num; ++j) {
+        if (wcscmp(pImageCodecInfo[j].MimeType, format) == 0) {
+            *pClsid = pImageCodecInfo[j].Clsid;
+            free(pImageCodecInfo);
+            return j;
+        }
+    }
+    free(pImageCodecInfo);
+    return -1;
+}
+#endif
+
 struct SetupState {
     bool configured = false;
     std::string device_ip;
@@ -883,6 +904,13 @@ static int app_main() {
             adb.execute_shell_command(device_id, "mkdir -p " + remote_dir);
             const bool sent = adb.push_file(device_id, path.string(), remote_path);
             if (sent) {
+                // Trigger our custom BroadcastReceiver in the companion app to scan the file via MediaScannerConnection (reliable on Android 11+)
+                adb.execute_shell_command(device_id,
+                    "am broadcast -a dev.pixelmirroring.app.SCAN_FILE -e path \"" + remote_path + "\"");
+                // Fallback: Direct content provider insert for modern Android
+                adb.execute_shell_command(device_id,
+                    "content insert --uri content://media/external/images/media --bind _data:s:\"" + remote_path + "\"");
+                // Legacy intent broadcast for older Android versions
                 adb.execute_shell_command(device_id,
                     "am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file://" + remote_path);
             }
@@ -942,6 +970,30 @@ static int app_main() {
                     window->set_status_text("Bildschirmfoto konnte nicht erstellt werden.");
                     break;
                 }
+#ifdef _WIN32
+                // Convert BMP to PNG
+                std::wstring bmpPath = screenshot->wstring();
+                Gdiplus::Bitmap* bmp = new Gdiplus::Bitmap(bmpPath.c_str());
+                if (bmp && bmp->GetLastStatus() == Gdiplus::Ok) {
+                    CLSID pngClsid;
+                    if (GetEncoderClsid(L"image/png", &pngClsid) != -1) {
+                        std::filesystem::path pngPath = *screenshot;
+                        pngPath.replace_extension(".png");
+                        if (bmp->Save(pngPath.wstring().c_str(), &pngClsid, nullptr) == Gdiplus::Ok) {
+                            delete bmp;
+                            std::filesystem::remove(*screenshot);
+                            screenshot = pngPath;
+                        } else {
+                            delete bmp;
+                        }
+                    } else {
+                        delete bmp;
+                    }
+                } else {
+                    if (bmp) delete bmp;
+                }
+#endif
+                window->trigger_screenshot_flash();
                 window->set_status_text("Bildschirmfoto gespeichert: " + screenshot->filename().string());
                 if (current_settings.m_send_captures_to_phone) {
                     publish_capture_to_phone(*screenshot);

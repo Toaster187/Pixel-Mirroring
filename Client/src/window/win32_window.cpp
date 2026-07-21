@@ -16,6 +16,7 @@ namespace {
     const int BUBBLE_H = 36;
     const int BUBBLE_GAP = 6;
     const int MIN_PHONE_W = 140;
+    const int MIN_PHONE_H = 200;
     const UINT WM_VIDEO_RENDER = WM_APP + 2;
     const wchar_t* ICON_DRAG = L"\uE700";
     const wchar_t* ICON_MINIMIZE = L"\uE921";
@@ -235,6 +236,26 @@ void Win32Window::recalc_layout() {
     rect_max_   = {rect_min_.right, 0, rect_min_.right + btnw, BUBBLE_H};
     rect_close_ = {rect_max_.right, 0, rect_max_.right + btnw, BUBBLE_H};
 
+    if (recording_) {
+        int r_bw = 100;
+        int r_bx = rect_bubble_.left - BUBBLE_GAP - r_bw;
+        if (r_bx < 0) r_bx = 0;
+        rect_recording_bubble_ = {r_bx, 0, r_bx + r_bw, BUBBLE_H};
+        rect_recording_stop_ = {rect_recording_bubble_.right - BUBBLE_H, 0, rect_recording_bubble_.right, BUBBLE_H};
+    } else {
+        rect_recording_bubble_ = {0,0,0,0};
+        rect_recording_stop_ = {0,0,0,0};
+    }
+
+    if (screenshot_flash_) {
+        int s_bw = 40;
+        int s_bx = (recording_ ? rect_recording_bubble_.left : rect_bubble_.left) - BUBBLE_GAP - s_bw;
+        if (s_bx < 0) s_bx = 0;
+        rect_screenshot_bubble_ = {s_bx, 0, s_bx + s_bw, BUBBLE_H};
+    } else {
+        rect_screenshot_bubble_ = {0,0,0,0};
+    }
+
     // Start button in phone area
     int sbw = 180, sbh = 40;
     int px = (rect_phone_.left + rect_phone_.right) / 2;
@@ -267,8 +288,23 @@ void Win32Window::update_region() {
     HRGN pr = CreateRoundRectRgn(rect_phone_.left, rect_phone_.top,
         rect_phone_.right+1, rect_phone_.bottom+1, PHONE_CORNER_RADIUS*2, PHONE_CORNER_RADIUS*2);
     HRGN c = CreateRectRgn(0,0,0,0);
-    CombineRgn(c, br, pr, RGN_OR);
-    SetWindowRgn(hwnd_, c, TRUE);
+    HRGN rgn = CreateRectRgn(0,0,0,0);
+    CombineRgn(rgn, br, pr, RGN_OR);
+    
+    if (recording_) {
+        HRGN br2 = CreateRoundRectRgn(rect_recording_bubble_.left, rect_recording_bubble_.top,
+            rect_recording_bubble_.right+1, rect_recording_bubble_.bottom+1, BUBBLE_CORNER_RADIUS*2, BUBBLE_CORNER_RADIUS*2);
+        CombineRgn(rgn, rgn, br2, RGN_OR);
+        DeleteObject(br2);
+    }
+    if (screenshot_flash_) {
+        HRGN br3 = CreateRoundRectRgn(rect_screenshot_bubble_.left, rect_screenshot_bubble_.top,
+            rect_screenshot_bubble_.right+1, rect_screenshot_bubble_.bottom+1, BUBBLE_CORNER_RADIUS*2, BUBBLE_CORNER_RADIUS*2);
+        CombineRgn(rgn, rgn, br3, RGN_OR);
+        DeleteObject(br3);
+    }
+    
+    SetWindowRgn(hwnd_, rgn, TRUE);
     DeleteObject(br); DeleteObject(pr);
 }
 
@@ -295,6 +331,7 @@ void Win32Window::send_pointer_event(PointerAction action, int x, int y) {
 }
 
 int Win32Window::hit_test_button(POINT pt) {
+    if (recording_ && PtInRect(&rect_recording_stop_, pt)) return 5;
     if (PtInRect(&rect_capture_, pt)) return 4;
     if (PtInRect(&rect_close_, pt)) return 3;
     if (PtInRect(&rect_max_, pt))   return 2;
@@ -402,17 +439,17 @@ void Win32Window::handle_paint() {
 
         // Button icons
         Gdiplus::FontFamily ff(L"Segoe MDL2 Assets");
-        Gdiplus::Font iconF(&ff, 10, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
-        Gdiplus::StringFormat sf;
-        sf.SetAlignment(Gdiplus::StringAlignmentCenter);
-        sf.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+        Gdiplus::Font iFont(&ff, 10, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
+        Gdiplus::StringFormat sfmt;
+        sfmt.SetAlignment(Gdiplus::StringAlignmentCenter);
+        sfmt.SetLineAlignment(Gdiplus::StringAlignmentCenter);
 
         auto drawIcon = [&](const wchar_t* icon, RECT& r, bool isClose) {
             Gdiplus::Color c = (isClose && hovered_button_ == 3)
                 ? Gdiplus::Color(255,255,255,255) : Gdiplus::Color(255,220,220,220);
             Gdiplus::SolidBrush b(c);
             Gdiplus::RectF rf((float)r.left,(float)r.top,(float)(r.right-r.left),(float)(r.bottom-r.top));
-            g.DrawString(icon, -1, &iconF, rf, &sf, &b);
+            g.DrawString(icon, -1, &iFont, rf, &sfmt, &b);
         };
         if (recording_) {
             Gdiplus::FontFamily liveFF(L"Segoe UI");
@@ -420,7 +457,7 @@ void Win32Window::handle_paint() {
             Gdiplus::SolidBrush red(Gdiplus::Color(255, 244, 67, 54));
             Gdiplus::RectF liveRect((float)rect_capture_.left, (float)rect_capture_.top,
                 (float)(rect_capture_.right - rect_capture_.left), (float)(rect_capture_.bottom - rect_capture_.top));
-            g.DrawString(L"LIVE", -1, &liveF, liveRect, &sf, &red);
+            g.DrawString(L"LIVE", -1, &liveF, liveRect, &sfmt, &red);
         } else {
             drawIcon(ICON_CAPTURE, rect_capture_, false);
         }
@@ -429,16 +466,77 @@ void Win32Window::handle_paint() {
         drawIcon(is_max_height_ ? ICON_RESTORE : ICON_MAXIMIZE, rect_max_, false);
         drawIcon(ICON_CLOSE, rect_close_, true);
 
-        // Phone content based on state
-        switch (app_state_) {
+        // Recording bubble
+        if (recording_) {
+            Gdiplus::RectF rbbr((float)rect_recording_bubble_.left, (float)rect_recording_bubble_.top,
+                (float)(rect_recording_bubble_.right - rect_recording_bubble_.left) - 1.0f,
+                (float)(rect_recording_bubble_.bottom - rect_recording_bubble_.top) - 1.0f);
+            
+            Gdiplus::GraphicsPath rbp;
+            AddRoundedRect(rbp, rbbr, (float)BUBBLE_CORNER_RADIUS);
+            Gdiplus::SolidBrush rbb(Gdiplus::Color(255, 196, 43, 28)); // Red Bubble
+            g.FillPath(&rbb, &rbp);
+            Gdiplus::Pen rpen(Gdiplus::Color(255, 220, 60, 40), 1.0f);
+            g.DrawPath(&rpen, &rbp);
+
+            // Timer Text
+            auto now = std::chrono::steady_clock::now();
+            auto diff = std::chrono::duration_cast<std::chrono::seconds>(now - recording_start_time_).count();
+            int mins = diff / 60;
+            int secs = diff % 60;
+            wchar_t time_buf[16];
+            swprintf_s(time_buf, 16, L"%02d:%02d", mins, secs);
+            std::wstring timeStr(time_buf);
+
+            Gdiplus::FontFamily liveFF(L"Segoe UI");
+            Gdiplus::Font fFont(&liveFF, 9, Gdiplus::FontStyleBold, Gdiplus::UnitPoint);
+            Gdiplus::SolidBrush textB(Gdiplus::Color(255, 255, 255, 255));
+            Gdiplus::RectF timeRect((float)rect_recording_bubble_.left, (float)rect_recording_bubble_.top,
+                (float)(rect_recording_bubble_.right - rect_recording_bubble_.left - BUBBLE_H), (float)(rect_recording_bubble_.bottom - rect_recording_bubble_.top));
+            
+            // Stop Icon
+            Gdiplus::RectF stopRect((float)rect_recording_stop_.left, (float)rect_recording_stop_.top,
+                (float)(rect_recording_stop_.right - rect_recording_stop_.left), (float)(rect_recording_stop_.bottom - rect_recording_stop_.top));
+            
+            if (hovered_button_ == 5) {
+                Gdiplus::GraphicsPath clip;
+                AddRoundedRect(clip, rbbr, (float)BUBBLE_CORNER_RADIUS);
+                Gdiplus::Region clipRgn(&clip);
+                g.SetClip(&clipRgn);
+                Gdiplus::SolidBrush hb(Gdiplus::Color(255, 230, 70, 50));
+                g.FillRectangle(&hb, stopRect);
+                g.ResetClip();
+            }
+            g.DrawString(timeStr.c_str(), -1, &fFont, timeRect, &sfmt, &textB);
+        }
+
+        if (screenshot_flash_) {
+            Gdiplus::SolidBrush sb(Gdiplus::Color(255, 30, 144, 255)); // Blue flash bubble
+            Gdiplus::RectF sbbr((float)rect_screenshot_bubble_.left, (float)rect_screenshot_bubble_.top,
+                (float)(rect_screenshot_bubble_.right - rect_screenshot_bubble_.left) - 1.0f,
+                (float)(rect_screenshot_bubble_.bottom - rect_screenshot_bubble_.top) - 1.0f);
+            
+            Gdiplus::GraphicsPath spath;
+            AddRoundedRect(spath, sbbr, (float)BUBBLE_CORNER_RADIUS);
+            g.FillPath(&sb, &spath);
+
+            // Draw Camera Icon in blue bubble
+            Gdiplus::SolidBrush whiteB(Gdiplus::Color(255, 255, 255, 255));
+            Gdiplus::RectF iconRect((float)rect_screenshot_bubble_.left, (float)rect_screenshot_bubble_.top,
+                (float)(rect_screenshot_bubble_.right - rect_screenshot_bubble_.left), (float)(rect_screenshot_bubble_.bottom - rect_screenshot_bubble_.top));
+            g.DrawString(L"\xE722", -1, &iFont, iconRect, &sfmt, &whiteB);
+        }
+
+        if (app_state_ != AppState::STREAMING) {
+            switch (app_state_) {
             case AppState::SETUP:    draw_setup_screen(g); break;
             case AppState::SCANNING: draw_scanning_screen(g); break;
             case AppState::CONNECTED:draw_connected_screen(g); break;
             case AppState::STREAMING:draw_streaming_screen(g); break;
+            }
         }
     }
 
-    // Cave man no need ExcludeClipRect anymore, WS_CLIPCHILDREN handle child clipping
     BitBlt(hdc, 0, 0, w, h, mem, 0, 0, SRCCOPY);
 
     SelectObject(mem, old);
@@ -599,6 +697,21 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
     }
 
     switch (msg) {
+    case WM_GETMINMAXINFO: {
+        MINMAXINFO* mmi = reinterpret_cast<MINMAXINFO*>(lp);
+        int min_w = MIN_PHONE_W; // base minimum
+        int bubble_req = BUBBLE_W + BUBBLE_GAP * 2; // ~200
+        if (recording_) bubble_req += 100 + BUBBLE_GAP;
+        if (screenshot_flash_) bubble_req += 40 + BUBBLE_GAP;
+        
+        if (bubble_req > min_w) {
+            min_w = bubble_req;
+        }
+        
+        mmi->ptMinTrackSize.x = min_w;
+        mmi->ptMinTrackSize.y = MIN_PHONE_H;
+        return 0;
+    }
     case WM_CLIPBOARDUPDATE: {
         if (!m_os_clipboard_cb_ || app_state_ != AppState::STREAMING) {
             return 0;
@@ -644,7 +757,26 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
         if (wp == TRUE) return 0;
         break;
     case WM_TIMER:
-        if (wp == 1 && app_state_ != AppState::STREAMING) InvalidateRect(hwnd_, &rect_phone_, FALSE);
+        if (wp == 3 && screenshot_flash_) {
+            auto now = std::chrono::steady_clock::now();
+            auto diff = std::chrono::duration_cast<std::chrono::milliseconds>(now - screenshot_flash_start_).count();
+            if (diff > 1500) {
+                screenshot_flash_ = false;
+                KillTimer(hwnd_, 3);
+                recalc_layout();
+                update_region();
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            }
+            return 0;
+        }
+        if (wp == 2 && recording_) {
+            InvalidateRect(hwnd_, &rect_recording_bubble_, FALSE);
+            return 0;
+        }
+        if (wp == 1 && app_state_ != AppState::STREAMING) {
+            InvalidateRect(hwnd_, &rect_phone_, FALSE);
+            return 0;
+        }
         return 0;
     case WM_SIZE:
         if (wp != SIZE_MINIMIZED) {
@@ -673,7 +805,10 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONDOWN: {
         POINT pt = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
         int btn = hit_test_button(pt);
-        if (btn == 4) show_capture_menu(pt);
+        if (btn == 5) {
+            if (menu_cb_) menu_cb_(MenuAction::TOGGLE_RECORDING);
+        }
+        else if (btn == 4) show_capture_menu(pt);
         else if (btn == 1) ShowWindow(hwnd_, SW_MINIMIZE);
         else if (btn == 2) toggle_max_height();
         else if (btn == 3) PostMessage(hwnd_, WM_CLOSE, 0, 0);
@@ -804,7 +939,9 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
             int h = rect_phone_.bottom - rect_phone_.top;
             if (w > 0 && h > 0) {
                 SDL_RenderClear(m_sdl_renderer);
-                m_render_cb_(m_sdl_renderer, 0, 0, w, h);
+            }
+            m_render_cb_(m_sdl_renderer, 0, 0, w, h);
+            if (w > 0 && h > 0) {
                 SDL_RenderPresent(m_sdl_renderer);
             }
         }
@@ -1158,6 +1295,33 @@ void Win32Window::show_capture_menu(POINT pt) {
         default: return;
     }
     if (menu_cb_) menu_cb_(action);
+}
+
+void Win32Window::set_recording(bool recording) {
+    recording_ = recording;
+    if (recording_) {
+        recording_start_time_ = std::chrono::steady_clock::now();
+        if (hwnd_) SetTimer(hwnd_, 2, 1000, nullptr);
+    } else {
+        if (hwnd_) KillTimer(hwnd_, 2);
+    }
+    if (hwnd_) {
+        recalc_layout();
+        update_region();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+}
+
+void Win32Window::trigger_screenshot_flash() {
+    screenshot_flash_frames_ = 6; 
+    screenshot_flash_ = true;
+    screenshot_flash_start_ = std::chrono::steady_clock::now();
+    if (hwnd_) {
+        SetTimer(hwnd_, 3, 100, nullptr);
+        recalc_layout();
+        update_region();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
 }
 
 void Win32Window::set_pc_clipboard(const std::string& text) {

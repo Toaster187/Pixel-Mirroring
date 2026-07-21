@@ -105,6 +105,7 @@ public:
     virtual void set_lowest_brightness(bool enabled) = 0;
     virtual void set_capture_send_to_phone(bool enabled) = 0;
     virtual void set_recording(bool recording) = 0;
+    virtual void trigger_screenshot_flash() = 0;
 
     // Clipboard callbacks & sync
     virtual void set_os_clipboard_update_callback(std::function<void(const std::string&)> cb) = 0;
