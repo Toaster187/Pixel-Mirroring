@@ -12,7 +12,7 @@ namespace pm::window {
 namespace {
     const int PHONE_CORNER_RADIUS = 24;
     const int BUBBLE_CORNER_RADIUS = 18;
-    const int BUBBLE_W = 155;
+    const int BUBBLE_W = 193;
     const int BUBBLE_H = 36;
     const int BUBBLE_GAP = 6;
     const int MIN_PHONE_W = 140;
@@ -22,6 +22,7 @@ namespace {
     const wchar_t* ICON_MAXIMIZE = L"\uE922";
     const wchar_t* ICON_RESTORE = L"\uE923";
     const wchar_t* ICON_CLOSE = L"\uE8BB";
+    const wchar_t* ICON_CAPTURE = L"\uE722";
 
     void AddRoundedRect(Gdiplus::GraphicsPath& path, Gdiplus::RectF r, float rad) {
         float d = rad * 2;
@@ -227,8 +228,9 @@ void Win32Window::recalc_layout() {
     int bx = (std::max)(0, w - bw);
     rect_bubble_ = {bx, 0, bx + bw, BUBBLE_H};
 
-    int btnw = bw / 4, rem = bw - btnw * 4;
-    rect_drag_  = {rect_bubble_.left, 0, rect_bubble_.left + btnw + rem, BUBBLE_H};
+    int btnw = bw / 5, rem = bw - btnw * 5;
+    rect_capture_ = {rect_bubble_.left, 0, rect_bubble_.left + btnw + rem, BUBBLE_H};
+    rect_drag_  = {rect_capture_.right, 0, rect_capture_.right + btnw, BUBBLE_H};
     rect_min_   = {rect_drag_.right, 0, rect_drag_.right + btnw, BUBBLE_H};
     rect_max_   = {rect_min_.right, 0, rect_min_.right + btnw, BUBBLE_H};
     rect_close_ = {rect_max_.right, 0, rect_max_.right + btnw, BUBBLE_H};
@@ -293,6 +295,7 @@ void Win32Window::send_pointer_event(PointerAction action, int x, int y) {
 }
 
 int Win32Window::hit_test_button(POINT pt) {
+    if (PtInRect(&rect_capture_, pt)) return 4;
     if (PtInRect(&rect_close_, pt)) return 3;
     if (PtInRect(&rect_max_, pt))   return 2;
     if (PtInRect(&rect_min_, pt))   return 1;
@@ -379,8 +382,8 @@ void Win32Window::handle_paint() {
         }
 
         // Button hovers
-        if (hovered_button_ >= 0 && hovered_button_ <= 3) {
-            RECT hrs[] = {rect_drag_, rect_min_, rect_max_, rect_close_};
+        if (hovered_button_ >= 0 && hovered_button_ <= 4) {
+            RECT hrs[] = {rect_drag_, rect_min_, rect_max_, rect_close_, rect_capture_};
             RECT hr = hrs[hovered_button_];
             Gdiplus::Color hc = (hovered_button_ == 3)
                 ? Gdiplus::Color(255, 196, 43, 28) : Gdiplus::Color(255, 75, 75, 75);
@@ -411,6 +414,16 @@ void Win32Window::handle_paint() {
             Gdiplus::RectF rf((float)r.left,(float)r.top,(float)(r.right-r.left),(float)(r.bottom-r.top));
             g.DrawString(icon, -1, &iconF, rf, &sf, &b);
         };
+        if (recording_) {
+            Gdiplus::FontFamily liveFF(L"Segoe UI");
+            Gdiplus::Font liveF(&liveFF, 7, Gdiplus::FontStyleBold, Gdiplus::UnitPoint);
+            Gdiplus::SolidBrush red(Gdiplus::Color(255, 244, 67, 54));
+            Gdiplus::RectF liveRect((float)rect_capture_.left, (float)rect_capture_.top,
+                (float)(rect_capture_.right - rect_capture_.left), (float)(rect_capture_.bottom - rect_capture_.top));
+            g.DrawString(L"LIVE", -1, &liveF, liveRect, &sf, &red);
+        } else {
+            drawIcon(ICON_CAPTURE, rect_capture_, false);
+        }
         drawIcon(ICON_DRAG, rect_drag_, false);
         drawIcon(ICON_MINIMIZE, rect_min_, false);
         drawIcon(is_max_height_ ? ICON_RESTORE : ICON_MAXIMIZE, rect_max_, false);
@@ -660,7 +673,8 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONDOWN: {
         POINT pt = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
         int btn = hit_test_button(pt);
-        if (btn == 1) ShowWindow(hwnd_, SW_MINIMIZE);
+        if (btn == 4) show_capture_menu(pt);
+        else if (btn == 1) ShowWindow(hwnd_, SW_MINIMIZE);
         else if (btn == 2) toggle_max_height();
         else if (btn == 3) PostMessage(hwnd_, WM_CLOSE, 0, 0);
         else if (app_state_ == AppState::STREAMING && PtInRect(&rect_phone_, pt)) {
@@ -1081,6 +1095,66 @@ void Win32Window::show_context_menu(POINT pt) {
         case ID_SET_PIN:       action = MenuAction::SET_PIN; break;
         case ID_UNLOCK_DEVICE: action = MenuAction::UNLOCK_DEVICE; break;
         case ID_LOCK_DEVICE:   action = MenuAction::LOCK_DEVICE; break;
+        default: return;
+    }
+    if (menu_cb_) menu_cb_(action);
+}
+
+void Win32Window::show_capture_menu(POINT pt) {
+    constexpr UINT ID_SCREENSHOT = 1101;
+    constexpr UINT ID_TOGGLE_RECORDING = 1102;
+    constexpr UINT ID_TOGGLE_SEND_TO_PHONE = 1103;
+
+    g_menu_items.clear();
+    g_menu_items.push_back({ID_SCREENSHOT, L"Bildschirmfoto aufnehmen", false, false, false});
+    g_menu_items.push_back({ID_TOGGLE_RECORDING,
+        recording_ ? L"Videoaufnahme beenden" : L"Videoaufnahme starten", false, false, false});
+    g_menu_items.push_back({0, L"", false, false, true});
+    g_menu_items.push_back({ID_TOGGLE_SEND_TO_PHONE, L"Fertige Aufnahmen ans Handy senden",
+        true, capture_send_to_phone_, false});
+
+    int height = 10;
+    for (const auto& item : g_menu_items) {
+        height += item.is_separator ? 11 : 30;
+    }
+
+    static bool class_registered = false;
+    if (!class_registered) {
+        WNDCLASSEXA wc = {sizeof(WNDCLASSEXA)};
+        wc.lpfnWndProc = SettingsMenuProc;
+        wc.hInstance = GetModuleHandle(nullptr);
+        wc.lpszClassName = "PixelMirroringCaptureMenu";
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        RegisterClassExA(&wc);
+        class_registered = true;
+    }
+
+    ClientToScreen(hwnd_, &pt);
+    g_selected_action = 0;
+    g_hovered_item = -1;
+    HWND hMenu = CreateWindowExA(WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        "PixelMirroringCaptureMenu", "", WS_POPUP | WS_VISIBLE,
+        pt.x, pt.y, 320, height, hwnd_, nullptr, GetModuleHandle(nullptr), nullptr);
+    if (!hMenu) return;
+
+    HRGN rgn = CreateRoundRectRgn(0, 0, 320, height, 12, 12);
+    SetWindowRgn(hMenu, rgn, TRUE);
+    SetFocus(hMenu);
+    g_menu_done = false;
+
+    MSG msg;
+    while (GetMessage(&msg, nullptr, 0, 0)) {
+        if (!IsWindow(hMenu) || g_menu_done) break;
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
+    if (IsWindow(hMenu)) DestroyWindow(hMenu);
+
+    MenuAction action;
+    switch (g_selected_action) {
+        case ID_SCREENSHOT: action = MenuAction::TAKE_SCREENSHOT; break;
+        case ID_TOGGLE_RECORDING: action = MenuAction::TOGGLE_RECORDING; break;
+        case ID_TOGGLE_SEND_TO_PHONE: action = MenuAction::TOGGLE_SEND_CAPTURES_TO_PHONE; break;
         default: return;
     }
     if (menu_cb_) menu_cb_(action);

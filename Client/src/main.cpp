@@ -846,6 +846,7 @@ static int app_main() {
     window->set_resolution_limited(initial_settings.max_size == 720);
     window->set_compatibility_mode(initial_settings.m_compatibility_mode);
     window->set_lowest_brightness(initial_settings.m_lowest_brightness);
+    window->set_capture_send_to_phone(initial_settings.m_send_captures_to_phone);
 
     SavedBrightness saved_brightness; // Cave man remember phone sun level
     std::atomic<bool> should_stop{false};
@@ -868,6 +869,28 @@ static int app_main() {
         if (device_id.empty()) return;
         std::thread([device_id, action]() {
             action(device_id);
+        }).detach();
+    };
+
+    auto publish_capture_to_phone = [&scrcpy, w = window.get()](const std::filesystem::path& path) {
+        if (!scrcpy.is_running() || path.empty()) return;
+        const std::string device_id = scrcpy.get_device_id();
+        if (device_id.empty()) return;
+        std::thread([device_id, path, w]() {
+            pm::adb::AdbClient adb;
+            const std::string remote_dir = "/sdcard/Pictures/PixelMirroring";
+            const std::string remote_path = remote_dir + "/" + path.filename().string();
+            adb.execute_shell_command(device_id, "mkdir -p " + remote_dir);
+            const bool sent = adb.push_file(device_id, path.string(), remote_path);
+            if (sent) {
+                adb.execute_shell_command(device_id,
+                    "am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file://" + remote_path);
+            }
+            w->post_task([w, sent]() {
+                w->set_status_text(sent
+                    ? "Aufnahme wurde ans Handy gesendet."
+                    : "Aufnahme konnte nicht ans Handy gesendet werden.");
+            });
         }).detach();
     };
 
@@ -907,6 +930,48 @@ static int app_main() {
                 current_settings.m_lowest_brightness = !current_settings.m_lowest_brightness;
                 pm::save_settings(current_settings);
                 window->set_lowest_brightness(current_settings.m_lowest_brightness);
+                break;
+            }
+            case pm::window::MenuAction::TAKE_SCREENSHOT: {
+                if (!scrcpy.is_running()) {
+                    window->set_status_text("Bildschirmfoto nur bei aktivem Stream moeglich.");
+                    break;
+                }
+                auto screenshot = renderer.take_screenshot();
+                if (!screenshot) {
+                    window->set_status_text("Bildschirmfoto konnte nicht erstellt werden.");
+                    break;
+                }
+                window->set_status_text("Bildschirmfoto gespeichert: " + screenshot->filename().string());
+                if (current_settings.m_send_captures_to_phone) {
+                    publish_capture_to_phone(*screenshot);
+                }
+                break;
+            }
+            case pm::window::MenuAction::TOGGLE_RECORDING: {
+                if (renderer.is_recording()) {
+                    auto recording = renderer.stop_recording();
+                    window->set_recording(false);
+                    if (!recording) {
+                        window->set_status_text("Videoaufnahme enthielt keine speicherbaren Frames.");
+                        break;
+                    }
+                    window->set_status_text("Videoaufnahme gespeichert: " + recording->filename().string());
+                    if (current_settings.m_send_captures_to_phone) {
+                        publish_capture_to_phone(*recording);
+                    }
+                } else if (scrcpy.is_running() && renderer.start_recording()) {
+                    window->set_recording(true);
+                    window->set_status_text("Videoaufnahme laeuft.");
+                } else {
+                    window->set_status_text("Videoaufnahme braucht einen geladenen Stream-Frame.");
+                }
+                break;
+            }
+            case pm::window::MenuAction::TOGGLE_SEND_CAPTURES_TO_PHONE: {
+                current_settings.m_send_captures_to_phone = !current_settings.m_send_captures_to_phone;
+                pm::save_settings(current_settings);
+                window->set_capture_send_to_phone(current_settings.m_send_captures_to_phone);
                 break;
             }
             case pm::window::MenuAction::SET_PIN: {

@@ -111,6 +111,8 @@ Settings load_settings() {
             s.m_compatibility_mode = (value == "1");
         } else if (key == "turn_screen_off" || key == "lowest_brightness") {
             s.m_lowest_brightness = (value == "1");
+        } else if (key == "send_captures_to_phone") {
+            s.m_send_captures_to_phone = (value == "1");
         } else if (key == "pin") {
             s.m_pin = decrypt_pin(value);
         }
@@ -128,6 +130,7 @@ void save_settings(const Settings& s) {
     file << "max_size=" << s.max_size << "\n";
     file << "compatibility_mode=" << (s.m_compatibility_mode ? "1" : "0") << "\n";
     file << "lowest_brightness=" << (s.m_lowest_brightness ? "1" : "0") << "\n";
+    file << "send_captures_to_phone=" << (s.m_send_captures_to_phone ? "1" : "0") << "\n";
     file << "pin=" << encrypt_pin(s.m_pin) << "\n";
 }
 

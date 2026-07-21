@@ -47,6 +47,8 @@ public:
     void set_resolution_limited(bool limited) override { resolution_limited_ = limited; }
     void set_compatibility_mode(bool enabled) override { compatibility_mode_ = enabled; }
     void set_lowest_brightness(bool enabled) override { lowest_brightness_ = enabled; }
+    void set_capture_send_to_phone(bool enabled) override { capture_send_to_phone_ = enabled; }
+    void set_recording(bool recording) override { recording_ = recording; if (hwnd_) InvalidateRect(hwnd_, &rect_bubble_, FALSE); }
     void set_os_clipboard_update_callback(std::function<void(const std::string&)> cb) override { m_os_clipboard_cb_ = std::move(cb); }
     void set_pc_clipboard(const std::string& text) override;
 
@@ -72,6 +74,7 @@ private:
     int hit_test_button(POINT client_pt);
     bool is_start_button_hit(POINT client_pt);
     void show_context_menu(POINT pt);
+    void show_capture_menu(POINT pt);
 
     HWND hwnd_{nullptr};
     HWND hwnd_child_{nullptr};
@@ -86,13 +89,13 @@ private:
     bool is_landscape_{false};
     bool is_max_height_{false};
     RECT restore_bounds_{0};
-    int hovered_button_{-1}; // 0=drag, 1=min, 2=max, 3=close
+    int hovered_button_{-1}; // 0=drag, 1=min, 2=max, 3=close, 4=capture
     bool start_button_hovered_{false};
 
     // Layout rectangles
     RECT rect_phone_{0};
     RECT rect_bubble_{0};
-    RECT rect_drag_{0}, rect_min_{0}, rect_max_{0}, rect_close_{0};
+    RECT rect_capture_{0}, rect_drag_{0}, rect_min_{0}, rect_max_{0}, rect_close_{0};
     RECT rect_start_btn_{0};
     
     // State
@@ -115,6 +118,8 @@ private:
     bool resolution_limited_{false};
     bool compatibility_mode_{false};
     bool lowest_brightness_{true};
+    bool capture_send_to_phone_{false};
+    bool recording_{false};
     std::function<void(const std::string&)> m_os_clipboard_cb_;
     std::string last_clipboard_text_;
     std::mutex clipboard_mutex_;

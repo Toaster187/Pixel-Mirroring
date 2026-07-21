@@ -34,6 +34,7 @@ add_executable(PixelMirroring
     src/stream/scrcpy_client.cpp
     src/stream/video_decoder.cpp
     src/stream/video_renderer.cpp
+    src/stream/capture_controller.cpp
     src/input/input_handler.cpp
     # src/config/settings.cpp
     ${PLATFORM_SOURCES}
