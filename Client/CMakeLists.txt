@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(PixelMirroring VERSION 3.0.0 LANGUAGES CXX)
+project(PixelMirroring VERSION 2.67.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -246,30 +246,23 @@ set(CPACK_PACKAGE_VERSION_MINOR ${PROJECT_VERSION_MINOR})
 set(CPACK_PACKAGE_VERSION_PATCH ${PROJECT_VERSION_PATCH})
 
 if(WIN32)
-    # Determine if this is a portable or full installer build
-    if(PM_PORTABLE_BUILD)
-        set(CPACK_GENERATOR "ZIP")
-        set(CPACK_PACKAGE_FILE_NAME "PixelMirroring-${PROJECT_VERSION}-portable-x64")
-    else()
-        set(CPACK_GENERATOR "ZIP;NSIS")
-        set(CPACK_PACKAGE_FILE_NAME "PixelMirroring-${PROJECT_VERSION}-x64")
-    endif()
+    set(CPACK_GENERATOR "ZIP;NSIS;WIX")
     
     # Executables to create shortcuts for
     set(CPACK_PACKAGE_EXECUTABLES "PixelMirroring" "Pixel Mirroring")
     
-    # NSIS specific settings (Full installer for system installation)
-    set(CPACK_NSIS_PACKAGE_NAME "Pixel Mirroring ${PROJECT_VERSION}")
+    # NSIS specific settings
+    set(CPACK_NSIS_PACKAGE_NAME "Pixel Mirroring")
     set(CPACK_NSIS_DISPLAY_NAME "Pixel Mirroring")
     set(CPACK_NSIS_HELP_LINK "https://github.com/Toasterfritzi/Pixel-Mirroring")
     set(CPACK_NSIS_URL_INFO_ABOUT "https://github.com/Toasterfritzi/Pixel-Mirroring")
-    # Do NOT add to PATH - user should not modify system PATH
     set(CPACK_NSIS_MODIFY_PATH OFF)
-    # Install to Program Files by default
-    set(CPACK_NSIS_INSTALL_ROOT "$PROGRAMFILES")
+    
+    # WiX specific settings (Official Windows Installer)
+    set(CPACK_WIX_UPGRADE_GUID "D9F369E9-1A1A-4BE6-B6DF-D7E31BEF8CFD")
+    set(CPACK_WIX_PROGRAM_MENU_FOLDER "Pixel Mirroring")
 else()
     set(CPACK_GENERATOR "TGZ")
-    set(CPACK_PACKAGE_FILE_NAME "PixelMirroring-${PROJECT_VERSION}-x64")
 endif()
 
 include(CPack)
