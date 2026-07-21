@@ -45,6 +45,7 @@ private:
     int m_viewport_width{0};
     int m_viewport_height{0};
     std::atomic<bool> m_has_frame{false};
+    std::atomic<bool> m_render_requested{false};
 };
 
 } // namespace pm::stream

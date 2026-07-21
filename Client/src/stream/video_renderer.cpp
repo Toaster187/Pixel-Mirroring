@@ -91,6 +91,9 @@ void VideoRenderer::render_frame(void* frame) {
 }
 
 void VideoRenderer::paint(SDL_Renderer* renderer, int x, int y, int width, int height) {
+    // Cave man UI is ready now. New frame after this must wake it again.
+    m_render_requested.store(false, std::memory_order_release);
+
     if (!renderer || width <= 0 || height <= 0) {
         return;
     }
@@ -174,14 +177,19 @@ void VideoRenderer::shutdown() {
     m_frame_width = 0;
     m_frame_height = 0;
     m_has_frame = false;
+    m_render_requested = false;
     m_native_window_handle = nullptr;
 }
 
 void VideoRenderer::request_render() {
 #ifdef _WIN32
     HWND hwnd = static_cast<HWND>(m_native_window_handle);
-    if (hwnd) {
-        PostMessage(hwnd, WM_VIDEO_RENDER, 0, 0);
+    // Cave man keep only one render knock queued. At 60 FPS, slow UI no make
+    // 60 stale full-frame uploads per second; it paints newest frame once.
+    if (hwnd && !m_render_requested.exchange(true, std::memory_order_acq_rel)) {
+        if (!PostMessage(hwnd, WM_VIDEO_RENDER, 0, 0)) {
+            m_render_requested.store(false, std::memory_order_release);
+        }
     }
 #endif
 }
