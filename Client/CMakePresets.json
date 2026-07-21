@@ -3,57 +3,11 @@
     "configurePresets": [
         {
             "name": "default",
-            "displayName": "Default (x64 Release)",
-            "description": "Build for x64 in Release mode",
             "generator": "Ninja",
             "binaryDir": "${sourceDir}/build",
             "cacheVariables": {
-                "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/vcpkg/scripts/buildsystems/vcpkg.cmake",
-                "CMAKE_BUILD_TYPE": "Release",
-                "VCPKG_TARGET_TRIPLET": "x64-windows"
+                "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/vcpkg/scripts/buildsystems/vcpkg.cmake"
             }
-        },
-        {
-            "name": "portable",
-            "displayName": "Portable (x64 Release)",
-            "description": "Build portable ZIP for x64 without AppData",
-            "generator": "Ninja",
-            "binaryDir": "${sourceDir}/build-portable",
-            "cacheVariables": {
-                "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/vcpkg/scripts/buildsystems/vcpkg.cmake",
-                "CMAKE_BUILD_TYPE": "Release",
-                "VCPKG_TARGET_TRIPLET": "x64-windows",
-                "PM_PORTABLE_BUILD": "ON"
-            }
-        },
-        {
-            "name": "debug",
-            "displayName": "Debug (x64)",
-            "description": "Debug build for x64",
-            "generator": "Ninja",
-            "binaryDir": "${sourceDir}/build-debug",
-            "cacheVariables": {
-                "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/vcpkg/scripts/buildsystems/vcpkg.cmake",
-                "CMAKE_BUILD_TYPE": "Debug",
-                "VCPKG_TARGET_TRIPLET": "x64-windows"
-            }
-        }
-    ],
-    "buildPresets": [
-        {
-            "name": "default",
-            "configurePreset": "default",
-            "jobs": 0
-        },
-        {
-            "name": "portable",
-            "configurePreset": "portable",
-            "jobs": 0
-        },
-        {
-            "name": "debug",
-            "configurePreset": "debug",
-            "jobs": 0
         }
     ]
 }
