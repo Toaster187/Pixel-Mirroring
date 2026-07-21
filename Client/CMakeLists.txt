@@ -257,6 +257,8 @@ if(WIN32)
     set(CPACK_NSIS_HELP_LINK "https://github.com/Toasterfritzi/Pixel-Mirroring")
     set(CPACK_NSIS_URL_INFO_ABOUT "https://github.com/Toasterfritzi/Pixel-Mirroring")
     set(CPACK_NSIS_MODIFY_PATH OFF)
+    set(CPACK_NSIS_EXECUTABLES_DIRECTORY ".")
+
     
     # WiX specific settings (Official Windows Installer)
     set(CPACK_WIX_UPGRADE_GUID "D9F369E9-1A1A-4BE6-B6DF-D7E31BEF8CFD")
