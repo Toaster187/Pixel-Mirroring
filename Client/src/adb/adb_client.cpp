@@ -74,6 +74,61 @@ std::string get_adb_path() {
     return "adb"; // developer fallback only
 }
 
+#ifdef _WIN32
+bool AdbClient::run_command_windows(const std::string& cmdline, const std::function<void(const char*, size_t)>& on_read, bool log_errors) {
+    SECURITY_ATTRIBUTES saAttr;
+    saAttr.nLength = sizeof(SECURITY_ATTRIBUTES);
+    saAttr.bInheritHandle = TRUE;
+    saAttr.lpSecurityDescriptor = NULL;
+
+    HANDLE hChildStdoutRd, hChildStdoutWr;
+    if (!CreatePipe(&hChildStdoutRd, &hChildStdoutWr, &saAttr, 0)) {
+        if (log_errors) {
+            std::cerr << "[ADB] CreatePipe failed" << std::endl;
+        }
+        return false;
+    }
+    SetHandleInformation(hChildStdoutRd, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOA si = {0};
+    si.cb = sizeof(STARTUPINFOA);
+    si.hStdOutput = hChildStdoutWr;
+    si.hStdError = hChildStdoutWr;
+    si.dwFlags |= STARTF_USESTDHANDLES;
+
+    PROCESS_INFORMATION pi = {0};
+
+    std::vector<char> cmdline_buf(cmdline.begin(), cmdline.end());
+    cmdline_buf.push_back('\0');
+
+    if (!CreateProcessA(NULL, cmdline_buf.data(), NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        CloseHandle(hChildStdoutRd);
+        CloseHandle(hChildStdoutWr);
+        if (log_errors) {
+            std::cerr << "[ADB] CreateProcess failed for: " << cmdline << std::endl;
+        }
+        return false;
+    }
+
+    CloseHandle(hChildStdoutWr);
+
+    char buffer[4096];
+    DWORD bytesRead;
+    while (ReadFile(hChildStdoutRd, buffer, sizeof(buffer) - 1, &bytesRead, NULL) && bytesRead > 0) {
+        if (on_read) {
+            on_read(buffer, bytesRead);
+        }
+    }
+
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    CloseHandle(hChildStdoutRd);
+
+    return true;
+}
+#endif
+
 bool Device::is_usb() const {
     // ADB over TCP/IP usually contains an IP address format, USB does not
     return id.find('.') == std::string::npos;
@@ -121,51 +176,9 @@ std::string AdbClient::run_adb_command(const std::vector<std::string>& args) {
         }
     }
 
-    SECURITY_ATTRIBUTES saAttr;
-    saAttr.nLength = sizeof(SECURITY_ATTRIBUTES);
-    saAttr.bInheritHandle = TRUE;
-    saAttr.lpSecurityDescriptor = NULL;
-
-    HANDLE hChildStdoutRd, hChildStdoutWr;
-    if (!CreatePipe(&hChildStdoutRd, &hChildStdoutWr, &saAttr, 0)) {
-        // Pipe no work. Sad caveman noises.
-        std::cerr << "[ADB] CreatePipe failed" << std::endl;
-        return "";
-    }
-    SetHandleInformation(hChildStdoutRd, HANDLE_FLAG_INHERIT, 0);
-
-    STARTUPINFOA si = {0};
-    si.cb = sizeof(STARTUPINFOA);
-    si.hStdOutput = hChildStdoutWr;
-    si.hStdError = hChildStdoutWr;
-    si.dwFlags |= STARTF_USESTDHANDLES;
-
-    PROCESS_INFORMATION pi = {0};
-
-    std::vector<char> cmdline_buf(cmdline.begin(), cmdline.end());
-    cmdline_buf.push_back('\0');
-
-    if (!CreateProcessA(NULL, cmdline_buf.data(), NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
-        CloseHandle(hChildStdoutRd);
-        CloseHandle(hChildStdoutWr);
-        // ADB process no spawn. Like trying to make fire in rain.
-        std::cerr << "[ADB] CreateProcess failed for: " << cmdline << std::endl;
-        return "";
-    }
-
-    CloseHandle(hChildStdoutWr);
-
-    char buffer[4096];
-    DWORD bytesRead;
-    while (ReadFile(hChildStdoutRd, buffer, sizeof(buffer) - 1, &bytesRead, NULL) && bytesRead > 0) {
-        buffer[bytesRead] = '\0';
-        result += buffer;
-    }
-
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
-    CloseHandle(hChildStdoutRd);
+    run_command_windows(cmdline, [&result](const char* buffer, size_t bytesRead) {
+        result.append(buffer, bytesRead);
+    }, true);
 #else
     // POSIX: use fork+execvp
     int pipefd[2];
@@ -355,54 +368,16 @@ void AdbClient::execute_shell_command_async(const std::string& device_id, const 
     // Build command line for Windows
     std::string cmdline = "\"" + adb_path + "\" -s " + device_id + " shell " + command;
 
-    SECURITY_ATTRIBUTES saAttr;
-    saAttr.nLength = sizeof(SECURITY_ATTRIBUTES);
-    saAttr.bInheritHandle = TRUE;
-    saAttr.lpSecurityDescriptor = NULL;
-
-    HANDLE hChildStdoutRd, hChildStdoutWr;
-    if (!CreatePipe(&hChildStdoutRd, &hChildStdoutWr, &saAttr, 0)) {
-        return;
-    }
-    SetHandleInformation(hChildStdoutRd, HANDLE_FLAG_INHERIT, 0);
-
-    STARTUPINFOA si = {0};
-    si.cb = sizeof(STARTUPINFOA);
-    si.hStdOutput = hChildStdoutWr;
-    si.hStdError = hChildStdoutWr;
-    si.dwFlags |= STARTF_USESTDHANDLES;
-
-    PROCESS_INFORMATION pi = {0};
-
-    std::vector<char> cmdline_buf(cmdline.begin(), cmdline.end());
-    cmdline_buf.push_back('\0');
-
-    if (!CreateProcessA(NULL, cmdline_buf.data(), NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
-        CloseHandle(hChildStdoutRd);
-        CloseHandle(hChildStdoutWr);
-        return;
-    }
-
-    CloseHandle(hChildStdoutWr);
-
-    char buffer[4096];
-    DWORD bytesRead;
     std::string line;
-    while (ReadFile(hChildStdoutRd, buffer, sizeof(buffer) - 1, &bytesRead, NULL) && bytesRead > 0) {
-        buffer[bytesRead] = '\0';
-        line += buffer;
+    run_command_windows(cmdline, [&line, on_line](const char* buffer, size_t bytesRead) {
+        line.append(buffer, bytesRead);
         size_t pos;
         while ((pos = line.find('\n')) != std::string::npos) {
             if (on_line) on_line(line.substr(0, pos + 1));
             line.erase(0, pos + 1);
         }
-    }
+    }, false);
     if (!line.empty() && on_line) on_line(line);
-
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
-    CloseHandle(hChildStdoutRd);
 #else
     // POSIX: use fork+execvp
     int pipefd[2];

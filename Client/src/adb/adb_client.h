@@ -84,6 +84,10 @@ public:
 
 private:
     std::string run_adb_command(const std::vector<std::string>& args);
+
+#ifdef _WIN32
+    bool run_command_windows(const std::string& cmdline, const std::function<void(const char*, size_t)>& on_read, bool log_errors);
+#endif
 };
 
 } // namespace pm::adb
