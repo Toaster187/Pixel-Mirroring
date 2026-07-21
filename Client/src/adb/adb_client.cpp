@@ -104,9 +104,18 @@ std::string AdbClient::run_adb_command(const std::vector<std::string>& args) {
     std::string cmdline = "\"" + adb_path + "\"";
     for (const auto& arg : args) {
         cmdline += " ";
-        // Quote arguments that contain spaces
-        if (arg.find(' ') != std::string::npos) {
-            cmdline += "\"" + arg + "\"";
+        if (arg.empty()) {
+            cmdline += "\"\"";
+        } else if (arg.find(' ') != std::string::npos || arg.find('"') != std::string::npos) {
+            cmdline += "\"";
+            for (char c : arg) {
+                if (c == '"') {
+                    cmdline += "\\\"";
+                } else {
+                    cmdline += c;
+                }
+            }
+            cmdline += "\"";
         } else {
             cmdline += arg;
         }
