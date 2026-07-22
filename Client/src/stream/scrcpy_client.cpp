@@ -241,6 +241,7 @@ bool ScrcpyClient::start_server_process() {
     cmd += "video_bit_rate=" + std::to_string(config_.video_bit_rate) + " ";
     cmd += "max_fps=" + std::to_string(config_.max_fps) + " ";
     cmd += "control=" + std::string(config_.control ? "true" : "false") + " ";
+    cmd += "clipboard_autosync=true ";
     cmd += "send_dummy_byte=false ";
     cmd += "send_device_meta=false ";
     cmd += "send_codec_meta=true ";
@@ -690,6 +691,17 @@ void ScrcpyClient::inject_set_clipboard(const std::string& text) {
     std::memcpy(buf.data() + 14, text.data(), len);
 
     send(control_socket_, (const char*)buf.data(), static_cast<int>(buf.size()), 0);
+}
+
+void ScrcpyClient::inject_get_clipboard(uint8_t copy_key) {
+    if (!running_ || control_socket_ == INVALID_SOCKET) return;
+
+    // get device clip. cave man request clip text from phone.
+    uint8_t buf[2];
+    buf[0] = 8; // SC_CONTROL_MSG_TYPE_GET_CLIPBOARD
+    buf[1] = copy_key; // 0 = NONE, 1 = COPY, 2 = CUT
+
+    send(control_socket_, (const char*)buf, sizeof(buf), 0);
 }
 
 } // namespace pm::stream

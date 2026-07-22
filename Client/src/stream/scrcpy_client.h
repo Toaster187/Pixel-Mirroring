@@ -57,6 +57,7 @@ public:
     void inject_scroll(float x, float y, int w, int h, float hscroll, float vscroll);
     void inject_text(const std::string& text);
     void inject_set_clipboard(const std::string& text);
+    void inject_get_clipboard(uint8_t copy_key = 0);
 
 private:
     bool setup_tunnel();

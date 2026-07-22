@@ -1146,6 +1146,12 @@ static int app_main() {
             scrcpy.inject_set_clipboard(text);
         }
     });
+    window->set_focus_callback([&scrcpy]() {
+        // focus get. cave man fetch clipboard from phone.
+        if (scrcpy.is_running()) {
+            scrcpy.inject_get_clipboard(0);
+        }
+    });
     std::thread connection_thread;
     std::atomic<bool> connection_running{false};
     std::thread screen_poll_thread;
@@ -1212,9 +1218,19 @@ static int app_main() {
         screen_poll_thread = std::thread([&, poll_ip, device_id]() {
             pm::adb::AdbClient poll_adb;
             bool last_screen_on = true;
+            int clip_poll_counter = 0;
             
             while (!should_stop && !stop_screen_poll) {
                 bool screen_on = true; // assume on unless check confirms off
+
+                if (scrcpy.is_running()) {
+                    clip_poll_counter++;
+                    if (clip_poll_counter >= 3) { // every ~1.5s
+                        clip_poll_counter = 0;
+                        // periodic clip check. cave man ask phone for clip.
+                        scrcpy.inject_get_clipboard(0);
+                    }
+                }
 
                 // 1. Try HTTP /screen endpoint (fastest & most accurate)
                 if (!poll_ip.empty()) {
