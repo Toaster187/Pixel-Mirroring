@@ -61,7 +61,8 @@ public:
 
 private:
     bool setup_tunnel();
-    bool start_server_process();
+    bool push_server();
+    bool launch_server_process();
     bool connect_sockets();
     bool read_metadata();
 

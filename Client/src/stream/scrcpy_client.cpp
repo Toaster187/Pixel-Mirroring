@@ -90,8 +90,12 @@ bool ScrcpyClient::start(const Config& config) {
 
     std::cout << "[Scrcpy] Starting session with SCID: " << scid_ << std::endl;
 
-    if (!setup_tunnel()) return false;
-    if (!start_server_process()) return false;
+    auto tunnel_future = std::async(std::launch::async, [this]() { return setup_tunnel(); });
+    auto push_future = std::async(std::launch::async, [this]() { return push_server(); });
+
+    if (!tunnel_future.get()) return false;
+    if (!push_future.get()) return false;
+    if (!launch_server_process()) return false;
     if (!connect_sockets()) return false;
     if (!read_metadata()) return false;
 
@@ -170,10 +174,6 @@ bool ScrcpyClient::setup_tunnel() {
     for (int port = 27183; port <= 27200; ++port) {
         std::string local = "tcp:" + std::to_string(port);
         
-        // Cleanup any lingering ports from previous runs
-        adb.remove_forward(config_.device_id, local);
-        adb.remove_reverse(config_.device_id, remote);
-        
         if (adb.reverse_port(config_.device_id, remote, local)) {
             local_port_ = port;
             config_.tunnel_forward = false;
@@ -187,6 +187,10 @@ bool ScrcpyClient::setup_tunnel() {
             std::cout << "[Scrcpy] Using forward tunnel on port " << port << std::endl;
             break;
         }
+        
+        // Cleanup any lingering ports from previous runs only if it fails
+        adb.remove_forward(config_.device_id, local);
+        adb.remove_reverse(config_.device_id, remote);
     }
     
     if (!tunnel_success) {
@@ -197,11 +201,11 @@ bool ScrcpyClient::setup_tunnel() {
     return true;
 }
 
-bool ScrcpyClient::start_server_process() {
+bool ScrcpyClient::push_server() {
     pm::adb::AdbClient adb;
     
     // 1. Push server
-    std::cout << "[Scrcpy] Pushing server..." << std::endl;
+    std::cout << "[Scrcpy] Checking server..." << std::endl;
     std::string exe_dir = pm::adb::get_executable_dir();
     std::filesystem::path server_path = std::filesystem::path(exe_dir) / "scrcpy-server.jar";
     
@@ -226,10 +230,32 @@ bool ScrcpyClient::start_server_process() {
         return false;
     }
 
+    // Cave man check if jar already on phone, no push needed
+    std::error_code ec;
+    auto local_size = std::filesystem::file_size(server_path, ec);
+    if (!ec) {
+        std::string remote_size_str = adb.execute_shell_command(
+            config_.device_id, "stat -c '%s' /data/local/tmp/scrcpy-server.jar 2>/dev/null");
+        remote_size_str.erase(remote_size_str.find_last_not_of(" \n\r\t") + 1);
+        try {
+            if (std::stoull(remote_size_str) == local_size) {
+                std::cout << "[Scrcpy] Server already pushed, skipping." << std::endl;
+                return true;
+            }
+        } catch (...) {}
+    }
+
+    std::cout << "[Scrcpy] Pushing server..." << std::endl;
     if (!adb.push_file(config_.device_id, server_path.string(), "/data/local/tmp/scrcpy-server.jar")) {
         std::cerr << "[Scrcpy] Could not push scrcpy-server.jar!" << std::endl;
         return false;
     }
+    
+    return true;
+}
+
+bool ScrcpyClient::launch_server_process() {
+    pm::adb::AdbClient adb;
     
     // 2. Start server
     std::string cmd = "CLASSPATH=/data/local/tmp/scrcpy-server.jar app_process / com.genymobile.scrcpy.Server 2.7 ";
@@ -293,11 +319,11 @@ bool ScrcpyClient::connect_sockets() {
         addr.sin_addr.s_addr = inet_addr("127.0.0.1");
 
         // Retry connecting for up to 5 seconds
-        for (int i = 0; i < 50; ++i) {
+        for (int i = 0; i < 200; ++i) {
             if (connect(sock, (sockaddr*)&addr, sizeof(addr)) != SOCKET_ERROR) {
                 return true;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
         }
         closesocket(sock);
         sock = INVALID_SOCKET;

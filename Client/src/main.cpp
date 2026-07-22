@@ -637,7 +637,6 @@ bool run_first_time_setup(
         window.set_app_state(pm::window::AppState::CONNECTED);
         window.set_status_text("Verbunden: " + device_ip);
     });
-    std::this_thread::sleep_for(std::chrono::seconds(1));
     if (!unlock_device_if_needed(tcp_device->id, &window)) {
         clear_setup_state();
         window.post_task([&window]() {
@@ -816,7 +815,7 @@ bool unlock_device_if_needed(const std::string& device_id, pm::window::IWindow* 
     adb.execute_shell_command(device_id, pin_command);
     
     // Cave man wait for unlock animation
-    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
     return true;
 }
 
@@ -1354,7 +1353,6 @@ static int app_main() {
                 w->set_app_state(pm::window::AppState::CONNECTED);
                 w->set_status_text(name.empty() ? "Verbunden" : name);
             });
-            std::this_thread::sleep_for(std::chrono::seconds(1));
             if (!unlock_device_if_needed(tcp_device->id, window.get())) {
                 window->post_task([w = window.get()]() {
 #ifdef _WIN32

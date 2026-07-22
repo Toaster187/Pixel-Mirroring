@@ -289,7 +289,7 @@ bool AdbClient::connect_device(const std::string& ip, int port) {
     std::cout << "[ADB] Connecting to " << target << "..." << std::endl;
     
     // Add retry loop to handle daemon startup delay
-    int max_retries = 10;
+    int max_retries = 15;
     for (int i = 0; i < max_retries; ++i) {
         try {
             std::string output = run_adb_command({"connect", target});
@@ -308,7 +308,7 @@ bool AdbClient::connect_device(const std::string& ip, int port) {
         }
 
         if (i < max_retries - 1) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
         }
     }
     return false;
