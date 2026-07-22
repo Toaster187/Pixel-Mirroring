@@ -297,7 +297,7 @@ std::string prompt_user_for_pin(void* parent_hwnd = nullptr) {
         }
 
 #ifdef _WIN32
-        MessageBoxA((HWND)parent_hwnd, "PIN darf nur aus Ziffern bestehen und maximal 16 Zeichen lang sein.", "Ungueltige Eingabe", MB_OK | MB_ICONERROR);
+        MessageBoxW((HWND)parent_hwnd, L"PIN darf nur aus Ziffern bestehen und maximal 16 Zeichen lang sein.", L"Ungültige Eingabe", MB_OK | MB_ICONERROR);
 #endif
     }
 }
@@ -462,7 +462,7 @@ std::optional<pm::adb::Device> wait_for_usb_authorization(
 
         auto usb = find_usb_device(devices);
         if (!usb) {
-            window.set_status_text("Warte auf USB-Geraet...");
+            window.set_status_text("Warte auf USB-Gerät...");
             requested_reconnect = false; // reset state
         } else {
             if (usb->state == "unauthorized") {
@@ -472,7 +472,7 @@ std::optional<pm::adb::Device> wait_for_usb_authorization(
                     requested_reconnect = true;
                 }
             } else {
-                window.set_status_text("Warte auf USB-Geraet: " + usb->state);
+                window.set_status_text("Warte auf USB-Gerät: " + usb->state);
             }
         }
 
@@ -504,7 +504,7 @@ std::optional<pm::adb::Device> connect_configured_device(
 
     // Ugg! ADB is off cold — poke the phone's discovery server to wake it up first.
     if (!setup_state.device_ip.empty()) {
-        window.set_status_text("Wecke Geraet " + setup_state.device_ip + "...");
+        window.set_status_text("Wecke Gerät " + setup_state.device_ip + "...");
         if (auto discovered = scanner.request_connect(setup_state.device_ip, client_id, client_name)) {
             window.set_status_text("Verbinde mit " + discovered->ip + "...");
             if (adb.connect_device(discovered->ip, discovered->adb_port)) {
@@ -517,7 +517,7 @@ std::optional<pm::adb::Device> connect_configured_device(
 
     if (should_stop) return std::nullopt;
 
-    window.set_status_text("Suche eingerichtetes Geraet im Netzwerk...");
+    window.set_status_text("Suche eingerichtetes Gerät im Netzwerk...");
     auto discovered = scanner.discover_and_connect(client_id, client_name);
     if (!discovered || should_stop) {
         return std::nullopt;
@@ -542,12 +542,12 @@ bool run_first_time_setup(
 ) {
     clear_setup_state();
 
-    window.post_task([&window]() { window.set_status_text("Pruefe USB-Verbindung..."); });
+    window.post_task([&window]() { window.set_status_text("Prüfe USB-Verbindung..."); });
     auto usb_device = wait_for_usb_authorization(adb, window, should_stop);
     if (!usb_device || should_stop) {
         window.post_task([&window]() {
             window.set_app_state(pm::window::AppState::SETUP);
-            window.set_status_text("Kein USB-Geraet bereit. Bitte erneut verbinden.");
+            window.set_status_text("Kein USB-Gerät bereit. Bitte erneut verbinden.");
         });
         return false;
     }
@@ -601,12 +601,12 @@ bool run_first_time_setup(
     if (device_ip.empty()) {
         window.post_task([&window]() {
             window.set_app_state(pm::window::AppState::SETUP);
-            window.set_status_text("Keine WLAN-IP gefunden. Bitte WLAN pruefen.");
+            window.set_status_text("Keine WLAN-IP gefunden. Bitte WLAN prüfen.");
         });
         return false;
     }
 
-    window.post_task([&window]() { window.set_status_text("ADB ueber WLAN wird aktiviert..."); });
+    window.post_task([&window]() { window.set_status_text("ADB über WLAN wird aktiviert..."); });
     if (!adb.enable_tcpip(usb_device->id, ADB_TCP_PORT)) {
         window.post_task([&window]() {
             window.set_app_state(pm::window::AppState::SETUP);
@@ -785,10 +785,10 @@ bool unlock_device_if_needed(const std::string& device_id, pm::window::IWindow* 
         bool disable_power_saving = false;
         if (window) {
 #ifdef _WIN32
-            int answer = MessageBoxA(
+            int answer = MessageBoxW(
                 (HWND)window->get_native_handle(),
-                "Das Geraet befindet sich im Energiesparmodus. Die PIN-Eingabe schlaegt dadurch fehl.\n\nDarf die App den Energiesparmodus deaktivieren?",
-                "Energiesparmodus",
+                L"Das Gerät befindet sich im Energiesparmodus. Die PIN-Eingabe schlägt dadurch fehl.\n\nDarf die App den Energiesparmodus deaktivieren?",
+                L"Energiesparmodus",
                 MB_YESNO | MB_ICONQUESTION
             );
             if (answer == IDYES) disable_power_saving = true;
@@ -971,7 +971,7 @@ static int app_main() {
             }
             case pm::window::MenuAction::TAKE_SCREENSHOT: {
                 if (!scrcpy.is_running()) {
-                    window->set_status_text("Bildschirmfoto nur bei aktivem Stream moeglich.");
+                    window->set_status_text("Bildschirmfoto nur bei aktivem Stream möglich.");
                     break;
                 }
                 auto screenshot = renderer.take_screenshot();
@@ -1023,7 +1023,7 @@ static int app_main() {
                     }
                 } else if (scrcpy.is_running() && renderer.start_recording()) {
                     window->set_recording(true);
-                    window->set_status_text("Videoaufnahme laeuft.");
+                    window->set_status_text("Videoaufnahme läuft.");
                 } else {
                     window->set_status_text("Videoaufnahme braucht einen geladenen Stream-Frame.");
                 }
@@ -1043,21 +1043,21 @@ static int app_main() {
                     window->set_status_text("PIN erfolgreich gespeichert.");
                 } else {
 #ifdef _WIN32
-                    int answer = MessageBoxA(
+                    int answer = MessageBoxW(
                         (HWND)window->get_native_handle(),
-                        "Moechtest du die gespeicherte PIN loeschen?",
-                        "PIN loeschen",
+                        L"Möchtest du die gespeicherte PIN löschen?",
+                        L"PIN löschen",
                         MB_YESNO | MB_ICONQUESTION
                     );
                     if (answer == IDYES) {
                         current_settings.m_pin = "";
                         pm::save_settings(current_settings);
-                        window->set_status_text("PIN geloescht.");
+                        window->set_status_text("PIN gelöscht.");
                     }
 #else
                     current_settings.m_pin = "";
                     pm::save_settings(current_settings);
-                    window->set_status_text("PIN geloescht.");
+                    window->set_status_text("PIN gelöscht.");
 #endif
                 }
                 break;

@@ -567,8 +567,8 @@ void Win32Window::draw_setup_screen(Gdiplus::Graphics& g) {
     Gdiplus::SolidBrush gray(Gdiplus::Color(255, 160, 160, 160));
     Gdiplus::RectF instrR(px + 20, py + ph * 0.30f, pw - 40, ph * 0.30f);
     g.DrawString(L"1. USB-Debugging am Handy\r\n    einmal aktivieren\r\n\r\n"
-                 L"2. Handy per USB verbinden\r\n    (nur fuer die Einrichtung)\r\n\r\n"
-                 L"3. Verbinden druecken - die\r\n    Android-App wird installiert",
+                 L"2. Handy per USB verbinden\r\n    (nur für die Einrichtung)\r\n\r\n"
+                 L"3. Verbinden drücken - die\r\n    Android-App wird installiert",
                  -1, &bodyF, instrR, nullptr, &gray);
 
     // Start button
@@ -590,7 +590,7 @@ void Win32Window::draw_setup_screen(Gdiplus::Graphics& g) {
     if (!status_text_.empty()) {
         Gdiplus::Font errF(&uiFF, 9, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
         Gdiplus::SolidBrush errColor(Gdiplus::Color(255, 255, 110, 110));
-        std::wstring ws(status_text_.begin(), status_text_.end());
+        std::wstring ws = utf8_to_wstring(status_text_);
         Gdiplus::RectF sr(px + 10.0f, btnR.Y + btnR.Height + 15.0f, pw - 20.0f, 60.0f);
         g.DrawString(ws.c_str(), -1, &errF, sr, &sf, &errColor);
     }
@@ -634,7 +634,7 @@ void Win32Window::draw_connected_screen(Gdiplus::Graphics& g) {
     if (!status_text_.empty()) {
         Gdiplus::Font sf2(&uiFF, 9, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
         Gdiplus::SolidBrush gray(Gdiplus::Color(255, 140, 140, 140));
-        std::wstring ws(status_text_.begin(), status_text_.end());
+        std::wstring ws = utf8_to_wstring(status_text_);
         Gdiplus::RectF sr(px + 10.0f, cy + 40.0f, pw - 20.0f, 60.0f);
         g.DrawString(ws.c_str(), -1, &sf2, sr, &sf, &gray);
     }
@@ -1229,8 +1229,8 @@ void Win32Window::show_context_menu(POINT pt) {
 
     g_menu_items.clear();
     g_menu_items.push_back({ID_TOGGLE_FPS, L"FPS begrenzen (30)", true, fps_limited_, false});
-    g_menu_items.push_back({ID_TOGGLE_RES, L"Aufl\x00f6sung begrenzen (720p)", true, resolution_limited_, false});
-    g_menu_items.push_back({ID_TOGGLE_COMPAT, L"Kompatibilit\x00e4tsmodus (langsame PIN)", true, compatibility_mode_, false});
+    g_menu_items.push_back({ID_TOGGLE_RES, L"Auflösung begrenzen (720p)", true, resolution_limited_, false});
+    g_menu_items.push_back({ID_TOGGLE_COMPAT, L"Kompatibilitätsmodus (langsame PIN)", true, compatibility_mode_, false});
     g_menu_items.push_back({ID_TOGGLE_LOWEST_BRIGHTNESS, L"Bildschirm auf niedrigste Helligkeit", true, lowest_brightness_, false});
     g_menu_items.push_back({0, L"", false, false, true});
     g_menu_items.push_back({ID_SET_PIN, L"PIN zum Entsperren festlegen", false, false, false});
@@ -1239,7 +1239,7 @@ void Win32Window::show_context_menu(POINT pt) {
         g_menu_items.push_back({ID_LOCK_DEVICE, L"Handy sperren & Bildschirm aus (Strg+L)", false, false, false});
     }
     g_menu_items.push_back({0, L"", false, false, true});
-    g_menu_items.push_back({ID_FACTORY_RESET, L"Werkseinstellungen zur\x00fc" L"cksetzen", false, false, false});
+    g_menu_items.push_back({ID_FACTORY_RESET, L"Werkseinstellungen zurücksetzen", false, false, false});
 
     int height = 10;
     for (const auto& item : g_menu_items) {

@@ -165,6 +165,10 @@ bool ScrcpyClient::setup_tunnel() {
     std::string remote = "localabstract:scrcpy_" + scid_;
     
     std::cout << "[Scrcpy] Setting up adb tunnel..." << std::endl;
+
+    // Cleanup any lingering reverse tunnel from previous runs
+    adb.remove_reverse(config_.device_id, remote);
+
     bool tunnel_success = false;
     
     for (int port = 27183; port <= 27200; ++port) {
@@ -183,6 +187,10 @@ bool ScrcpyClient::setup_tunnel() {
             std::cout << "[Scrcpy] Using forward tunnel on port " << port << std::endl;
             break;
         }
+        
+        // Cleanup lingering ports if forward/reverse on this port failed
+        adb.remove_forward(config_.device_id, local);
+        adb.remove_reverse(config_.device_id, remote);
     }
     
     if (!tunnel_success) {
