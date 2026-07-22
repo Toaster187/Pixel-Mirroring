@@ -170,10 +170,6 @@ bool ScrcpyClient::setup_tunnel() {
     for (int port = 27183; port <= 27200; ++port) {
         std::string local = "tcp:" + std::to_string(port);
         
-        // Cleanup any lingering ports from previous runs
-        adb.remove_forward(config_.device_id, local);
-        adb.remove_reverse(config_.device_id, remote);
-        
         if (adb.reverse_port(config_.device_id, remote, local)) {
             local_port_ = port;
             config_.tunnel_forward = false;
@@ -200,8 +196,7 @@ bool ScrcpyClient::setup_tunnel() {
 bool ScrcpyClient::start_server_process() {
     pm::adb::AdbClient adb;
     
-    // 1. Push server
-    std::cout << "[Scrcpy] Pushing server..." << std::endl;
+    // 1. Push server (Cave man check file size on device first to skip slow push over Wi-Fi)
     std::string exe_dir = pm::adb::get_executable_dir();
     std::filesystem::path server_path = std::filesystem::path(exe_dir) / "scrcpy-server.jar";
     
@@ -226,9 +221,26 @@ bool ScrcpyClient::start_server_process() {
         return false;
     }
 
-    if (!adb.push_file(config_.device_id, server_path.string(), "/data/local/tmp/scrcpy-server.jar")) {
-        std::cerr << "[Scrcpy] Could not push scrcpy-server.jar!" << std::endl;
-        return false;
+    std::error_code ec;
+    uintmax_t local_size = std::filesystem::file_size(server_path, ec);
+    bool skip_push = false;
+
+    if (!ec && local_size > 0) {
+        std::string check_cmd = "stat -c %s /data/local/tmp/scrcpy-server.jar 2>/dev/null || ls -l /data/local/tmp/scrcpy-server.jar 2>/dev/null";
+        std::string remote_res = adb.execute_shell_command(config_.device_id, check_cmd);
+        remote_res.erase(remote_res.find_last_not_of(" \n\r\t") + 1);
+        if (!remote_res.empty() && remote_res.find(std::to_string(local_size)) != std::string::npos) {
+            std::cout << "[Scrcpy] scrcpy-server.jar already present on device (" << local_size << " bytes), skipping push." << std::endl;
+            skip_push = true;
+        }
+    }
+
+    if (!skip_push) {
+        std::cout << "[Scrcpy] Pushing server..." << std::endl;
+        if (!adb.push_file(config_.device_id, server_path.string(), "/data/local/tmp/scrcpy-server.jar")) {
+            std::cerr << "[Scrcpy] Could not push scrcpy-server.jar!" << std::endl;
+            return false;
+        }
     }
     
     // 2. Start server
@@ -241,6 +253,7 @@ bool ScrcpyClient::start_server_process() {
     cmd += "video_bit_rate=" + std::to_string(config_.video_bit_rate) + " ";
     cmd += "max_fps=" + std::to_string(config_.max_fps) + " ";
     cmd += "control=" + std::string(config_.control ? "true" : "false") + " ";
+    cmd += "clipboard_autosync=true ";
     cmd += "send_dummy_byte=false ";
     cmd += "send_device_meta=false ";
     cmd += "send_codec_meta=true ";
@@ -690,6 +703,17 @@ void ScrcpyClient::inject_set_clipboard(const std::string& text) {
     std::memcpy(buf.data() + 14, text.data(), len);
 
     send(control_socket_, (const char*)buf.data(), static_cast<int>(buf.size()), 0);
+}
+
+void ScrcpyClient::inject_get_clipboard(uint8_t copy_key) {
+    if (!running_ || control_socket_ == INVALID_SOCKET) return;
+
+    // get device clip. cave man request clip text from phone.
+    uint8_t buf[2];
+    buf[0] = 8; // SC_CONTROL_MSG_TYPE_GET_CLIPBOARD
+    buf[1] = copy_key; // 0 = NONE, 1 = COPY, 2 = CUT
+
+    send(control_socket_, (const char*)buf, sizeof(buf), 0);
 }
 
 } // namespace pm::stream

@@ -53,6 +53,7 @@ public:
     void trigger_screenshot_flash() override;
     void set_os_clipboard_update_callback(std::function<void(const std::string&)> cb) override { m_os_clipboard_cb_ = std::move(cb); }
     void set_pc_clipboard(const std::string& text) override;
+    void set_focus_callback(std::function<void()> cb) override { m_focus_cb_ = std::move(cb); }
 
 private:
     static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
@@ -129,6 +130,7 @@ private:
     bool screenshot_flash_{false};
     std::chrono::steady_clock::time_point screenshot_flash_start_;
     int screenshot_flash_frames_{0};
+    std::function<void()> m_focus_cb_;
     std::function<void(const std::string&)> m_os_clipboard_cb_;
     std::string last_clipboard_text_;
     std::mutex clipboard_mutex_;

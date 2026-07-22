@@ -110,6 +110,7 @@ public:
     // Clipboard callbacks & sync
     virtual void set_os_clipboard_update_callback(std::function<void(const std::string&)> cb) = 0;
     virtual void set_pc_clipboard(const std::string& text) = 0;
+    virtual void set_focus_callback(std::function<void()> cb) = 0;
 };
 
 // Factory function to create the appropriate window implementation for the current OS.

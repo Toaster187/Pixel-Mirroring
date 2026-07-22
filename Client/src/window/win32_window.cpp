@@ -830,6 +830,20 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
         // Deferred start callback — cave man wait for paint, then go
         if (start_cb_) start_cb_();
         return 0;
+    case WM_NCMOUSEMOVE: {
+        POINT pt = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        ScreenToClient(hwnd_, &pt);
+        int nh = hit_test_button(pt);
+        bool sbh = is_start_button_hit(pt);
+        if (nh != hovered_button_ || sbh != start_button_hovered_) {
+            hovered_button_ = nh;
+            start_button_hovered_ = sbh;
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            TRACKMOUSEEVENT tme = {sizeof(tme), TME_LEAVE | TME_NONCLIENT, hwnd_, 0};
+            TrackMouseEvent(&tme);
+        }
+        return 0;
+    }
     case WM_MOUSEMOVE: {
         POINT pt = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
         if (app_state_ == AppState::STREAMING && (wp & MK_LBUTTON) != 0 && GetCapture() == hwnd_) {
@@ -855,14 +869,35 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     }
-    case WM_MOUSELEAVE:
-        if (hovered_button_ != -1 || start_button_hovered_) {
-            hovered_button_ = -1; start_button_hovered_ = false;
+    case WM_NCMOUSELEAVE:
+    case WM_MOUSELEAVE: {
+        POINT sp;
+        GetCursorPos(&sp);
+        ScreenToClient(hwnd_, &sp);
+        int nh = hit_test_button(sp);
+        bool sbh = is_start_button_hit(sp);
+        if (nh != hovered_button_ || sbh != start_button_hovered_) {
+            hovered_button_ = nh;
+            start_button_hovered_ = sbh;
             InvalidateRect(hwnd_, nullptr, FALSE);
         }
         return 0;
+    }
+    case WM_SETFOCUS:
+    case WM_ACTIVATE:
+        if (LOWORD(wp) != WA_INACTIVE && m_focus_cb_ && app_state_ == AppState::STREAMING) {
+            // focus get. cave man fetch clipboard.
+            m_focus_cb_();
+        }
+        break;
     case WM_KEYDOWN: {
         if (app_state_ == AppState::STREAMING) {
+            if (wp == 'C' && (GetKeyState(VK_CONTROL) & 0x8000)) {
+                // ctrl+c press. cave man fetch clipboard.
+                if (m_focus_cb_) {
+                    m_focus_cb_();
+                }
+            }
             if (wp == 'U' && (GetKeyState(VK_CONTROL) & 0x8000)) {
                 if (menu_cb_) {
                     menu_cb_(MenuAction::UNLOCK_DEVICE);
@@ -1059,8 +1094,14 @@ namespace {
                 g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
                 g.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
 
-                Gdiplus::SolidBrush bgBrush(Gdiplus::Color(255, 35, 35, 35));
-                g.FillRectangle(&bgBrush, 0, 0, rc.right, rc.bottom);
+                Gdiplus::GraphicsPath bgPath;
+                AddRoundedRect(bgPath, Gdiplus::RectF(0.5f, 0.5f, (float)rc.right - 1.0f, (float)rc.bottom - 1.0f), 12.0f);
+
+                Gdiplus::SolidBrush bgBrush(Gdiplus::Color(255, 32, 32, 32));
+                g.FillPath(&bgBrush, &bgPath);
+
+                Gdiplus::Pen borderPen(Gdiplus::Color(255, 70, 70, 70), 1.0f);
+                g.DrawPath(&borderPen, &bgPath);
 
                 Gdiplus::FontFamily fontFamily(L"Segoe UI");
                 Gdiplus::Font font(&fontFamily, 10.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
@@ -1152,6 +1193,10 @@ namespace {
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
+            case WM_LBUTTONDOWN: {
+                SetFocus(hwnd);
+                return 0;
+            }
             case WM_LBUTTONUP: {
                 if (g_hovered_item >= 0 && g_hovered_item < (int)g_menu_items.size()) {
                     const auto& item = g_menu_items[g_hovered_item];
@@ -1168,8 +1213,11 @@ namespace {
                 return 0;
             }
             case WM_KILLFOCUS: {
-                g_menu_done = true;
-                PostMessage(hwnd, WM_NULL, 0, 0);
+                HWND hNewFocus = (HWND)wp;
+                if (hNewFocus != hwnd && GetParent(hNewFocus) != hwnd) {
+                    g_menu_done = true;
+                    PostMessage(hwnd, WM_NULL, 0, 0);
+                }
                 return 0;
             }
         }
@@ -1201,6 +1249,7 @@ void Win32Window::show_context_menu(POINT pt) {
     static bool class_registered = false;
     if (!class_registered) {
         WNDCLASSEXA wc = {sizeof(WNDCLASSEXA)};
+        wc.style = CS_HREDRAW | CS_VREDRAW | CS_DROPSHADOW;
         wc.lpfnWndProc = SettingsMenuProc;
         wc.hInstance = GetModuleHandle(nullptr);
         wc.lpszClassName = "PixelMirroringSettingsMenu";
@@ -1220,6 +1269,8 @@ void Win32Window::show_context_menu(POINT pt) {
         pt.x, pt.y, 320, height,
         hwnd_, nullptr, GetModuleHandle(nullptr), nullptr);
         
+    HRGN rgn = CreateRoundRectRgn(0, 0, 320, height, 14, 14);
+    SetWindowRgn(hMenu, rgn, TRUE);
     SetFocus(hMenu);
     g_menu_done = false;
 
@@ -1289,6 +1340,7 @@ void Win32Window::show_capture_menu(POINT pt) {
     static bool class_registered = false;
     if (!class_registered) {
         WNDCLASSEXA wc = {sizeof(WNDCLASSEXA)};
+        wc.style = CS_HREDRAW | CS_VREDRAW | CS_DROPSHADOW;
         wc.lpfnWndProc = SettingsMenuProc;
         wc.hInstance = GetModuleHandle(nullptr);
         wc.lpszClassName = "PixelMirroringCaptureMenu";
@@ -1305,7 +1357,7 @@ void Win32Window::show_capture_menu(POINT pt) {
         pt.x, pt.y, 320, height, hwnd_, nullptr, GetModuleHandle(nullptr), nullptr);
     if (!hMenu) return;
 
-    HRGN rgn = CreateRoundRectRgn(0, 0, 320, height, 12, 12);
+    HRGN rgn = CreateRoundRectRgn(0, 0, 320, height, 14, 14);
     SetWindowRgn(hMenu, rgn, TRUE);
     SetFocus(hMenu);
     g_menu_done = false;
@@ -1367,10 +1419,6 @@ void Win32Window::trigger_screenshot_flash() {
     }
 }
 
-<<<<<<< HEAD
->>>>>>> Stashed changes
-=======
->>>>>>> b9b01641cb30a6e66a31410f5430c74d45987d20
 void Win32Window::set_pc_clipboard(const std::string& text) {
     if (text.empty()) return;
 
