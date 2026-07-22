@@ -50,6 +50,14 @@
             </intent-filter>
         </receiver>
 
+        <receiver
+            android:name=".service.MediaScannerReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="dev.pixelmirroring.app.SCAN_FILE" />
+            </intent-filter>
+        </receiver>
+
     </application>
 
 </manifest>

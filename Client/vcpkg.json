@@ -3,7 +3,10 @@
   "version": "0.1.0",
   "dependencies": [
     "sdl2",
-    "ffmpeg",
+    {
+      "name": "ffmpeg",
+      "features": ["x264"]
+    },
     "nlohmann-json",
     "cpp-httplib"
   ]

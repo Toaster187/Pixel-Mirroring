@@ -39,6 +39,27 @@ constexpr const char* ANDROID_SERVICE = "dev.pixelmirroring.app/.service.Mirrori
 constexpr int ADB_TCP_PORT = 5555;
 constexpr int HEARTBEAT_INTERVAL_MS = 5000;
 
+#ifdef _WIN32
+int GetEncoderClsid(const WCHAR* format, CLSID* pClsid) {
+    UINT num = 0;
+    UINT size = 0;
+    Gdiplus::GetImageEncodersSize(&num, &size);
+    if (size == 0) return -1;
+    Gdiplus::ImageCodecInfo* pImageCodecInfo = (Gdiplus::ImageCodecInfo*)(malloc(size));
+    if (pImageCodecInfo == nullptr) return -1;
+    Gdiplus::GetImageEncoders(num, size, pImageCodecInfo);
+    for (UINT j = 0; j < num; ++j) {
+        if (wcscmp(pImageCodecInfo[j].MimeType, format) == 0) {
+            *pClsid = pImageCodecInfo[j].Clsid;
+            free(pImageCodecInfo);
+            return j;
+        }
+    }
+    free(pImageCodecInfo);
+    return -1;
+}
+#endif
+
 struct SetupState {
     bool configured = false;
     std::string device_ip;
@@ -846,6 +867,7 @@ static int app_main() {
     window->set_resolution_limited(initial_settings.max_size == 720);
     window->set_compatibility_mode(initial_settings.m_compatibility_mode);
     window->set_lowest_brightness(initial_settings.m_lowest_brightness);
+    window->set_capture_send_to_phone(initial_settings.m_send_captures_to_phone);
 
     SavedBrightness saved_brightness; // Cave man remember phone sun level
     std::atomic<bool> should_stop{false};
@@ -868,6 +890,35 @@ static int app_main() {
         if (device_id.empty()) return;
         std::thread([device_id, action]() {
             action(device_id);
+        }).detach();
+    };
+
+    auto publish_capture_to_phone = [&scrcpy, w = window.get()](const std::filesystem::path& path) {
+        if (!scrcpy.is_running() || path.empty()) return;
+        const std::string device_id = scrcpy.get_device_id();
+        if (device_id.empty()) return;
+        std::thread([device_id, path, w]() {
+            pm::adb::AdbClient adb;
+            const std::string remote_dir = "/sdcard/Pictures/PixelMirroring";
+            const std::string remote_path = remote_dir + "/" + path.filename().string();
+            adb.execute_shell_command(device_id, "mkdir -p " + remote_dir);
+            const bool sent = adb.push_file(device_id, path.string(), remote_path);
+            if (sent) {
+                // Trigger our custom BroadcastReceiver in the companion app to scan the file via MediaScannerConnection (reliable on Android 11+)
+                adb.execute_shell_command(device_id,
+                    "am broadcast -a dev.pixelmirroring.app.SCAN_FILE -e path \"" + remote_path + "\"");
+                // Fallback: Direct content provider insert for modern Android
+                adb.execute_shell_command(device_id,
+                    "content insert --uri content://media/external/images/media --bind _data:s:\"" + remote_path + "\"");
+                // Legacy intent broadcast for older Android versions
+                adb.execute_shell_command(device_id,
+                    "am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file://" + remote_path);
+            }
+            w->post_task([w, sent]() {
+                w->set_status_text(sent
+                    ? "Aufnahme wurde ans Handy gesendet."
+                    : "Aufnahme konnte nicht ans Handy gesendet werden.");
+            });
         }).detach();
     };
 
@@ -907,6 +958,72 @@ static int app_main() {
                 current_settings.m_lowest_brightness = !current_settings.m_lowest_brightness;
                 pm::save_settings(current_settings);
                 window->set_lowest_brightness(current_settings.m_lowest_brightness);
+                break;
+            }
+            case pm::window::MenuAction::TAKE_SCREENSHOT: {
+                if (!scrcpy.is_running()) {
+                    window->set_status_text("Bildschirmfoto nur bei aktivem Stream moeglich.");
+                    break;
+                }
+                auto screenshot = renderer.take_screenshot();
+                if (!screenshot) {
+                    window->set_status_text("Bildschirmfoto konnte nicht erstellt werden.");
+                    break;
+                }
+#ifdef _WIN32
+                // Convert BMP to PNG
+                std::wstring bmpPath = screenshot->wstring();
+                Gdiplus::Bitmap* bmp = new Gdiplus::Bitmap(bmpPath.c_str());
+                if (bmp && bmp->GetLastStatus() == Gdiplus::Ok) {
+                    CLSID pngClsid;
+                    if (GetEncoderClsid(L"image/png", &pngClsid) != -1) {
+                        std::filesystem::path pngPath = *screenshot;
+                        pngPath.replace_extension(".png");
+                        if (bmp->Save(pngPath.wstring().c_str(), &pngClsid, nullptr) == Gdiplus::Ok) {
+                            delete bmp;
+                            std::filesystem::remove(*screenshot);
+                            screenshot = pngPath;
+                        } else {
+                            delete bmp;
+                        }
+                    } else {
+                        delete bmp;
+                    }
+                } else {
+                    if (bmp) delete bmp;
+                }
+#endif
+                window->trigger_screenshot_flash();
+                window->set_status_text("Bildschirmfoto gespeichert: " + screenshot->filename().string());
+                if (current_settings.m_send_captures_to_phone) {
+                    publish_capture_to_phone(*screenshot);
+                }
+                break;
+            }
+            case pm::window::MenuAction::TOGGLE_RECORDING: {
+                if (renderer.is_recording()) {
+                    auto recording = renderer.stop_recording();
+                    window->set_recording(false);
+                    if (!recording) {
+                        window->set_status_text("Videoaufnahme enthielt keine speicherbaren Frames.");
+                        break;
+                    }
+                    window->set_status_text("Videoaufnahme gespeichert: " + recording->filename().string());
+                    if (current_settings.m_send_captures_to_phone) {
+                        publish_capture_to_phone(*recording);
+                    }
+                } else if (scrcpy.is_running() && renderer.start_recording()) {
+                    window->set_recording(true);
+                    window->set_status_text("Videoaufnahme laeuft.");
+                } else {
+                    window->set_status_text("Videoaufnahme braucht einen geladenen Stream-Frame.");
+                }
+                break;
+            }
+            case pm::window::MenuAction::TOGGLE_SEND_CAPTURES_TO_PHONE: {
+                current_settings.m_send_captures_to_phone = !current_settings.m_send_captures_to_phone;
+                pm::save_settings(current_settings);
+                window->set_capture_send_to_phone(current_settings.m_send_captures_to_phone);
                 break;
             }
             case pm::window::MenuAction::SET_PIN: {

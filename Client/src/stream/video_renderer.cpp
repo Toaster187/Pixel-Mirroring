@@ -87,6 +87,9 @@ void VideoRenderer::render_frame(void* frame) {
         m_has_frame = true;
     }
 
+    // Cave man save same ADB stream frame, never press phone screenshot button.
+    m_capture.on_frame(av_frame);
+
     request_render();
 }
 
