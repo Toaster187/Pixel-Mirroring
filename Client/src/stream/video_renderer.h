@@ -4,6 +4,7 @@
 #include <vector>
 #include <memory>
 #include <atomic>
+#include "capture_controller.h"
 
 struct SDL_Texture;
 struct SDL_Renderer;
@@ -20,6 +21,10 @@ public:
     void render_frame(void* frame);
     void paint(SDL_Renderer* renderer, int x, int y, int width, int height);
     void update_viewport(int x, int y, int width, int height);
+    std::optional<std::filesystem::path> take_screenshot() { return m_capture.take_screenshot(); }
+    bool start_recording() { return m_capture.start_recording(); }
+    std::optional<std::filesystem::path> stop_recording() { return m_capture.stop_recording(); }
+    bool is_recording() const { return m_capture.is_recording(); }
     void shutdown();
 
 private:
@@ -46,6 +51,7 @@ private:
     int m_viewport_height{0};
     std::atomic<bool> m_has_frame{false};
     std::atomic<bool> m_render_requested{false};
+    CaptureController m_capture;
 };
 
 } // namespace pm::stream

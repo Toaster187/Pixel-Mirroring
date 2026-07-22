@@ -21,7 +21,7 @@ if (Test-Path $exePath) {
 }
 
 # Installer signieren falls vorhanden
-$installerPath = "c:\Pixel-Mirroring\Client\build\PixelMirroring-3.0.0-win64.exe"
+$installerPath = "c:\Pixel-Mirroring\Client\build\PixelMirroring-3.67.0-win64.exe"
 if (Test-Path $installerPath) {
     Write-Host "Signiere Installer..."
     Set-AuthenticodeSignature -FilePath $installerPath -Certificate $cert

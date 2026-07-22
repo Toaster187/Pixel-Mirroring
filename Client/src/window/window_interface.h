@@ -29,7 +29,10 @@ enum class MenuAction {
     UNLOCK_DEVICE,
     LOCK_DEVICE,
     TOGGLE_COMPATIBILITY_MODE,
-    TOGGLE_LOWEST_BRIGHTNESS
+    TOGGLE_LOWEST_BRIGHTNESS,
+    TAKE_SCREENSHOT,
+    TOGGLE_RECORDING,
+    TOGGLE_SEND_CAPTURES_TO_PHONE
 };
 
 class IWindow {
@@ -100,6 +103,9 @@ public:
     virtual void set_resolution_limited(bool limited) = 0;
     virtual void set_compatibility_mode(bool enabled) = 0;
     virtual void set_lowest_brightness(bool enabled) = 0;
+    virtual void set_capture_send_to_phone(bool enabled) = 0;
+    virtual void set_recording(bool recording) = 0;
+    virtual void trigger_screenshot_flash() = 0;
 
     // Clipboard callbacks & sync
     virtual void set_os_clipboard_update_callback(std::function<void(const std::string&)> cb) = 0;
