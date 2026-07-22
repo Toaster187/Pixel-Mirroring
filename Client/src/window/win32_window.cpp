@@ -863,6 +863,19 @@ void Win32Window::post_task(std::function<void()> task) {
 }
 
 namespace {
+    constexpr UINT ID_FACTORY_RESET = 1001;
+    constexpr UINT ID_TOGGLE_FPS    = 1002;
+    constexpr UINT ID_TOGGLE_RES    = 1003;
+    constexpr UINT ID_SET_PIN       = 1004;
+    constexpr UINT ID_UNLOCK_DEVICE = 1005;
+    constexpr UINT ID_TOGGLE_COMPAT = 1006;
+    constexpr UINT ID_TOGGLE_LOWEST_BRIGHTNESS = 1007;
+    constexpr UINT ID_LOCK_DEVICE   = 1008;
+
+    constexpr UINT ID_SCREENSHOT = 1101;
+    constexpr UINT ID_TOGGLE_RECORDING = 1102;
+    constexpr UINT ID_TOGGLE_SEND_TO_PHONE = 1103;
+
     struct MenuItem {
         UINT id;
         std::wstring text;
@@ -879,16 +892,19 @@ namespace {
     LRESULT CALLBACK SettingsMenuProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         switch (msg) {
             case WM_CREATE: {
-                HRGN rgn = CreateRoundRectRgn(0, 0, 320, 280, 12, 12);
-                SetWindowRgn(hwnd, rgn, TRUE);
+                int corner_preference = 2; // DWMWCP_ROUND
+                DwmSetWindowAttribute(hwnd, 33, &corner_preference, sizeof(corner_preference));
                 return 0;
             }
+            case WM_ERASEBKGND:
+                return 1; // Prevent flickering
             case WM_PAINT: {
                 PAINTSTRUCT ps;
                 HDC hdc = BeginPaint(hwnd, &ps);
                 RECT rc; GetClientRect(hwnd, &rc);
                 
-                Gdiplus::Graphics g(hdc);
+                Gdiplus::Bitmap bmp(rc.right, rc.bottom, PixelFormat32bppARGB);
+                Gdiplus::Graphics g(&bmp);
                 g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
                 g.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
 
@@ -950,6 +966,9 @@ namespace {
                     y += 30;
                 }
                 
+                Gdiplus::Graphics gFinal(hdc);
+                gFinal.DrawImage(&bmp, 0, 0);
+                
                 EndPaint(hwnd, &ps);
                 return 0;
             }
@@ -984,9 +1003,16 @@ namespace {
             }
             case WM_LBUTTONUP: {
                 if (g_hovered_item >= 0 && g_hovered_item < (int)g_menu_items.size()) {
-                    g_selected_action = g_menu_items[g_hovered_item].id;
-                    g_menu_done = true;
-                    PostMessage(hwnd, WM_NULL, 0, 0);
+                    const auto& item = g_menu_items[g_hovered_item];
+                    if (item.has_toggle) {
+                        g_menu_items[g_hovered_item].is_toggled = !item.is_toggled;
+                        InvalidateRect(hwnd, nullptr, FALSE);
+                        PostMessage(hwnd, WM_APP + 5, item.id, 0);
+                    } else {
+                        g_selected_action = item.id;
+                        g_menu_done = true;
+                        PostMessage(hwnd, WM_NULL, 0, 0);
+                    }
                 }
                 return 0;
             }
@@ -1001,14 +1027,6 @@ namespace {
 }
 
 void Win32Window::show_context_menu(POINT pt) {
-    constexpr UINT ID_FACTORY_RESET = 1001;
-    constexpr UINT ID_TOGGLE_FPS    = 1002;
-    constexpr UINT ID_TOGGLE_RES    = 1003;
-    constexpr UINT ID_SET_PIN       = 1004;
-    constexpr UINT ID_UNLOCK_DEVICE = 1005;
-    constexpr UINT ID_TOGGLE_COMPAT = 1006;
-    constexpr UINT ID_TOGGLE_LOWEST_BRIGHTNESS = 1007;
-    constexpr UINT ID_LOCK_DEVICE   = 1008;
 
     g_menu_items.clear();
     g_menu_items.push_back({ID_TOGGLE_FPS, L"FPS begrenzen (30)", true, fps_limited_, false});
@@ -1051,16 +1069,29 @@ void Win32Window::show_context_menu(POINT pt) {
         pt.x, pt.y, 320, height,
         hwnd_, nullptr, GetModuleHandle(nullptr), nullptr);
         
-    // Fix region height since we dynamically calculate height
-    HRGN rgn = CreateRoundRectRgn(0, 0, 320, height, 12, 12);
-    SetWindowRgn(hMenu, rgn, TRUE);
-    
     SetFocus(hMenu);
     g_menu_done = false;
 
     MSG msg;
     while (GetMessage(&msg, nullptr, 0, 0)) {
         if (!IsWindow(hMenu) || g_menu_done) break;
+        if (msg.hwnd == hMenu && msg.message == WM_APP + 5) {
+            UINT action_id = static_cast<UINT>(msg.wParam);
+            MenuAction action;
+            switch (action_id) {
+                case ID_FACTORY_RESET: action = MenuAction::FACTORY_RESET; break;
+                case ID_TOGGLE_FPS:    action = MenuAction::TOGGLE_FPS_LIMIT; break;
+                case ID_TOGGLE_RES:    action = MenuAction::TOGGLE_RESOLUTION_LIMIT; break;
+                case ID_TOGGLE_COMPAT: action = MenuAction::TOGGLE_COMPATIBILITY_MODE; break;
+                case ID_TOGGLE_LOWEST_BRIGHTNESS: action = MenuAction::TOGGLE_LOWEST_BRIGHTNESS; break;
+                case ID_SET_PIN:       action = MenuAction::SET_PIN; break;
+                case ID_UNLOCK_DEVICE: action = MenuAction::UNLOCK_DEVICE; break;
+                case ID_LOCK_DEVICE:   action = MenuAction::LOCK_DEVICE; break;
+                default: continue;
+            }
+            if (menu_cb_) menu_cb_(action);
+            continue;
+        }
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
@@ -1086,6 +1117,103 @@ void Win32Window::show_context_menu(POINT pt) {
     if (menu_cb_) menu_cb_(action);
 }
 
+<<<<<<< Updated upstream
+=======
+void Win32Window::show_capture_menu(POINT pt) {
+
+    g_menu_items.clear();
+    g_menu_items.push_back({ID_SCREENSHOT, L"Bildschirmfoto aufnehmen", false, false, false});
+    g_menu_items.push_back({ID_TOGGLE_RECORDING,
+        recording_ ? L"Videoaufnahme beenden" : L"Videoaufnahme starten", false, false, false});
+    g_menu_items.push_back({0, L"", false, false, true});
+    g_menu_items.push_back({ID_TOGGLE_SEND_TO_PHONE, L"Fertige Aufnahmen ans Handy senden",
+        true, capture_send_to_phone_, false});
+
+    int height = 10;
+    for (const auto& item : g_menu_items) {
+        height += item.is_separator ? 11 : 30;
+    }
+
+    static bool class_registered = false;
+    if (!class_registered) {
+        WNDCLASSEXA wc = {sizeof(WNDCLASSEXA)};
+        wc.lpfnWndProc = SettingsMenuProc;
+        wc.hInstance = GetModuleHandle(nullptr);
+        wc.lpszClassName = "PixelMirroringCaptureMenu";
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        RegisterClassExA(&wc);
+        class_registered = true;
+    }
+
+    ClientToScreen(hwnd_, &pt);
+    g_selected_action = 0;
+    g_hovered_item = -1;
+    HWND hMenu = CreateWindowExA(WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        "PixelMirroringCaptureMenu", "", WS_POPUP | WS_VISIBLE,
+        pt.x, pt.y, 320, height, hwnd_, nullptr, GetModuleHandle(nullptr), nullptr);
+    if (!hMenu) return;
+
+    SetFocus(hMenu);
+    g_menu_done = false;
+
+    MSG msg;
+    while (GetMessage(&msg, nullptr, 0, 0)) {
+        if (!IsWindow(hMenu) || g_menu_done) break;
+        if (msg.hwnd == hMenu && msg.message == WM_APP + 5) {
+            UINT action_id = static_cast<UINT>(msg.wParam);
+            MenuAction action;
+            switch (action_id) {
+                case ID_SCREENSHOT: action = MenuAction::TAKE_SCREENSHOT; break;
+                case ID_TOGGLE_RECORDING: action = MenuAction::TOGGLE_RECORDING; break;
+                case ID_TOGGLE_SEND_TO_PHONE: action = MenuAction::TOGGLE_SEND_CAPTURES_TO_PHONE; break;
+                default: continue;
+            }
+            if (menu_cb_) menu_cb_(action);
+            continue;
+        }
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
+    if (IsWindow(hMenu)) DestroyWindow(hMenu);
+
+    MenuAction action;
+    switch (g_selected_action) {
+        case ID_SCREENSHOT: action = MenuAction::TAKE_SCREENSHOT; break;
+        case ID_TOGGLE_RECORDING: action = MenuAction::TOGGLE_RECORDING; break;
+        case ID_TOGGLE_SEND_TO_PHONE: action = MenuAction::TOGGLE_SEND_CAPTURES_TO_PHONE; break;
+        default: return;
+    }
+    if (menu_cb_) menu_cb_(action);
+}
+
+void Win32Window::set_recording(bool recording) {
+    recording_ = recording;
+    if (recording_) {
+        recording_start_time_ = std::chrono::steady_clock::now();
+        if (hwnd_) SetTimer(hwnd_, 2, 1000, nullptr);
+    } else {
+        if (hwnd_) KillTimer(hwnd_, 2);
+    }
+    if (hwnd_) {
+        recalc_layout();
+        update_region();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+}
+
+void Win32Window::trigger_screenshot_flash() {
+    screenshot_flash_frames_ = 6; 
+    screenshot_flash_ = true;
+    screenshot_flash_start_ = std::chrono::steady_clock::now();
+    if (hwnd_) {
+        SetTimer(hwnd_, 3, 100, nullptr);
+        recalc_layout();
+        update_region();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+}
+
+>>>>>>> Stashed changes
 void Win32Window::set_pc_clipboard(const std::string& text) {
     if (text.empty()) return;
 
