@@ -31,6 +31,8 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+        // Ugg! Sources always UTF-8, no matter what fire the build machine sit at.
+        encoding = "UTF-8"
     }
     kotlinOptions {
         jvmTarget = "17"
@@ -43,6 +45,11 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+}
+
+// Ugg! Same UTF-8 rule for every javac fire, also test ones.
+tasks.withType<JavaCompile>().configureEach {
+    options.encoding = "UTF-8"
 }
 
 dependencies {

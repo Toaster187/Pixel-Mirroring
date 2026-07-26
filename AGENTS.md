@@ -148,6 +148,26 @@ ADB **bleibt nicht dauerhaft aktiviert** (Sicherheitslücke geschlossen). Stattd
 - Bedingte Kompilierung ueber CMake, nicht mit wildem Preprocessor-Gewuehl
 - Keine hartcodierten Pfade
 
+### Textkodierung / Umlaute (PFLICHT)
+
+Alle deutschen Umlaute (ä ö ü Ä Ö Ü ß) und sonstigen Nicht-ASCII-Zeichen muessen in
+jedem Textfeld korrekt dargestellt werden. Damit das dauerhaft haelt, gilt:
+
+- **Alle Quelldateien sind UTF-8** (ohne BOM). `.editorconfig` im Repo-Root setzt `charset = utf-8`.
+- **MSVC braucht `/utf-8`** (in `Client/CMakeLists.txt` gesetzt). Ohne diesen Schalter liest MSVC
+  UTF-8-Dateien als cp1252 - dann werden sowohl `"..."` als auch `L"..."` Literale falsch kodiert
+  und die gesamte deutsche UI zeigt Buchstabensalat. Diesen Schalter niemals entfernen.
+- **Windows-API immer die `W`-Variante** verwenden (`MessageBoxW`, `DrawTextW`, `CreateFontW`,
+  `CreateWindowExW`, `RegisterClassExW`, ...). Nie `...A` mit deutschem Text.
+- Zwischen `std::string` (immer UTF-8) und `std::wstring` nur ueber `MultiByteToWideChar` /
+  `WideCharToMultiByte` mit `CP_UTF8` konvertieren - nie `CP_ACP`.
+- GDI+ zeichnet nur `wchar_t`: narrow Strings vorher nach UTF-16 konvertieren.
+- **Android**: `-Dfile.encoding=UTF-8` in `gradle.properties`, `compileOptions.encoding = "UTF-8"`
+  und `options.encoding = "UTF-8"` fuer alle `JavaCompile`-Tasks.
+- **Netzwerk**: HTTP-Bodies immer explizit mit `StandardCharsets.UTF_8` lesen/schreiben und
+  `charset=utf-8` im Content-Type mitschicken.
+- Umlaute nicht durch `ue`/`oe`/`ae` ersetzen, um ein Encoding-Problem zu umgehen - die Ursache fixen.
+
 ---
 
 ## Wichtige Architektur-Regeln

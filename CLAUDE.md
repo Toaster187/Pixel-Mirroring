@@ -76,6 +76,25 @@ Note: the Gradle wrapper scripts (`gradlew`, `gradlew.bat`, `gradle/`) are gitig
 - **Code comments** (both C++ and Kotlin) are written in a deliberately informal "caveman" register (e.g. `// Ugg! ADB not found ... Downloading from Google...`) per project convention in `AGENTS.md` — this applies only to in-code comments, not to user-facing communication, commit messages, or documentation, which should stay normal and professional (German or English).
 - No hardcoded paths; conditional compilation goes through CMake, not ad-hoc preprocessor branches.
 
+### Text encoding / German umlauts (mandatory)
+
+The UI is German — every text field must render `ä ö ü Ä Ö Ü ß` correctly. Rules that keep it that way:
+
+- **All source files are UTF-8 (no BOM).** `.editorconfig` at the repo root pins `charset = utf-8`.
+- **MSVC must be built with `/utf-8`** (set in `Client/CMakeLists.txt`). Without it MSVC reads UTF-8
+  files as cp1252, which corrupts *both* `"..."` and `L"..."` literals — that was the root cause of
+  the mojibake in release 3.67. Never drop this flag.
+- **Use the `W` variants of every Win32 text API** (`MessageBoxW`, `DrawTextW`, `CreateFontW`,
+  `CreateWindowExW`, `RegisterClassExW`, `GetWindowTextW`, …). Never pass German text to an `...A` call.
+- Convert between `std::string` (always UTF-8) and `std::wstring` only via `MultiByteToWideChar` /
+  `WideCharToMultiByte` with `CP_UTF8` — never `CP_ACP`.
+- GDI+ draws `wchar_t` only; convert narrow strings to UTF-16 before `DrawString`.
+- **Android:** `-Dfile.encoding=UTF-8` in `gradle.properties`, `compileOptions.encoding = "UTF-8"`,
+  and `options.encoding = "UTF-8"` for all `JavaCompile` tasks.
+- **Wire format:** read/write HTTP bodies explicitly with `StandardCharsets.UTF_8` and send
+  `charset=utf-8` in the Content-Type.
+- Never work around an encoding bug by spelling umlauts as `ue`/`oe`/`ae` — fix the cause.
+
 ## Guardrails
 
 - Never use browser tech (no Electron/WebView/CEF) for the desktop client.

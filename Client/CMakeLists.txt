@@ -41,7 +41,9 @@ add_executable(PixelMirroring
 )
 
 if(MSVC)
-    target_compile_options(PixelMirroring PRIVATE /EHsc)
+    # Ugg! Compiler eat source as cp1252 -> Ä Ö Ü turn to gibberish rocks.
+    # /utf-8 = source AND execution charset UTF-8. NEVER remove, umlauts die again!
+    target_compile_options(PixelMirroring PRIVATE /EHsc /utf-8)
 endif()
 
 if(PM_PORTABLE_BUILD)
