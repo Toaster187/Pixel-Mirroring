@@ -13,8 +13,8 @@ android {
         applicationId = "dev.pixelmirroring.app"
         minSdk = 30 // Android 11 for Wireless Debugging support
         targetSdk = 35
-        versionCode = 367
-        versionName = "3.67"
+        versionCode = 410
+        versionName = "4.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
