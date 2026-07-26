@@ -138,13 +138,23 @@ namespace {
     std::string g_pin_result;
     bool g_pin_done = false;
     WNDPROC g_old_edit_proc;
-    
+
+    // Ugg! Window give wide chars, rest of tribe speak UTF-8. Translate!
+    std::string wide_to_utf8(const wchar_t* wstr) {
+        if (!wstr || !wstr[0]) return "";
+        int len = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, nullptr, 0, nullptr, nullptr);
+        if (len <= 1) return "";
+        std::string out(static_cast<size_t>(len - 1), '\0');
+        WideCharToMultiByte(CP_UTF8, 0, wstr, -1, &out[0], len, nullptr, nullptr);
+        return out;
+    }
+
     LRESULT CALLBACK PinEditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (msg == WM_KEYDOWN) {
             if (wp == VK_RETURN) {
-                char buf[128] = {0};
-                GetWindowTextA(hwnd, buf, sizeof(buf));
-                g_pin_result = buf;
+                wchar_t buf[128] = {0};
+                GetWindowTextW(hwnd, buf, 128);
+                g_pin_result = wide_to_utf8(buf);
                 g_pin_done = true;
                 PostMessage(GetParent(hwnd), WM_NULL, 0, 0);
                 return 0;
@@ -155,18 +165,18 @@ namespace {
                 return 0;
             }
         }
-        return CallWindowProcA(g_old_edit_proc, hwnd, msg, wp, lp);
+        return CallWindowProcW(g_old_edit_proc, hwnd, msg, wp, lp);
     }
     
     LRESULT CALLBACK PinDialogProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         switch (msg) {
             case WM_CREATE: {
-                HWND hEdit = CreateWindowExA(0, "EDIT", "", 
+                HWND hEdit = CreateWindowExW(0, L"EDIT", L"", 
                     WS_CHILD | WS_VISIBLE | ES_PASSWORD | ES_AUTOHSCROLL | ES_CENTER,
                     20, 50, 160, 24, hwnd, nullptr, GetModuleHandle(nullptr), nullptr);
-                HFONT hFont = CreateFontA(18, 0,0,0, FW_NORMAL, 0,0,0, DEFAULT_CHARSET, 0,0,0,0, "Segoe UI");
+                HFONT hFont = CreateFontW(18, 0,0,0, FW_NORMAL, 0,0,0, DEFAULT_CHARSET, 0,0,0,0, L"Segoe UI");
                 SendMessage(hEdit, WM_SETFONT, (WPARAM)hFont, 0);
-                g_old_edit_proc = (WNDPROC)SetWindowLongPtrA(hEdit, GWLP_WNDPROC, (LONG_PTR)PinEditProc);
+                g_old_edit_proc = (WNDPROC)SetWindowLongPtrW(hEdit, GWLP_WNDPROC, (LONG_PTR)PinEditProc);
                 SetFocus(hEdit);
                 
                 HRGN rgn = CreateRoundRectRgn(0, 0, 200, 110, 16, 16);
@@ -184,16 +194,16 @@ namespace {
                 
                 SetBkMode(hdc, TRANSPARENT);
                 SetTextColor(hdc, RGB(240, 240, 240));
-                HFONT hFont = CreateFontA(16, 0,0,0, FW_BOLD, 0,0,0, DEFAULT_CHARSET, 0,0,0,0, "Segoe UI");
+                HFONT hFont = CreateFontW(16, 0,0,0, FW_BOLD, 0,0,0, DEFAULT_CHARSET, 0,0,0,0, L"Segoe UI");
                 HFONT oldFont = (HFONT)SelectObject(hdc, hFont);
                 RECT tr = {0, 15, 200, 40};
-                DrawTextA(hdc, "PIN eingeben:", -1, &tr, DT_CENTER | DT_TOP);
+                DrawTextW(hdc, L"PIN eingeben:", -1, &tr, DT_CENTER | DT_TOP);
                 
                 SetTextColor(hdc, RGB(150, 150, 150));
-                HFONT smallFont = CreateFontA(12, 0,0,0, FW_NORMAL, 0,0,0, DEFAULT_CHARSET, 0,0,0,0, "Segoe UI");
+                HFONT smallFont = CreateFontW(12, 0,0,0, FW_NORMAL, 0,0,0, DEFAULT_CHARSET, 0,0,0,0, L"Segoe UI");
                 SelectObject(hdc, smallFont);
                 RECT br = {0, 85, 200, 110};
-                DrawTextA(hdc, "Enter (OK)  |  Esc (Abbrechen)", -1, &br, DT_CENTER | DT_TOP);
+                DrawTextW(hdc, L"Enter (OK)  |  Esc (Abbrechen)", -1, &br, DT_CENTER | DT_TOP);
                 
                 SelectObject(hdc, oldFont);
                 DeleteObject(hFont);
@@ -217,7 +227,7 @@ namespace {
                 return 0;
             }
         }
-        return DefWindowProcA(hwnd, msg, wp, lp);
+        return DefWindowProcW(hwnd, msg, wp, lp);
     }
 }
 #endif
@@ -227,12 +237,12 @@ std::string prompt_user_for_pin(void* parent_hwnd = nullptr) {
 #ifdef _WIN32
         g_pin_result = "";
         HINSTANCE hi = GetModuleHandle(nullptr);
-        WNDCLASSEXA wc = {sizeof(wc)};
+        WNDCLASSEXW wc = {sizeof(wc)};
         wc.lpfnWndProc = PinDialogProc;
         wc.hInstance = hi;
         wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-        wc.lpszClassName = "PixelMirroringPinDialog";
-        RegisterClassExA(&wc);
+        wc.lpszClassName = L"PixelMirroringPinDialog";
+        RegisterClassExW(&wc);
         
         HWND parent = (HWND)parent_hwnd;
         int px = 0, py = 0;
@@ -242,7 +252,7 @@ std::string prompt_user_for_pin(void* parent_hwnd = nullptr) {
             py = pr.top + (pr.bottom - pr.top) / 2 - 55;
         }
         
-        HWND hwnd = CreateWindowExA(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, wc.lpszClassName, "PIN", 
+        HWND hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, wc.lpszClassName, L"PIN", 
             WS_POPUP, px, py, 200, 110, parent, nullptr, hi, nullptr);
             
         if (parent) EnableWindow(parent, FALSE);
@@ -259,7 +269,7 @@ std::string prompt_user_for_pin(void* parent_hwnd = nullptr) {
         
         if (parent) EnableWindow(parent, TRUE);
         DestroyWindow(hwnd);
-        UnregisterClassA(wc.lpszClassName, hi);
+        UnregisterClassW(wc.lpszClassName, hi);
         
         if (parent) {
             SetForegroundWindow(parent);
@@ -1116,7 +1126,7 @@ static int app_main() {
     if (tray) {
         if (!tray->create("Pixel Mirroring", do_restore)) {
 #ifdef _WIN32
-            MessageBoxA(nullptr, "Tray-Icon konnte nicht erstellt werden.", "Fehler", MB_OK | MB_ICONERROR);
+            MessageBoxW(nullptr, L"Tray-Icon konnte nicht erstellt werden.", L"Fehler", MB_OK | MB_ICONERROR);
 #endif
             tray.reset();
         }

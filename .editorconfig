@@ -1,0 +1,15 @@
+root = true
+
+# Ugg! Every fire in cave must write UTF-8. Umlauts (ä ö ü ß) break otherwise.
+[*]
+charset = utf-8
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{kt,kts,java,xml,gradle}]
+indent_style = space
+indent_size = 4
+
+[*.{cpp,h,hpp,mm}]
+indent_style = space
+indent_size = 4
