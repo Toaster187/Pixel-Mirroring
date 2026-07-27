@@ -1,4 +1,0 @@
-#include "resource.h"
-
-// First icon in file = icon Explorer/Taskbar show. Keep it first!
-IDI_APP_ICON ICON "../assets/app_icon.ico"

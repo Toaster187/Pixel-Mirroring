@@ -1,6 +1,5 @@
 #ifdef _WIN32
 #include "win32_window.h"
-#include "../resource.h"
 #include <windowsx.h>
 #include <algorithm>
 #include <SDL2/SDL.h>
@@ -127,11 +126,6 @@ bool Win32Window::create() {
     wc.hInstance = hi;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
-    // Ugg! Our own rock painting for taskbar + alt-tab, big and small size.
-    wc.hIcon = (HICON)LoadImageW(hi, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
-        GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR);
-    wc.hIconSm = (HICON)LoadImageW(hi, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
-        GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR);
     wc.lpszClassName = "PixelMirroringWindowClass";
     RegisterClassExA(&wc);
 
