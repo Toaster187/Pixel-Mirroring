@@ -1,6 +1,7 @@
 #include "adb_client.h"
 
 #include <iostream>
+#include <fstream>
 #include <sstream>
 #include <stdexcept>
 #include <array>
@@ -20,6 +21,44 @@
 #endif
 
 namespace pm::adb {
+
+namespace {
+
+// Ugg! GUI app has no console. Words to stderr fall in deep hole and are lost forever.
+// So carve ADB words into stone tablet next to stream.log, where human can read them.
+void log_adb_event(const std::string& message) {
+    std::cerr << message << std::endl;
+
+    std::filesystem::path log_dir;
+#ifndef PM_PORTABLE_BUILD
+#ifdef _WIN32
+    const char* local_app_data = std::getenv("LOCALAPPDATA");
+    if (local_app_data && local_app_data[0] != '\0') {
+        log_dir = std::filesystem::path(local_app_data) / "PixelMirroring";
+    }
+#endif
+#endif
+    if (log_dir.empty()) {
+        log_dir = get_executable_dir();
+    }
+
+    std::error_code ec;
+    std::filesystem::create_directories(log_dir, ec);
+    std::ofstream file(log_dir / "adb.log", std::ios::app);
+    if (file) {
+        file << message << "\n";
+    }
+}
+
+// Cave man rubs whitespace off both ends of stone.
+std::string trim(const std::string& text) {
+    const auto first = text.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return {};
+    const auto last = text.find_last_not_of(" \t\r\n");
+    return text.substr(first, last - first + 1);
+}
+
+} // namespace
 
 std::string get_executable_dir() {
 #ifdef _WIN32
@@ -326,18 +365,69 @@ bool AdbClient::enable_tcpip(const std::string& device_id, int port) {
 }
 
 bool AdbClient::install_app(const std::string& device_id, const std::string& apk_path) {
+    m_last_install_error.clear();
+
     if (!std::filesystem::exists(apk_path)) {
-        std::cerr << "[ADB] APK not found: " << apk_path << std::endl;
+        m_last_install_error = "APK nicht gefunden: " + apk_path;
+        log_adb_event("[ADB] APK not found: " + apk_path);
         return false;
     }
 
-    std::string output = run_adb_command({"-s", device_id, "install", "-g", "-t", "-r", "-d", apk_path});
+    // Cave man ask phone who sit in front of it. Then install ONLY into that cave.
+    // Without --user, phone would smear app over every user, also private space. NO!
+    std::string user = get_current_user(device_id);
+
+    std::vector<std::string> args = {"-s", device_id, "install"};
+    if (!user.empty()) {
+        args.push_back("--user");
+        args.push_back(user);
+    } else {
+        log_adb_event("[ADB] Could not read current user, installing without --user");
+    }
+    for (const char* flag : {"-g", "-t", "-r", "-d"}) {
+        args.push_back(flag);
+    }
+    args.push_back(apk_path);
+
+    std::string output = run_adb_command(args);
     if (output.find("Success") != std::string::npos) {
+        log_adb_event("[ADB] App installed for user " + (user.empty() ? std::string("<default>") : user));
         return true;
     }
 
-    std::cerr << "[ADB] App install failed: " << output << std::endl;
+    m_last_install_error = trim(output);
+    log_adb_event("[ADB] App install failed (user " + (user.empty() ? std::string("<default>") : user) + "): " + output);
     return false;
+}
+
+std::string AdbClient::get_current_user(const std::string& device_id) {
+    std::string output = trim(execute_shell_command(device_id, "am get-current-user"));
+
+    // Phone must answer with plain number. Anything else = cave man does not trust it.
+    if (output.empty() || output.find_first_not_of("0123456789") != std::string::npos) {
+        return {};
+    }
+    return output;
+}
+
+std::vector<std::string> AdbClient::users_with_app(const std::string& device_id, const std::string& package_name) {
+    std::vector<std::string> users;
+
+    // "pm list users" spits lines like: UserInfo{0:Friedrich:4c13} running
+    std::string user_list = execute_shell_command(device_id, "pm list users");
+    std::regex user_re("UserInfo\\{(\\d+):([^:]*):");
+    auto begin = std::sregex_iterator(user_list.begin(), user_list.end(), user_re);
+    for (auto it = begin; it != std::sregex_iterator(); ++it) {
+        std::string id = (*it)[1].str();
+        std::string name = trim((*it)[2].str());
+        std::string packages = execute_shell_command(
+            device_id, "pm list packages --user " + id + " " + package_name);
+        if (packages.find("package:" + package_name) != std::string::npos) {
+            users.push_back(name.empty() ? ("Profil " + id) : ("\"" + name + "\""));
+        }
+    }
+
+    return users;
 }
 
 bool AdbClient::start_app(const std::string& device_id, const std::string& package_name) {
@@ -506,8 +596,12 @@ bool AdbClient::grant_secure_settings(const std::string& device_id) {
 }
 
 bool AdbClient::is_app_installed(const std::string& device_id, const std::string& package_name) {
-    // Cave man peek at phone app list for user 0. If package there, app live.
-    std::string output = execute_shell_command(device_id, "pm list packages --user 0 " + package_name);
+    // Cave man peek at app list of user who sit at phone NOW. Was hardcoded to user 0
+    // before, so phone with second user or private space told lies.
+    std::string user = get_current_user(device_id);
+    if (user.empty()) user = "0";
+
+    std::string output = execute_shell_command(device_id, "pm list packages --user " + user + " " + package_name);
     return output.find("package:" + package_name) != std::string::npos;
 }
 

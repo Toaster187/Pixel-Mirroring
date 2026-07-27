@@ -417,6 +417,67 @@ std::optional<std::filesystem::path> find_android_apk() {
     return std::nullopt;
 }
 
+// ADB babbles many lines ("Performing Streamed Install" first!). Dig out the one
+// line that says what actually broke, else last line with words on it.
+std::string extract_adb_reason(const std::string& output) {
+    std::istringstream stream(output);
+    std::string line;
+    std::string fallback;
+
+    while (std::getline(stream, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+        if (line.empty()) continue;
+
+        const auto failure = line.find("Failure");
+        if (failure != std::string::npos) {
+            return line.substr(failure); // "Failure [INSTALL_FAILED_...]" - the good stuff
+        }
+        if (line.find("failed") != std::string::npos || line.find("Error") != std::string::npos) {
+            fallback = line;
+        } else if (fallback.empty()) {
+            fallback = line;
+        }
+    }
+
+    return fallback;
+}
+
+// Ugg! "Did not work" tells human nothing. Say WHICH stone lies in the way.
+std::string build_install_error_message(pm::adb::AdbClient& adb, const std::string& device_id) {
+    const std::string error = adb.last_install_error();
+
+    const bool signature_clash =
+        error.find("INSTALL_FAILED_UPDATE_INCOMPATIBLE") != std::string::npos ||
+        error.find("INCONSISTENT_CERTIFICATES") != std::string::npos ||
+        error.find("signatures do not match") != std::string::npos;
+
+    if (signature_clash) {
+        // Old app sits in other user or private space. Cave man NEVER touch other caves,
+        // so human must clear it there. We only point finger at the right cave.
+        std::string where = "einem anderen Profil";
+        auto users = adb.users_with_app(device_id, ANDROID_PACKAGE);
+        if (!users.empty()) {
+            where = "Profil " + users.front();
+            for (size_t i = 1; i < users.size(); ++i) {
+                where += (i + 1 == users.size()) ? " und " : ", ";
+                where += users[i];
+            }
+        }
+        return "Ältere Version in " + where + " blockiert die Installation (andere Signatur). "
+               "Bitte dort deinstallieren, dann erneut verbinden. Details: adb.log";
+    }
+
+    if (error.empty()) {
+        return "Android-App konnte nicht installiert werden. Details: adb.log";
+    }
+
+    std::string reason = extract_adb_reason(error);
+    if (reason.size() > 120) {
+        reason = reason.substr(0, 117) + "...";
+    }
+    return "Android-App konnte nicht installiert werden: " + reason + " (Details: adb.log)";
+}
+
 std::optional<pm::adb::Device> find_usb_device(
     const std::vector<pm::adb::Device>& devices,
     const std::string& state = ""
@@ -577,9 +638,10 @@ bool run_first_time_setup(
         }
 
         if (!adb.install_app(usb_device->id, apk_path->string())) {
-            window.post_task([&window]() {
+            std::string message = build_install_error_message(adb, usb_device->id);
+            window.post_task([&window, message]() {
                 window.set_app_state(pm::window::AppState::SETUP);
-                window.set_status_text("Android-App konnte nicht installiert werden.");
+                window.set_status_text(message);
             });
             return false;
         }

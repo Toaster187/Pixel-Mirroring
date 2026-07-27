@@ -47,8 +47,18 @@ public:
     // Cave man tells ADB daemon to listen on air.
     bool enable_tcpip(const std::string& device_id, int port = 5555);
 
-    // Cave man puts Android helper APK on phone.
+    // Cave man puts Android helper APK on phone. ONLY for user who sit at phone now,
+    // never other users, never private space. Ugg! Other caves are not our cave.
     bool install_app(const std::string& device_id, const std::string& apk_path);
+
+    // What went wrong last time install_app said no? Raw adb words for human eyes.
+    const std::string& last_install_error() const { return m_last_install_error; }
+
+    // Cave man ask phone which user sit in front of fire right now. Empty = no answer.
+    std::string get_current_user(const std::string& device_id);
+
+    // Cave man look in EVERY cave (user) for app, not only own one.
+    std::vector<std::string> users_with_app(const std::string& device_id, const std::string& package_name);
 
     // Cave man wakes Android helper app and service.
     bool start_app(const std::string& device_id, const std::string& package_name);
@@ -84,6 +94,8 @@ public:
 
 private:
     std::string run_adb_command(const std::vector<std::string>& args);
+
+    std::string m_last_install_error;
 
 #ifdef _WIN32
     bool run_command_windows(const std::string& cmdline, const std::function<void(const char*, size_t)>& on_read, bool log_errors);
