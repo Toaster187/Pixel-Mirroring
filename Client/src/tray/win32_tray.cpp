@@ -1,5 +1,6 @@
 #ifdef _WIN32
 #include "win32_tray.h"
+#include "../resource.h"
 #include <iostream>
 
 namespace pm::tray {
@@ -45,7 +46,11 @@ bool Win32Tray::create(const std::string& tooltip, std::function<void()> on_clic
     m_nid.uID = 1;
     m_nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     m_nid.uCallbackMessage = WM_TRAYICON;
-    m_nid.hIcon = LoadIcon(nullptr, IDI_APPLICATION); // Standard application icon
+    // Ugg! Our own rock painting in tray, small size. Fall back to boring
+    // system icon only if resource missing.
+    m_nid.hIcon = (HICON)LoadImageW(hinst, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
+        GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR);
+    if (!m_nid.hIcon) m_nid.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
 
     // Convert UTF-8 tooltip to UTF-16
     MultiByteToWideChar(CP_UTF8, 0, tooltip.c_str(), -1, m_nid.szTip, sizeof(m_nid.szTip) / sizeof(wchar_t));
