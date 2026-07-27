@@ -7,6 +7,7 @@
 struct AVCodecContext;
 struct AVFormatContext;
 struct AVFrame;
+struct AVPacket;
 struct AVStream;
 struct SwsContext;
 
@@ -36,9 +37,17 @@ private:
     AVCodecContext* m_video_codec{nullptr};
     AVStream* m_video_stream{nullptr};
     SwsContext* m_video_scaler{nullptr};
+
+    // Ugg! Cave man used to carve a brand new tablet for every single frame while
+    // recording (~3 MB per frame at 60 per second). Now one tablet gets reused.
+    AVFrame* m_encode_frame{nullptr};
+    AVPacket* m_encode_packet{nullptr};
+    // Whatever shape the chosen encoder wants: YUV420P for software, often NV12 for
+    // the graphics card. Stored so the scaler converts into the right one.
+    int m_encode_pixel_format{0}; // AVPixelFormat
+
     std::filesystem::path m_video_path;
     int64_t m_start_time_us{0};
-    int64_t m_next_pts{0};
     bool m_recording{false};
     bool m_video_has_frames{false};
 };

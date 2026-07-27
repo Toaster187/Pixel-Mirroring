@@ -66,6 +66,18 @@ namespace {
         return wstr;
     }
 
+    // Ugg! Phone has three big cave buttons at the bottom. PC keyboard has none, so
+    // Alt + letter stands in for them. Alt (not Ctrl) because Ctrl+C/Ctrl+V already
+    // carry the clipboard back and forth, and Ctrl+U/Ctrl+L unlock and lock.
+    int alt_shortcut_to_android_keycode(WPARAM wparam) {
+        switch (wparam) {
+        case 'B': return 4;   // AKEYCODE_BACK
+        case 'H': return 3;   // AKEYCODE_HOME
+        case 'S': return 187; // AKEYCODE_APP_SWITCH (Übersicht / Task-Manager)
+        default:  return 0;
+        }
+    }
+
     int vk_to_android_keycode(WPARAM wparam) {
         // map VK to android key. cave man press buttons.
         switch (wparam) {
@@ -97,6 +109,7 @@ std::unique_ptr<IWindow> create_window(int w, int h, const std::string& t) {
 Win32Window::Win32Window(int w, int h, const std::string& t) : width_(w), height_(h), title_(t) {}
 
 Win32Window::~Win32Window() {
+    release_fonts();
     if (m_sdl_renderer) SDL_DestroyRenderer(m_sdl_renderer);
     if (m_sdl_window) SDL_DestroyWindow(m_sdl_window);
     SDL_QuitSubSystem(SDL_INIT_VIDEO);
@@ -109,19 +122,72 @@ Win32Window::~Win32Window() {
     }
 }
 
+void Win32Window::ensure_fonts() {
+    if (font_family_ui_) return;
+
+    font_family_ui_ = new Gdiplus::FontFamily(L"Segoe UI");
+    font_family_icons_ = new Gdiplus::FontFamily(L"Segoe MDL2 Assets");
+
+    font_icon_ = new Gdiplus::Font(font_family_icons_, 10, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
+    font_title_ = new Gdiplus::Font(font_family_ui_, 16, Gdiplus::FontStyleBold, Gdiplus::UnitPoint);
+    font_body_ = new Gdiplus::Font(font_family_ui_, 9, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
+    font_button_ = new Gdiplus::Font(font_family_ui_, 11, Gdiplus::FontStyleBold, Gdiplus::UnitPoint);
+    font_status_ = new Gdiplus::Font(font_family_ui_, 12, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
+    font_live_ = new Gdiplus::Font(font_family_ui_, 7, Gdiplus::FontStyleBold, Gdiplus::UnitPoint);
+    font_timer_ = new Gdiplus::Font(font_family_ui_, 9, Gdiplus::FontStyleBold, Gdiplus::UnitPoint);
+}
+
+void Win32Window::release_fonts() {
+    delete font_icon_;   font_icon_ = nullptr;
+    delete font_title_;  font_title_ = nullptr;
+    delete font_body_;   font_body_ = nullptr;
+    delete font_button_; font_button_ = nullptr;
+    delete font_status_; font_status_ = nullptr;
+    delete font_live_;   font_live_ = nullptr;
+    delete font_timer_;  font_timer_ = nullptr;
+    delete font_family_ui_;    font_family_ui_ = nullptr;
+    delete font_family_icons_; font_family_icons_ = nullptr;
+}
+
+// Ugg! Spinner only turns while cave man waits. When the phone picture is live, or
+// the window sleeps in the tray, a 60-times-a-heartbeat repaint burns fire for nothing.
+void Win32Window::update_animation_timer() {
+    if (!hwnd_) return;
+
+    // Timers belong to the thread that owns the window. Some callers live on the
+    // connection thread, so hand the job over instead of poking from outside.
+    if (GetCurrentThreadId() != GetWindowThreadProcessId(hwnd_, nullptr)) {
+        post_task([this]() { update_animation_timer(); });
+        return;
+    }
+
+    const bool needs_animation = visible_ && app_state_ != AppState::STREAMING;
+    if (needs_animation == animation_timer_active_) return;
+
+    if (needs_animation) {
+        SetTimer(hwnd_, 1, 16, nullptr);
+    } else {
+        KillTimer(hwnd_, 1);
+    }
+    animation_timer_active_ = needs_animation;
+}
+
 void Win32Window::set_app_state(AppState s) {
     app_state_ = s;
     // Cave man toggle child window visibility based on streaming state
     if (hwnd_child_) {
         ShowWindow(hwnd_child_, s == AppState::STREAMING ? SW_SHOW : SW_HIDE);
     }
+    update_animation_timer();
     if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
 }
 void Win32Window::set_status_text(const std::string& t) { status_text_ = t; if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE); }
 
 bool Win32Window::create() {
     HINSTANCE hi = GetModuleHandle(nullptr);
-    WNDCLASSEXA wc = {sizeof(wc)};
+    // Ugg! Class must be Unicode. An ANSI class hands us cp1252 bytes in WM_CHAR,
+    // so anything past the old Latin alphabet (€, emoji) arrives as broken rocks.
+    WNDCLASSEXW wc = {sizeof(wc)};
     wc.style = CS_HREDRAW | CS_VREDRAW | CS_DROPSHADOW;
     wc.lpfnWndProc = Win32Window::window_proc;
     wc.hInstance = hi;
@@ -132,12 +198,13 @@ bool Win32Window::create() {
         GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR);
     wc.hIconSm = (HICON)LoadImageW(hi, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
         GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR);
-    wc.lpszClassName = "PixelMirroringWindowClass";
-    RegisterClassExA(&wc);
+    wc.lpszClassName = L"PixelMirroringWindowClass";
+    RegisterClassExW(&wc);
 
     DWORD style = WS_POPUP | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
     int th = height_ + BUBBLE_H + BUBBLE_GAP;
-    hwnd_ = CreateWindowExA(0, wc.lpszClassName, title_.c_str(), style,
+    const std::wstring wide_title = utf8_to_wstring(title_);
+    hwnd_ = CreateWindowExW(0, wc.lpszClassName, wide_title.c_str(), style,
         CW_USEDEFAULT, CW_USEDEFAULT, width_, th, nullptr, nullptr, hi, this);
     if (!hwnd_) return false;
 
@@ -150,17 +217,17 @@ bool Win32Window::create() {
     DwmSetWindowAttribute(hwnd_, 33, &corner_preference, sizeof(corner_preference)); // 33 = DWMWA_WINDOW_CORNER_PREFERENCE
 
     // Cave man register child window class
-    WNDCLASSEXA child_wc = {sizeof(child_wc)};
+    WNDCLASSEXW child_wc = {sizeof(child_wc)};
     child_wc.style = CS_HREDRAW | CS_VREDRAW;
-    child_wc.lpfnWndProc = DefWindowProcA;
+    child_wc.lpfnWndProc = DefWindowProcW;
     child_wc.hInstance = hi;
     child_wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     child_wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
-    child_wc.lpszClassName = "PixelMirroringChildWindowClass";
-    RegisterClassExA(&child_wc);
+    child_wc.lpszClassName = L"PixelMirroringChildWindowClass";
+    RegisterClassExW(&child_wc);
 
     // Cave man create child window for SDL video, ignore input so it fall through to parent
-    hwnd_child_ = CreateWindowExA(0, child_wc.lpszClassName, nullptr,
+    hwnd_child_ = CreateWindowExW(0, child_wc.lpszClassName, nullptr,
         WS_CHILD | WS_DISABLED | WS_CLIPSIBLINGS,
         0, 0, 0, 0,
         hwnd_, nullptr, hi, nullptr);
@@ -178,7 +245,7 @@ bool Win32Window::create() {
 
     recalc_layout();
     update_region();
-    SetTimer(hwnd_, 1, 16, nullptr);
+    update_animation_timer();
     return true;
 }
 
@@ -186,15 +253,24 @@ void Win32Window::show() {
     ShowWindow(hwnd_, SW_SHOW);
     UpdateWindow(hwnd_);
     visible_ = true;
+    update_animation_timer();
     // Cave man force redraw of SDL frame when window shown
     PostMessage(hwnd_, WM_VIDEO_RENDER, 0, 0);
 }
-void Win32Window::hide() { ShowWindow(hwnd_, SW_HIDE); visible_ = false; }
+void Win32Window::hide() {
+    ShowWindow(hwnd_, SW_HIDE);
+    visible_ = false;
+    update_animation_timer();
+}
 bool Win32Window::is_visible() const { return visible_; }
 
 void Win32Window::process_messages() {
     MSG msg;
-    while (GetMessage(&msg, nullptr, 0, 0)) { TranslateMessage(&msg); DispatchMessage(&msg); }
+    // GetMessage returns -1 on error. Treating that as "true" spins forever.
+    while (GetMessage(&msg, nullptr, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
 }
 
 void Win32Window::set_aspect_ratio(double r) {
@@ -293,7 +369,8 @@ void Win32Window::update_region() {
         rect_bubble_.right+1, rect_bubble_.bottom+1, BUBBLE_CORNER_RADIUS*2, BUBBLE_CORNER_RADIUS*2);
     HRGN pr = CreateRoundRectRgn(rect_phone_.left, rect_phone_.top,
         rect_phone_.right+1, rect_phone_.bottom+1, PHONE_CORNER_RADIUS*2, PHONE_CORNER_RADIUS*2);
-    HRGN c = CreateRectRgn(0,0,0,0);
+    // Ugg! There was a third region stone here that nobody used and nobody threw
+    // away. Every resize left one behind until Windows ran out of stones.
     HRGN rgn = CreateRectRgn(0,0,0,0);
     CombineRgn(rgn, br, pr, RGN_OR);
     
@@ -378,6 +455,8 @@ void Win32Window::toggle_max_height() {
 
 // --- GDI+ Paint ---
 void Win32Window::handle_paint() {
+    ensure_fonts();
+
     PAINTSTRUCT ps;
     HDC hdc = BeginPaint(hwnd_, &ps);
     RECT cr; GetClientRect(hwnd_, &cr);
@@ -443,9 +522,7 @@ void Win32Window::handle_paint() {
             g.ResetClip();
         }
 
-        // Button icons
-        Gdiplus::FontFamily ff(L"Segoe MDL2 Assets");
-        Gdiplus::Font iFont(&ff, 10, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
+        // Button icons — fonts come from the shelf, not freshly carved
         Gdiplus::StringFormat sfmt;
         sfmt.SetAlignment(Gdiplus::StringAlignmentCenter);
         sfmt.SetLineAlignment(Gdiplus::StringAlignmentCenter);
@@ -455,15 +532,13 @@ void Win32Window::handle_paint() {
                 ? Gdiplus::Color(255,255,255,255) : Gdiplus::Color(255,220,220,220);
             Gdiplus::SolidBrush b(c);
             Gdiplus::RectF rf((float)r.left,(float)r.top,(float)(r.right-r.left),(float)(r.bottom-r.top));
-            g.DrawString(icon, -1, &iFont, rf, &sfmt, &b);
+            g.DrawString(icon, -1, font_icon_, rf, &sfmt, &b);
         };
         if (recording_) {
-            Gdiplus::FontFamily liveFF(L"Segoe UI");
-            Gdiplus::Font liveF(&liveFF, 7, Gdiplus::FontStyleBold, Gdiplus::UnitPoint);
             Gdiplus::SolidBrush red(Gdiplus::Color(255, 244, 67, 54));
             Gdiplus::RectF liveRect((float)rect_capture_.left, (float)rect_capture_.top,
                 (float)(rect_capture_.right - rect_capture_.left), (float)(rect_capture_.bottom - rect_capture_.top));
-            g.DrawString(L"LIVE", -1, &liveF, liveRect, &sfmt, &red);
+            g.DrawString(L"LIVE", -1, font_live_, liveRect, &sfmt, &red);
         } else {
             drawIcon(ICON_CAPTURE, rect_capture_, false);
         }
@@ -494,8 +569,6 @@ void Win32Window::handle_paint() {
             swprintf_s(time_buf, 16, L"%02d:%02d", mins, secs);
             std::wstring timeStr(time_buf);
 
-            Gdiplus::FontFamily liveFF(L"Segoe UI");
-            Gdiplus::Font fFont(&liveFF, 9, Gdiplus::FontStyleBold, Gdiplus::UnitPoint);
             Gdiplus::SolidBrush textB(Gdiplus::Color(255, 255, 255, 255));
             Gdiplus::RectF timeRect((float)rect_recording_bubble_.left, (float)rect_recording_bubble_.top,
                 (float)(rect_recording_bubble_.right - rect_recording_bubble_.left - BUBBLE_H), (float)(rect_recording_bubble_.bottom - rect_recording_bubble_.top));
@@ -513,7 +586,7 @@ void Win32Window::handle_paint() {
                 g.FillRectangle(&hb, stopRect);
                 g.ResetClip();
             }
-            g.DrawString(timeStr.c_str(), -1, &fFont, timeRect, &sfmt, &textB);
+            g.DrawString(timeStr.c_str(), -1, font_timer_, timeRect, &sfmt, &textB);
         }
 
         if (screenshot_flash_) {
@@ -530,7 +603,7 @@ void Win32Window::handle_paint() {
             Gdiplus::SolidBrush whiteB(Gdiplus::Color(255, 255, 255, 255));
             Gdiplus::RectF iconRect((float)rect_screenshot_bubble_.left, (float)rect_screenshot_bubble_.top,
                 (float)(rect_screenshot_bubble_.right - rect_screenshot_bubble_.left), (float)(rect_screenshot_bubble_.bottom - rect_screenshot_bubble_.top));
-            g.DrawString(L"\xE722", -1, &iFont, iconRect, &sfmt, &whiteB);
+            g.DrawString(L"\xE722", -1, font_icon_, iconRect, &sfmt, &whiteB);
         }
 
         if (app_state_ != AppState::STREAMING) {
@@ -562,20 +635,17 @@ void Win32Window::draw_setup_screen(Gdiplus::Graphics& g) {
     float py = (float)rect_phone_.top;
 
     // Title
-    Gdiplus::FontFamily uiFF(L"Segoe UI");
-    Gdiplus::Font titleF(&uiFF, 16, Gdiplus::FontStyleBold, Gdiplus::UnitPoint);
     Gdiplus::SolidBrush white(Gdiplus::Color(255, 230, 230, 230));
     Gdiplus::RectF titleR(px, py + ph * 0.15f, pw, 30);
-    g.DrawString(L"Pixel Mirroring", -1, &titleF, titleR, &sf, &white);
+    g.DrawString(L"Pixel Mirroring", -1, font_title_, titleR, &sf, &white);
 
     // Instructions
-    Gdiplus::Font bodyF(&uiFF, 9, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
     Gdiplus::SolidBrush gray(Gdiplus::Color(255, 160, 160, 160));
     Gdiplus::RectF instrR(px + 20, py + ph * 0.30f, pw - 40, ph * 0.30f);
     g.DrawString(L"1. USB-Debugging am Handy\r\n    einmal aktivieren\r\n\r\n"
                  L"2. Handy per USB verbinden\r\n    (nur für die Einrichtung)\r\n\r\n"
                  L"3. Verbinden drücken - die\r\n    Android-App wird installiert",
-                 -1, &bodyF, instrR, nullptr, &gray);
+                 -1, font_body_, instrR, nullptr, &gray);
 
     // Start button
     Gdiplus::RectF btnR((float)rect_start_btn_.left, (float)rect_start_btn_.top,
@@ -589,16 +659,14 @@ void Win32Window::draw_setup_screen(Gdiplus::Graphics& g) {
         Gdiplus::SolidBrush bb(btnColor);
         g.FillPath(&bb, &bp);
     }
-    Gdiplus::Font btnF(&uiFF, 11, Gdiplus::FontStyleBold, Gdiplus::UnitPoint);
     Gdiplus::SolidBrush btnText(Gdiplus::Color(255, 255, 255, 255));
-    g.DrawString(L"Verbinden", -1, &btnF, btnR, &sf, &btnText);
+    g.DrawString(L"Verbinden", -1, font_button_, btnR, &sf, &btnText);
 
     if (!status_text_.empty()) {
-        Gdiplus::Font errF(&uiFF, 9, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
         Gdiplus::SolidBrush errColor(Gdiplus::Color(255, 255, 110, 110));
         std::wstring ws = utf8_to_wstring(status_text_);
         Gdiplus::RectF sr(px + 10.0f, btnR.Y + btnR.Height + 15.0f, pw - 20.0f, 60.0f);
-        g.DrawString(ws.c_str(), -1, &errF, sr, &sf, &errColor);
+        g.DrawString(ws.c_str(), -1, font_body_, sr, &sf, &errColor);
     }
 }
 
@@ -631,18 +699,15 @@ void Win32Window::draw_connected_screen(Gdiplus::Graphics& g) {
     spinnerPen.SetLineCap(Gdiplus::LineCapRound, Gdiplus::LineCapRound, Gdiplus::DashCapRound);
     g.DrawArc(&spinnerPen, arcRect, angle - 90.0f, 120.0f);
 
-    Gdiplus::FontFamily uiFF(L"Segoe UI");
-    Gdiplus::Font f(&uiFF, 12, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
     Gdiplus::SolidBrush white(Gdiplus::Color(255, 230, 230, 230));
     Gdiplus::RectF r(px, cy + 10.0f, pw, 30);
-    g.DrawString(L"Verbindung wird hergestellt...", -1, &f, r, &sf, &white);
+    g.DrawString(L"Verbindung wird hergestellt...", -1, font_status_, r, &sf, &white);
 
     if (!status_text_.empty()) {
-        Gdiplus::Font sf2(&uiFF, 9, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
         Gdiplus::SolidBrush gray(Gdiplus::Color(255, 140, 140, 140));
         std::wstring ws = utf8_to_wstring(status_text_);
         Gdiplus::RectF sr(px + 10.0f, cy + 40.0f, pw - 20.0f, 60.0f);
-        g.DrawString(ws.c_str(), -1, &sf2, sr, &sf, &gray);
+        g.DrawString(ws.c_str(), -1, font_body_, sr, &sf, &gray);
     }
 }
 
@@ -670,11 +735,9 @@ void Win32Window::draw_streaming_screen(Gdiplus::Graphics& g) {
         spinnerPen.SetLineCap(Gdiplus::LineCapRound, Gdiplus::LineCapRound, Gdiplus::DashCapRound);
         g.DrawArc(&spinnerPen, arcRect, angle - 90.0f, 120.0f);
 
-        Gdiplus::FontFamily uiFF(L"Segoe UI");
-        Gdiplus::Font f(&uiFF, 12, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
         Gdiplus::SolidBrush white(Gdiplus::Color(255, 230, 230, 230));
         Gdiplus::RectF r(px, cy + 10.0f, pw, 30);
-        g.DrawString(L"Bildschirm wird geladen...", -1, &f, r, &sf, &white);
+        g.DrawString(L"Bildschirm wird geladen...", -1, font_status_, r, &sf, &white);
     }
 }
 
@@ -690,7 +753,7 @@ LRESULT CALLBACK Win32Window::window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM
         w = reinterpret_cast<Win32Window*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
     }
     if (w) return w->handle_message(msg, wp, lp);
-    return DefWindowProc(hwnd, msg, wp, lp);
+    return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
 LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
@@ -937,6 +1000,20 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
         }
         break;
     }
+    case WM_SYSKEYDOWN:
+    case WM_SYSKEYUP: {
+        // Ugg! While Alt is pressed Windows sends SYS messages instead of the normal
+        // ones. Everything we do not claim falls through to DefWindowProc, so Alt+F4
+        // and friends keep working.
+        if (app_state_ == AppState::STREAMING && m_key_cb_ && (GetKeyState(VK_MENU) & 0x8000)) {
+            const int ak = alt_shortcut_to_android_keycode(wp);
+            if (ak != 0) {
+                m_key_cb_(msg == WM_SYSKEYDOWN ? 0 : 1, ak);
+                return 0;
+            }
+        }
+        break;
+    }
     case WM_CHAR: {
         if (app_state_ == AppState::STREAMING && m_text_cb_) {
             wchar_t wch = static_cast<wchar_t>(wp);
@@ -1000,7 +1077,7 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_PAINT: handle_paint(); return 0;
     case WM_ERASEBKGND: return 1;
     }
-    return DefWindowProc(hwnd_, msg, wp, lp);
+    return DefWindowProcW(hwnd_, msg, wp, lp);
 }
 
 LRESULT Win32Window::handle_nchittest(POINT sp) {
@@ -1048,10 +1125,13 @@ void Win32Window::handle_sizing(WPARAM edge, LPARAM lp) {
 }
 
 void Win32Window::post_task(std::function<void()> task) {
-    if (!hwnd_) return;
-    // Cave man allocate task on heap, UI thread delete after run
+    if (!hwnd_ || !task) return;
+    // Cave man allocate task on heap, UI thread delete after run.
+    // If the message never reaches the queue, cave man cleans up himself.
     auto* heap_task = new std::function<void()>(std::move(task));
-    PostMessage(hwnd_, WM_APP + 3, 0, reinterpret_cast<LPARAM>(heap_task));
+    if (!PostMessage(hwnd_, WM_APP + 3, 0, reinterpret_cast<LPARAM>(heap_task))) {
+        delete heap_task;
+    }
 }
 
 namespace {
@@ -1063,6 +1143,7 @@ namespace {
     constexpr UINT ID_TOGGLE_COMPAT = 1006;
     constexpr UINT ID_TOGGLE_LOWEST_BRIGHTNESS = 1007;
     constexpr UINT ID_LOCK_DEVICE   = 1008;
+    constexpr UINT ID_TOGGLE_AUDIO  = 1009;
 
     constexpr UINT ID_SCREENSHOT = 1101;
     constexpr UINT ID_TOGGLE_RECORDING = 1102;
@@ -1074,6 +1155,8 @@ namespace {
         bool has_toggle;
         bool is_toggled;
         bool is_separator;
+        // Ugg! A row that only tells, never listens. No hover, no click.
+        bool is_info = false;
     };
 
     std::vector<MenuItem> g_menu_items;
@@ -1132,7 +1215,16 @@ namespace {
                     }
 
                     Gdiplus::RectF textRect(15.0f, (float)y, (float)rc.right - 15.0f, 30.0f);
-                    
+
+                    if (item.is_info) {
+                        // Dimmer than the real entries so it reads as a hint, not a button.
+                        Gdiplus::Font infoFont(&fontFamily, 8.5f, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
+                        Gdiplus::SolidBrush infoBrush(Gdiplus::Color(255, 150, 150, 150));
+                        g.DrawString(item.text.c_str(), -1, &infoFont, textRect, &format, &infoBrush);
+                        y += 30;
+                        continue;
+                    }
+
                     if (item.has_toggle) {
                         // Draw toggle box
                         float boxW = 30.0f;
@@ -1177,6 +1269,10 @@ namespace {
                 for (size_t i = 0; i < g_menu_items.size(); ++i) {
                     if (g_menu_items[i].is_separator) {
                         y += 11;
+                        continue;
+                    }
+                    if (g_menu_items[i].is_info) {
+                        y += 30; // takes up space, but cannot be picked
                         continue;
                     }
                     RECT item_rc = {0, y, 320, y + 30};
@@ -1238,11 +1334,14 @@ void Win32Window::show_context_menu(POINT pt) {
     g_menu_items.push_back({ID_TOGGLE_RES, L"Auflösung begrenzen (720p)", true, resolution_limited_, false});
     g_menu_items.push_back({ID_TOGGLE_COMPAT, L"Kompatibilitätsmodus (langsame PIN)", true, compatibility_mode_, false});
     g_menu_items.push_back({ID_TOGGLE_LOWEST_BRIGHTNESS, L"Bildschirm auf niedrigste Helligkeit", true, lowest_brightness_, false});
+    g_menu_items.push_back({ID_TOGGLE_AUDIO, L"Ton vom Handy übertragen", true, audio_enabled_, false});
     g_menu_items.push_back({0, L"", false, false, true});
     g_menu_items.push_back({ID_SET_PIN, L"PIN zum Entsperren festlegen", false, false, false});
     if (app_state_ == AppState::STREAMING) {
         g_menu_items.push_back({ID_UNLOCK_DEVICE, L"Handy entsperren (Strg+U)", false, false, false});
         g_menu_items.push_back({ID_LOCK_DEVICE, L"Handy sperren & Bildschirm aus (Strg+L)", false, false, false});
+        // One hint row for all three navigation keys — otherwise nobody finds them.
+        g_menu_items.push_back({0, L"Alt+B Zurück · Alt+H Start · Alt+S Übersicht", false, false, false, true});
     }
     g_menu_items.push_back({0, L"", false, false, true});
     g_menu_items.push_back({ID_FACTORY_RESET, L"Werkseinstellungen zurücksetzen", false, false, false});
@@ -1281,7 +1380,15 @@ void Win32Window::show_context_menu(POINT pt) {
     g_menu_done = false;
 
     MSG msg;
-    while (GetMessage(&msg, nullptr, 0, 0)) {
+    while (true) {
+        const BOOL got = GetMessage(&msg, nullptr, 0, 0);
+        if (got == 0) {
+            // Ugg! Tribe shouted "leave cave" while menu still hangs open. Old cave
+            // man ate that shout and the app kept breathing invisibly. Pass it on!
+            PostQuitMessage(static_cast<int>(msg.wParam));
+            break;
+        }
+        if (got == -1) break;
         if (!IsWindow(hMenu) || g_menu_done) break;
         if (msg.hwnd == hMenu && msg.message == WM_APP + 5) {
             UINT action_id = static_cast<UINT>(msg.wParam);
@@ -1292,6 +1399,7 @@ void Win32Window::show_context_menu(POINT pt) {
                 case ID_TOGGLE_RES:    action = MenuAction::TOGGLE_RESOLUTION_LIMIT; break;
                 case ID_TOGGLE_COMPAT: action = MenuAction::TOGGLE_COMPATIBILITY_MODE; break;
                 case ID_TOGGLE_LOWEST_BRIGHTNESS: action = MenuAction::TOGGLE_LOWEST_BRIGHTNESS; break;
+                case ID_TOGGLE_AUDIO:  action = MenuAction::TOGGLE_AUDIO; break;
                 case ID_SET_PIN:       action = MenuAction::SET_PIN; break;
                 case ID_UNLOCK_DEVICE: action = MenuAction::UNLOCK_DEVICE; break;
                 case ID_LOCK_DEVICE:   action = MenuAction::LOCK_DEVICE; break;
@@ -1317,6 +1425,7 @@ void Win32Window::show_context_menu(POINT pt) {
         case ID_TOGGLE_RES:    action = MenuAction::TOGGLE_RESOLUTION_LIMIT; break;
         case ID_TOGGLE_COMPAT: action = MenuAction::TOGGLE_COMPATIBILITY_MODE; break;
         case ID_TOGGLE_LOWEST_BRIGHTNESS: action = MenuAction::TOGGLE_LOWEST_BRIGHTNESS; break;
+        case ID_TOGGLE_AUDIO:  action = MenuAction::TOGGLE_AUDIO; break;
         case ID_SET_PIN:       action = MenuAction::SET_PIN; break;
         case ID_UNLOCK_DEVICE: action = MenuAction::UNLOCK_DEVICE; break;
         case ID_LOCK_DEVICE:   action = MenuAction::LOCK_DEVICE; break;
@@ -1369,7 +1478,13 @@ void Win32Window::show_capture_menu(POINT pt) {
     g_menu_done = false;
 
     MSG msg;
-    while (GetMessage(&msg, nullptr, 0, 0)) {
+    while (true) {
+        const BOOL got = GetMessage(&msg, nullptr, 0, 0);
+        if (got == 0) {
+            PostQuitMessage(static_cast<int>(msg.wParam));
+            break;
+        }
+        if (got == -1) break;
         if (!IsWindow(hMenu) || g_menu_done) break;
         if (msg.hwnd == hMenu && msg.message == WM_APP + 5) {
             UINT action_id = static_cast<UINT>(msg.wParam);

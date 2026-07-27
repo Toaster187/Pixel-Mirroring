@@ -1,4 +1,6 @@
 #include "network_scanner.h"
+#include <algorithm>
+#include <charconv>
 #include <iostream>
 #include <thread>
 #include <mutex>
@@ -22,16 +24,18 @@ namespace pm::network {
 
 NetworkScanner::NetworkScanner() {
 #ifdef _WIN32
-    WSADATA wsaData;
-    WSAStartup(MAKEWORD(2, 2), &wsaData);
+    // Ugg! Every scanner used to wake and kill the socket spirits on its own. When a
+    // short-lived scanner died it could pull the rug out from under the live video
+    // sockets. Now the spirits are woken exactly once and stay for the whole hunt.
+    static const bool winsock_ready = []() {
+        WSADATA wsa_data;
+        return WSAStartup(MAKEWORD(2, 2), &wsa_data) == 0;
+    }();
+    (void)winsock_ready;
 #endif
 }
 
-NetworkScanner::~NetworkScanner() {
-#ifdef _WIN32
-    WSACleanup();
-#endif
-}
+NetworkScanner::~NetworkScanner() = default;
 
 std::vector<std::string> NetworkScanner::get_local_ipv4_bases() {
     std::vector<std::string> bases;
@@ -55,19 +59,26 @@ std::vector<std::string> NetworkScanner::get_local_ipv4_bases() {
                         size_t third_dot = ip.find('.', second_dot + 1);
                         if (first_dot != std::string::npos && second_dot != std::string::npos) {
                             std::string base16 = ip.substr(0, second_dot + 1);
-                            int third_octet = std::stoi(ip.substr(second_dot + 1, third_dot - second_dot - 1));
-                            
-                            // Scan a slightly larger window around the PC's third octet
-                            int start = std::max(0, third_octet - 10);
-                            int end = std::min(255, third_octet + 10);
-                            for (int i = start; i <= end; ++i) {
-                                bases.push_back(base16 + std::to_string(i) + ".");
-                            }
-                            
-                            // Also always include common third octets
-                            std::vector<int> common_octets = {0, 1, 2, 10, 20, 50, 100, 150, 200};
-                            for (int octet : common_octets) {
-                                bases.push_back(base16 + std::to_string(octet) + ".");
+                            const std::string octet_text =
+                                ip.substr(second_dot + 1, third_dot - second_dot - 1);
+
+                            // Ugg! std::stoi throws when the stone is not a number, and
+                            // nobody catches it — the whole cave used to fall over.
+                            int third_octet = 0;
+                            const auto parsed = std::from_chars(
+                                octet_text.data(), octet_text.data() + octet_text.size(), third_octet);
+                            if (parsed.ec == std::errc()) {
+                                // Scan a slightly larger window around the PC's third octet
+                                int start = std::max(0, third_octet - 10);
+                                int end = std::min(255, third_octet + 10);
+                                for (int i = start; i <= end; ++i) {
+                                    bases.push_back(base16 + std::to_string(i) + ".");
+                                }
+
+                                // Also always include common third octets
+                                for (int octet : {0, 1, 2, 10, 20, 50, 100, 150, 200}) {
+                                    bases.push_back(base16 + std::to_string(octet) + ".");
+                                }
                             }
                         }
                     } else {

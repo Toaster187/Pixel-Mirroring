@@ -19,6 +19,7 @@ import dev.pixelmirroring.app.network.NetworkScanner
 import dev.pixelmirroring.app.network.StatusResponse
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -37,6 +38,7 @@ class MirroringService : Service() {
         private const val TAG = "MirroringService"
         private const val SESSION_IDLE_TIMEOUT_MS = 60_000L
         private const val WATCHDOG_INTERVAL_MS = 5_000L
+        private const val NETWORK_SETTLE_MS = 1_500L
     }
 
     private val json = Json { ignoreUnknownKeys = true }
@@ -54,6 +56,7 @@ class MirroringService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private var discoveryRestartJob: Job? = null
 
     private val screenStateReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
@@ -87,26 +90,40 @@ class MirroringService : Service() {
 
     private fun registerNetworkCallback() {
         val connectivityManager = getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+
+        // Ugg! An empty request means the phone shouts about EVERY path — mobile data,
+        // VPN, bluetooth. Cave man only cares about the local WLAN cave, because that
+        // is the only one the PC can knock on.
         val request = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
             .build()
 
         networkCallback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
-                if (serviceScope.isActive) {
-                    Log.i(TAG, "Network available, restarting discovery servers")
-                    startDiscoveryServer()
-                }
+                Log.i(TAG, "WLAN available, scheduling discovery restart")
+                scheduleDiscoveryRestart()
             }
 
             override fun onLost(network: Network) {
-                if (serviceScope.isActive) {
-                    Log.i(TAG, "Network lost, restarting discovery servers")
-                    startDiscoveryServer()
-                }
+                Log.i(TAG, "WLAN lost, scheduling discovery restart")
+                scheduleDiscoveryRestart()
             }
         }
 
         connectivityManager.registerNetworkCallback(request, networkCallback!!)
+    }
+
+    // A WLAN hiccup fires several callbacks in a row. Restarting the servers on each
+    // one tore the door down exactly while the PC was trying to walk through it, so
+    // cave man waits for the shouting to stop first.
+    private fun scheduleDiscoveryRestart() {
+        if (!serviceScope.isActive) return
+        discoveryRestartJob?.cancel()
+        discoveryRestartJob = serviceScope.launch {
+            delay(NETWORK_SETTLE_MS)
+            startDiscoveryServer()
+        }
     }
 
     private fun startSessionWatchdog() {

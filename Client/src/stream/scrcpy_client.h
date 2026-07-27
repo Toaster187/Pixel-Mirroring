@@ -5,6 +5,7 @@
 #include <functional>
 #include <thread>
 #include <atomic>
+#include <mutex>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -12,6 +13,8 @@
 #define SOCKET int
 #endif
 
+#include "../adb/adb_client.h"
+#include "audio_player.h"
 #include "video_decoder.h"
 
 // Forward declarations for FFmpeg/SDL (they will be included in the .cpp files)
@@ -65,18 +68,42 @@ private:
     bool connect_sockets();
     bool read_metadata();
 
+    // Ugg! Two hunters used to shout into the same control hole at once and the
+    // words got mixed. Now every message goes through here, one at a time, and
+    // keeps pushing until the whole message is out.
+    bool send_control(const uint8_t* data, size_t length);
+
+    // Reads exactly len bytes, riding out the recv timeouts, and gives up when the
+    // session ends or the socket really dies. Shared by all three stream loops.
+    bool recv_all(SOCKET socket_handle, char* buffer, int length);
+
+    // Tears down whatever start() managed to build before it hit a wall.
+    void abort_start();
+    void remove_tunnel();
+
     void video_thread_loop();
+    void audio_thread_loop();
     void control_thread_loop();
 
     Config config_;
     std::string scid_;
-    
+
     SOCKET video_socket_;
+    SOCKET audio_socket_;
     SOCKET control_socket_;
-    
+    std::mutex control_mutex_;
+
+    // The "adb shell app_process ..." that carries the server. Killed in stop().
+    pm::adb::ShellProcess server_process_;
+
     std::thread video_thread_;
+    std::thread audio_thread_;
     std::thread control_thread_;
     std::atomic<bool> running_{false};
+
+    // Turns false when the phone says it cannot capture sound. Video must not care.
+    bool audio_available_{false};
+    AudioPlayer audio_player_;
 
     FrameCallback frame_cb_;
     DisconnectCallback disconnect_cb_;

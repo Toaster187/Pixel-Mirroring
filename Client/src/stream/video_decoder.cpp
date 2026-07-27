@@ -63,13 +63,10 @@ bool VideoDecoder::init(uint32_t codec_id) {
     codec_ctx_->thread_type = FF_THREAD_SLICE;
     codec_ctx_->thread_count = 2; // Limit threads to reduce scheduling latency
 
-    AVDictionary* opts = nullptr;
-    av_dict_set(&opts, "tune", "zerolatency", 0);
-    av_dict_set(&opts, "preset", "ultrafast", 0);
-    av_dict_set(&opts, "flags", "low_delay", 0);
-    
-    int ret = avcodec_open2(codec_ctx_, codec, &opts);
-    av_dict_free(&opts);
+    // Ugg! "preset" and "tune" are options for a CARVING stone (encoder), not for a
+    // READING one. A decoder silently drops them, so they only ever looked useful.
+    // The real low-latency switch is AV_CODEC_FLAG_LOW_DELAY, set above.
+    int ret = avcodec_open2(codec_ctx_, codec, nullptr);
 
     if (ret < 0) {
         log_ffmpeg_error("[Decoder] Could not open codec", ret);
@@ -85,15 +82,17 @@ bool VideoDecoder::decode(const uint8_t* data, size_t size, bool) {
         return false;
     }
 
+    // Cave man reuses one bag instead of sewing a new one sixty times a heartbeat.
+    // avcodec_send_packet copies whatever it needs to keep, so the bag is free again
+    // right after. FFmpeg wants some slack bytes at the end, hence the padding.
     av_packet_unref(packet_);
-    int ret = av_new_packet(packet_, static_cast<int>(size));
-    if (ret < 0) {
-        log_ffmpeg_error("[Decoder] Could not allocate packet", ret);
-        return false;
-    }
+    packet_buffer_.resize(size + AV_INPUT_BUFFER_PADDING_SIZE);
+    std::memcpy(packet_buffer_.data(), data, size);
+    std::memset(packet_buffer_.data() + size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+    packet_->data = packet_buffer_.data();
+    packet_->size = static_cast<int>(size);
 
-    std::memcpy(packet_->data, data, size);
-    ret = avcodec_send_packet(codec_ctx_, packet_);
+    int ret = avcodec_send_packet(codec_ctx_, packet_);
     av_packet_unref(packet_);
     if (ret < 0) {
         log_ffmpeg_error("[Decoder] Could not send packet", ret);

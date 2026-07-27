@@ -38,6 +38,7 @@ add_executable(PixelMirroring
     src/stream/video_decoder.cpp
     src/stream/video_renderer.cpp
     src/stream/capture_controller.cpp
+    src/stream/audio_player.cpp
     src/input/input_handler.cpp
     # src/config/settings.cpp
     ${PLATFORM_SOURCES}
@@ -176,14 +177,44 @@ add_custom_command(TARGET PixelMirroring POST_BUILD
     COMMENT "Copy runtime DLLs next to desktop client"
 )
 
+# --- Runtime DLLs we actually load ---
+# Ugg! Cave man used to drag the WHOLE vcpkg cave next to the app: debug stones
+# (.pdb), the build-tool pkgconf, and avfilter/avdevice which nothing ever opens.
+# That was ~4 MB of dead weight in every installer. Now only what the EXE (and the
+# FFmpeg libs themselves) really pull in gets copied. Patterns, not fixed names,
+# so a version bump (avcodec-62 -> avcodec-63) does not silently drop a library.
+set(PM_RUNTIME_DLL_PATTERNS
+    "avcodec-*.dll"     # H.264/H.265/AV1 decode + BMP/x264 encode
+    "avformat-*.dll"    # MP4 muxing for screen recordings
+    "avutil-*.dll"
+    "swscale-*.dll"     # pixel format conversion for captures
+    "swresample-*.dll"  # pulled in by avcodec
+    "libx264-*.dll"     # pulled in by avcodec
+    "SDL2.dll"
+    "brotlienc.dll"     # pulled in by cpp-httplib
+    "brotlidec.dll"
+    "brotlicommon.dll"
+)
+
 if(DEFINED VCPKG_TARGET_TRIPLET)
-    # Ensure FFmpeg and other DLLs that might not be picked up by TARGET_RUNTIME_DLLS are copied
-    add_custom_command(TARGET PixelMirroring POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/bin"
-            "$<TARGET_FILE_DIR:PixelMirroring>"
-        COMMENT "Copy all vcpkg DLLs next to desktop client"
-    )
+    set(PM_VCPKG_BIN "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/bin")
+    set(PM_RUNTIME_DLLS "")
+    foreach(PM_PATTERN IN LISTS PM_RUNTIME_DLL_PATTERNS)
+        file(GLOB PM_MATCHED "${PM_VCPKG_BIN}/${PM_PATTERN}")
+        list(APPEND PM_RUNTIME_DLLS ${PM_MATCHED})
+    endforeach()
+
+    if(PM_RUNTIME_DLLS)
+        add_custom_command(TARGET PixelMirroring POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${PM_RUNTIME_DLLS}
+                "$<TARGET_FILE_DIR:PixelMirroring>"
+            COMMAND_EXPAND_LISTS
+            COMMENT "Copy required vcpkg DLLs next to desktop client"
+        )
+    else()
+        message(WARNING "Ugg! No vcpkg runtime DLLs matched in ${PM_VCPKG_BIN}")
+    endif()
 endif()
 
 if(WIN32)
@@ -209,10 +240,10 @@ install(FILES $<TARGET_RUNTIME_DLLS:PixelMirroring>
     DESTINATION .
 )
 
-if(DEFINED VCPKG_TARGET_TRIPLET)
-    install(DIRECTORY "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/bin/"
+# Same short list as above — the installer ships exactly what gets loaded.
+if(DEFINED VCPKG_TARGET_TRIPLET AND PM_RUNTIME_DLLS)
+    install(FILES ${PM_RUNTIME_DLLS}
         DESTINATION .
-        FILES_MATCHING PATTERN "*.dll"
     )
 endif()
 
@@ -253,7 +284,12 @@ set(CPACK_PACKAGE_VERSION_PATCH ${PROJECT_VERSION_PATCH})
 
 if(WIN32)
     set(CPACK_GENERATOR "ZIP;NSIS;WIX")
-    
+
+    # Ugg! Squeeze the bundle harder. LZMA in solid mode packs all files as one
+    # block, which pays off a lot because the APK and the FFmpeg libs sit together.
+    set(CPACK_NSIS_COMPRESSOR "/SOLID lzma")
+    set(CPACK_ARCHIVE_THREADS 0)
+
     # Executables to create shortcuts for
     set(CPACK_PACKAGE_EXECUTABLES "PixelMirroring" "Pixel Mirroring")
     

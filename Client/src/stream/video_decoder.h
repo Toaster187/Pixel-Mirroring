@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <cstddef>
+#include <vector>
 
 struct AVCodecContext;
 struct AVFrame;
@@ -25,6 +26,8 @@ private:
     AVCodecContext* codec_ctx_{nullptr};
     AVFrame* frame_{nullptr};
     AVPacket* packet_{nullptr};
+    // Reused packet payload, so no fresh allocation per decoded frame.
+    std::vector<uint8_t> packet_buffer_;
     int last_width_{0};
     int last_height_{0};
     bool resolution_changed_{false};

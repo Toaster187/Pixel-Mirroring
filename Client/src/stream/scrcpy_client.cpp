@@ -1,5 +1,6 @@
 #include "scrcpy_client.h"
 #include "../adb/adb_client.h"
+#include <algorithm>
 #include <iostream>
 #include <random>
 #include <filesystem>
@@ -54,10 +55,58 @@ void log_stream_event(const std::string& message) {
         file << message << "\n";
     }
 }
+
+// scrcpy raw audio is always this shape (AudioCapture on the phone side).
+constexpr int AUDIO_SAMPLE_RATE = 48000;
+constexpr int AUDIO_CHANNELS = 2;
+
+// Big-endian stone writers. Cave man used to carve these four times in four holes.
+void write16(uint8_t* out, uint16_t value) {
+    out[0] = static_cast<uint8_t>((value >> 8) & 0xff);
+    out[1] = static_cast<uint8_t>(value & 0xff);
+}
+
+void write32(uint8_t* out, uint32_t value) {
+    out[0] = static_cast<uint8_t>((value >> 24) & 0xff);
+    out[1] = static_cast<uint8_t>((value >> 16) & 0xff);
+    out[2] = static_cast<uint8_t>((value >> 8) & 0xff);
+    out[3] = static_cast<uint8_t>(value & 0xff);
+}
+
+void write64(uint8_t* out, uint64_t value) {
+    for (int i = 0; i < 8; ++i) {
+        out[i] = static_cast<uint8_t>((value >> (56 - i * 8)) & 0xff);
+    }
+}
+
+// Cave man taps socket on shoulder so a thread sleeping in recv() wakes up.
+void wake_socket(SOCKET socket_handle) {
+    if (socket_handle == INVALID_SOCKET) return;
+#ifdef _WIN32
+    shutdown(socket_handle, SD_BOTH);
+#else
+    shutdown(socket_handle, SHUT_RDWR);
+#endif
+}
+
+// Cave man tells socket: do not wait forever for words that never come.
+void set_recv_timeout(SOCKET socket_handle, int seconds) {
+    if (socket_handle == INVALID_SOCKET) return;
+#ifdef _WIN32
+    DWORD timeout = static_cast<DWORD>(seconds) * 1000;
+    setsockopt(socket_handle, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
+#else
+    struct timeval timeout;
+    timeout.tv_sec = seconds;
+    timeout.tv_usec = 0;
+    setsockopt(socket_handle, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+#endif
+}
 }
 
 ScrcpyClient::ScrcpyClient() {
     video_socket_ = INVALID_SOCKET;
+    audio_socket_ = INVALID_SOCKET;
     control_socket_ = INVALID_SOCKET;
 }
 
@@ -91,31 +140,20 @@ bool ScrcpyClient::start(const Config& config) {
     std::cout << "[Scrcpy] Starting session with SCID: " << scid_ << std::endl;
 
     if (!setup_tunnel()) return false;
-    if (!start_server_process()) return false;
-    if (!connect_sockets()) return false;
-    if (!read_metadata()) return false;
+
+    // Ugg! If anything below trips, tear down what was already built. Old cave man
+    // walked away and left the server breathing on the phone plus an open adb tunnel.
+    if (!start_server_process() || !connect_sockets() || !read_metadata()) {
+        abort_start();
+        return false;
+    }
 
     running_ = true;
 
-    // Cave man set recv timeout so video thread wakes up if phone goes silent
-    // Without this, recv() blocks forever on dead TCP connection (no FIN/RST)
-#ifdef _WIN32
-    DWORD recv_timeout = 10000; // 10 seconds
-    setsockopt(video_socket_, SOL_SOCKET, SO_RCVTIMEO, (const char*)&recv_timeout, sizeof(recv_timeout));
-    if (config_.control && control_socket_ != INVALID_SOCKET) {
-        setsockopt(control_socket_, SOL_SOCKET, SO_RCVTIMEO, (const char*)&recv_timeout, sizeof(recv_timeout));
-    }
-#else
-    struct timeval recv_timeout;
-    recv_timeout.tv_sec = 10;
-    recv_timeout.tv_usec = 0;
-    setsockopt(video_socket_, SOL_SOCKET, SO_RCVTIMEO, &recv_timeout, sizeof(recv_timeout));
-    if (config_.control && control_socket_ != INVALID_SOCKET) {
-        setsockopt(control_socket_, SOL_SOCKET, SO_RCVTIMEO, &recv_timeout, sizeof(recv_timeout));
-    }
-#endif
-    
     video_thread_ = std::thread(&ScrcpyClient::video_thread_loop, this);
+    if (audio_available_) {
+        audio_thread_ = std::thread(&ScrcpyClient::audio_thread_loop, this);
+    }
     if (config_.control) {
         control_thread_ = std::thread(&ScrcpyClient::control_thread_loop, this);
     }
@@ -128,27 +166,79 @@ void ScrcpyClient::stop() {
     if (!running_.compare_exchange_strong(expected, false)) {
         return;
     }
-    
+
+    // Ugg! Old cave man closed the socket hole while another hunter still had his
+    // arm inside it. Then the tribe handed the same hole number to a new hunter and
+    // arms got swapped. Now: first shout so everyone pulls their arm out (shutdown),
+    // then wait for them (join), and only then fill in the hole (closesocket).
+    wake_socket(video_socket_);
+    wake_socket(audio_socket_);
+    {
+        std::lock_guard<std::mutex> lock(control_mutex_);
+        wake_socket(control_socket_);
+    }
+
+    if (video_thread_.get_id() != std::this_thread::get_id() && video_thread_.joinable()) {
+        video_thread_.join();
+    }
+    if (audio_thread_.get_id() != std::this_thread::get_id() && audio_thread_.joinable()) {
+        audio_thread_.join();
+    }
+    if (control_thread_.get_id() != std::this_thread::get_id() && control_thread_.joinable()) {
+        control_thread_.join();
+    }
+    audio_player_.stop();
+    audio_available_ = false;
+
+    // Cave man kills the adb shell carrying the server. Old cave man let it run
+    // forever, so every reconnect left another one breathing on the phone.
+    server_process_.stop();
+
     if (video_socket_ != INVALID_SOCKET) {
         closesocket(video_socket_);
         video_socket_ = INVALID_SOCKET;
+    }
+    if (audio_socket_ != INVALID_SOCKET) {
+        closesocket(audio_socket_);
+        audio_socket_ = INVALID_SOCKET;
+    }
+    {
+        std::lock_guard<std::mutex> lock(control_mutex_);
+        if (control_socket_ != INVALID_SOCKET) {
+            closesocket(control_socket_);
+            control_socket_ = INVALID_SOCKET;
+        }
+    }
+
+    remove_tunnel();
+}
+
+void ScrcpyClient::abort_start() {
+    // No threads are alive yet at this point, so plain closing is enough.
+    server_process_.stop();
+    audio_player_.stop();
+    audio_available_ = false;
+
+    if (video_socket_ != INVALID_SOCKET) {
+        closesocket(video_socket_);
+        video_socket_ = INVALID_SOCKET;
+    }
+    if (audio_socket_ != INVALID_SOCKET) {
+        closesocket(audio_socket_);
+        audio_socket_ = INVALID_SOCKET;
     }
     if (control_socket_ != INVALID_SOCKET) {
         closesocket(control_socket_);
         control_socket_ = INVALID_SOCKET;
     }
-    
-    if (video_thread_.get_id() != std::this_thread::get_id() && video_thread_.joinable()) {
-        video_thread_.join();
-    }
-    if (control_thread_.get_id() != std::this_thread::get_id() && control_thread_.joinable()) {
-        control_thread_.join();
-    }
-    
-    // Cleanup ADB ports
+
+    remove_tunnel();
+}
+
+void ScrcpyClient::remove_tunnel() {
     pm::adb::AdbClient adb;
-    std::string remote = "localabstract:scrcpy_" + scid_;
-    std::string local = "tcp:" + std::to_string(local_port_);
+    const std::string remote = "localabstract:scrcpy_" + scid_;
+    const std::string local = "tcp:" + std::to_string(local_port_);
     if (config_.tunnel_forward) {
         adb.remove_forward(config_.device_id, local);
     } else {
@@ -255,7 +345,12 @@ bool ScrcpyClient::start_server_process() {
     std::string cmd = "CLASSPATH=/data/local/tmp/scrcpy-server.jar app_process / com.genymobile.scrcpy.Server 2.7 ";
     cmd += "scid=" + scid_ + " ";
     cmd += "log_level=info ";
-    cmd += "audio=false ";
+    cmd += "audio=" + std::string(config_.audio ? "true" : "false") + " ";
+    if (config_.audio) {
+        // Raw PCM: no decoder needed on this side, no codec config to get wrong.
+        cmd += "audio_codec=raw ";
+        cmd += "audio_source=output ";
+    }
     cmd += "max_size=" + std::to_string(config_.max_size) + " ";
     cmd += "video_codec=h264 ";
     cmd += "video_bit_rate=" + std::to_string(config_.video_bit_rate) + " ";
@@ -269,26 +364,25 @@ bool ScrcpyClient::start_server_process() {
     cmd += "tunnel_forward=" + std::string(config_.tunnel_forward ? "true" : "false") + " ";
     
     log_stream_event("[Scrcpy] Executing server: " + cmd);
-    
-    // Dies müsste eigentlich asynchron laufen, da app_process blockiert.
-    auto ready_promise = std::make_shared<std::promise<bool>>();
-    auto future = ready_promise->get_future();
-    std::string device_id_copy = config_.device_id;
-    std::thread([cmd, device_id_copy, ready_promise]() {
-        pm::adb::AdbClient a;
-        bool ready_sent = false;
-        a.execute_shell_command_async(device_id_copy, cmd, [ready_promise, &ready_sent](const std::string& line) {
-            if (!ready_sent && line.find("[server]") != std::string::npos) {
-                ready_promise->set_value(true);
-                ready_sent = true;
-            }
-        });
-        if (!ready_sent) {
-            try { ready_promise->set_value(false); } catch(...) {}
-        }
-    }).detach();
 
-    if (future.wait_for(std::chrono::seconds(10)) != std::future_status::ready || !future.get()) {
+    // app_process blocks as long as the server lives, so it runs in its own process
+    // that we keep a rope on (server_process_) instead of a detached thread.
+    auto ready_promise = std::make_shared<std::promise<bool>>();
+    auto ready_flag = std::make_shared<std::atomic<bool>>(false);
+    auto future = ready_promise->get_future();
+
+    if (!server_process_.start(config_.device_id, cmd, [ready_promise, ready_flag](const std::string& line) {
+            bool expected = false;
+            if (line.find("[server]") != std::string::npos &&
+                ready_flag->compare_exchange_strong(expected, true)) {
+                ready_promise->set_value(true);
+            }
+        })) {
+        std::cerr << "[Scrcpy] Could not start server process!" << std::endl;
+        return false;
+    }
+
+    if (future.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
         std::cerr << "[Scrcpy] Server did not print ready message, proceeding anyway..." << std::endl;
     }
 
@@ -365,10 +459,18 @@ bool ScrcpyClient::connect_sockets() {
         return false;
     };
 
+    // Ugg! The order is fixed by the server and must not be shuffled: video first,
+    // then audio, then control. Get it wrong and every stream reads the wrong hole.
     if (config_.tunnel_forward) {
         if (!connect_to_port(video_socket_, local_port_)) {
             std::cerr << "[Scrcpy] Failed to connect video socket" << std::endl;
             return false;
+        }
+        if (config_.audio) {
+            if (!connect_to_port(audio_socket_, local_port_)) {
+                std::cerr << "[Scrcpy] Failed to connect audio socket" << std::endl;
+                return false;
+            }
         }
         if (config_.control) {
             if (!connect_to_port(control_socket_, local_port_)) {
@@ -381,6 +483,12 @@ bool ScrcpyClient::connect_sockets() {
             std::cerr << "[Scrcpy] Failed to accept video socket" << std::endl;
             return false;
         }
+        if (config_.audio) {
+            if (!accept_connection(audio_socket_, local_port_)) {
+                std::cerr << "[Scrcpy] Failed to accept audio socket" << std::endl;
+                return false;
+            }
+        }
         if (config_.control) {
             if (!accept_connection(control_socket_, local_port_)) {
                 std::cerr << "[Scrcpy] Failed to accept control socket" << std::endl;
@@ -388,6 +496,12 @@ bool ScrcpyClient::connect_sockets() {
             }
         }
     }
+
+    // Cave man set recv timeout NOW, before reading metadata. Without it a phone
+    // that dies mid-handshake leaves the whole app hanging in recv() forever.
+    set_recv_timeout(video_socket_, 10);
+    set_recv_timeout(audio_socket_, 10);
+    set_recv_timeout(control_socket_, 10);
 
     std::cout << "[Scrcpy] Sockets connected!" << std::endl;
     return true;
@@ -429,7 +543,72 @@ bool ScrcpyClient::read_metadata() {
         return false;
     }
 
+    // The audio socket answers with 4 bytes of codec id. The phone may also say
+    // "I could not capture sound" here (0 = disabled, -1 = error). Either way the
+    // picture keeps running — sound is a nice-to-have, never a reason to fail.
+    if (config_.audio && audio_socket_ != INVALID_SOCKET) {
+        uint8_t audio_meta[4];
+        int read_total = 0;
+        while (read_total < 4) {
+            const int bytes = recv(audio_socket_, (char*)audio_meta + read_total, 4 - read_total, 0);
+            if (bytes <= 0) {
+                log_stream_event("[Scrcpy] No audio metadata, continuing without sound");
+                return true;
+            }
+            read_total += bytes;
+        }
+
+        const uint32_t audio_codec_id =
+            (audio_meta[0] << 24) | (audio_meta[1] << 16) | (audio_meta[2] << 8) | audio_meta[3];
+
+        constexpr uint32_t AUDIO_CODEC_RAW = 0x00726177;      // "\0raw"
+        constexpr uint32_t AUDIO_CODEC_DISABLED = 0;
+        constexpr uint32_t AUDIO_CODEC_ERROR = 0xFFFFFFFF;
+
+        if (audio_codec_id == AUDIO_CODEC_DISABLED || audio_codec_id == AUDIO_CODEC_ERROR) {
+            log_stream_event("[Scrcpy] Phone cannot capture audio, continuing without sound");
+        } else if (audio_codec_id != AUDIO_CODEC_RAW) {
+            std::ostringstream oss;
+            oss << "[Scrcpy] Unexpected audio codec " << audio_codec_id << ", continuing without sound";
+            log_stream_event(oss.str());
+        } else if (!audio_player_.start(AUDIO_SAMPLE_RATE, AUDIO_CHANNELS)) {
+            log_stream_event("[Scrcpy] No PC sound device, continuing without sound");
+        } else {
+            audio_available_ = true;
+            log_stream_event("[Scrcpy] Audio stream ready (raw PCM)");
+        }
+    }
+
     return true;
+}
+
+bool ScrcpyClient::recv_all(SOCKET socket_handle, char* buffer, int length) {
+    int total = 0;
+    while (total < length && running_) {
+        const int received = recv(socket_handle, buffer + total, length - total, 0);
+        if (received > 0) {
+            total += received;
+        } else if (received == 0) {
+            // Clean close — phone hung up
+            return false;
+        } else {
+            // Cave man check if just timeout or real death
+#ifdef _WIN32
+            const int err = WSAGetLastError();
+            if (err == WSAETIMEDOUT) {
+#else
+            const int err = errno;
+            if (err == EAGAIN || err == EWOULDBLOCK) {
+#endif
+                // Timeout — phone just not sending right now, retry if still running
+                if (running_) continue;
+                return false;
+            }
+            // Real socket error — connection dead
+            return false;
+        }
+    }
+    return running_;
 }
 
 void ScrcpyClient::video_thread_loop() {
@@ -438,34 +617,7 @@ void ScrcpyClient::video_thread_loop() {
         return;
     }
 
-    auto recv_all = [this](char* buf, int len) -> bool {
-        int total = 0;
-        while (total < len && running_) {
-            int r = recv(video_socket_, buf + total, len - total, 0);
-            if (r > 0) {
-                total += r;
-            } else if (r == 0) {
-                // Clean close — phone hung up
-                return false;
-            } else {
-                // Cave man check if just timeout or real death
-#ifdef _WIN32
-                int err = WSAGetLastError();
-                if (err == WSAETIMEDOUT) {
-#else
-                int err = errno;
-                if (err == EAGAIN || err == EWOULDBLOCK) {
-#endif
-                    // Timeout — phone just not sending right now, retry if still running
-                    if (running_) continue;
-                    return false;
-                }
-                // Real socket error — connection dead
-                return false;
-            }
-        }
-        return running_;
-    };
+    auto recv_all = [this](char* buf, int len) { return this->recv_all(video_socket_, buf, len); };
 
     std::vector<uint8_t> packet_data;
     const uint32_t MAX_PACKET_SIZE = 10 * 1024 * 1024; // 10 MB max packet size
@@ -514,31 +666,34 @@ void ScrcpyClient::video_thread_loop() {
     }
 }
 
-void ScrcpyClient::control_thread_loop() {
-    auto recv_all = [this](char* buf, int len) -> bool {
-        int total = 0;
-        while (total < len && running_) {
-            int r = recv(control_socket_, buf + total, len - total, 0);
-            if (r > 0) {
-                total += r;
-            } else if (r == 0) {
-                return false;
-            } else {
-#ifdef _WIN32
-                int err = WSAGetLastError();
-                if (err == WSAETIMEDOUT) {
-#else
-                int err = errno;
-                if (err == EAGAIN || err == EWOULDBLOCK) {
-#endif
-                    if (running_) continue;
-                    return false;
-                }
-                return false;
-            }
+void ScrcpyClient::audio_thread_loop() {
+    // Same frame shape as video: 8 bytes pts, 4 bytes length, then the payload.
+    // For raw PCM the payload goes straight to the speaker, nothing to decode.
+    std::vector<uint8_t> packet_data;
+    constexpr uint32_t MAX_AUDIO_PACKET = 1 * 1024 * 1024;
+
+    while (running_) {
+        uint8_t header[12];
+        if (!recv_all(audio_socket_, (char*)header, 12)) break;
+
+        const uint32_t size = (header[8] << 24) | (header[9] << 16) | (header[10] << 8) | header[11];
+        if (size == 0 || size > MAX_AUDIO_PACKET) {
+            std::cerr << "[Scrcpy] Invalid audio packet size: " << size << std::endl;
+            break;
         }
-        return running_;
-    };
+
+        packet_data.resize(size);
+        if (!recv_all(audio_socket_, (char*)packet_data.data(), size)) break;
+
+        audio_player_.feed(packet_data.data(), size);
+    }
+
+    // Ugg! Sound stopping must never take the picture down with it.
+    audio_player_.stop();
+}
+
+void ScrcpyClient::control_thread_loop() {
+    auto recv_all = [this](char* buf, int len) { return this->recv_all(control_socket_, buf, len); };
 
     while (running_) {
         uint8_t type = 0;
@@ -574,154 +729,117 @@ void ScrcpyClient::control_thread_loop() {
     }
 }
 
-void ScrcpyClient::inject_touch(int action, float x, float y, int w, int h) {
-    if (!running_ || control_socket_ == INVALID_SOCKET) return;
+bool ScrcpyClient::send_control(const uint8_t* data, size_t length) {
+    std::lock_guard<std::mutex> lock(control_mutex_);
+    if (!running_ || control_socket_ == INVALID_SOCKET || !data || length == 0) {
+        return false;
+    }
 
-    auto write16 = [](uint8_t* out, uint16_t value) {
-        out[0] = static_cast<uint8_t>((value >> 8) & 0xff);
-        out[1] = static_cast<uint8_t>(value & 0xff);
-    };
-    auto write32 = [](uint8_t* out, uint32_t value) {
-        out[0] = static_cast<uint8_t>((value >> 24) & 0xff);
-        out[1] = static_cast<uint8_t>((value >> 16) & 0xff);
-        out[2] = static_cast<uint8_t>((value >> 8) & 0xff);
-        out[3] = static_cast<uint8_t>(value & 0xff);
-    };
-    auto write64 = [](uint8_t* out, uint64_t value) {
-        for (int i = 0; i < 8; ++i) {
-            out[i] = static_cast<uint8_t>((value >> (56 - i * 8)) & 0xff);
+    // Ugg! send() may swallow only part of the message. Keep pushing the rest,
+    // otherwise the phone reads half a message and the whole control talk breaks.
+    size_t sent = 0;
+    while (sent < length) {
+        const int written = send(control_socket_, reinterpret_cast<const char*>(data) + sent,
+                                 static_cast<int>(length - sent), 0);
+        if (written <= 0) {
+            return false;
         }
-    };
+        sent += static_cast<size_t>(written);
+    }
+    return true;
+}
 
+void ScrcpyClient::inject_touch(int action, float x, float y, int w, int h) {
     constexpr uint32_t AMOTION_EVENT_BUTTON_PRIMARY = 1;
     constexpr uint64_t POINTER_ID_MOUSE = 0xffffffffffffffffULL;
 
+    // Cave man keeps finger inside the screen. Negative stone turns into a giant
+    // number when squeezed into an unsigned hole, and the phone jumps to nowhere.
+    const uint32_t safe_x = static_cast<uint32_t>((std::max)(0.0f, x));
+    const uint32_t safe_y = static_cast<uint32_t>((std::max)(0.0f, y));
+
     uint8_t buf[32] = {0};
     buf[0] = 2; // SC_CONTROL_MSG_TYPE_INJECT_TOUCH_EVENT
-    buf[1] = action; // 0=DOWN, 1=UP, 2=MOVE
+    buf[1] = static_cast<uint8_t>(action); // 0=DOWN, 1=UP, 2=MOVE
 
     write64(buf + 2, POINTER_ID_MOUSE);
-    write32(buf + 10, static_cast<uint32_t>(x));
-    write32(buf + 14, static_cast<uint32_t>(y));
+    write32(buf + 10, safe_x);
+    write32(buf + 14, safe_y);
     write16(buf + 18, static_cast<uint16_t>(w));
     write16(buf + 20, static_cast<uint16_t>(h));
     write16(buf + 22, action == 1 ? 0 : 0xffff);
     write32(buf + 24, action == 0 || action == 1 ? AMOTION_EVENT_BUTTON_PRIMARY : 0);
     write32(buf + 28, action == 1 ? 0 : AMOTION_EVENT_BUTTON_PRIMARY);
 
-    send(control_socket_, (const char*)buf, sizeof(buf), 0);
+    send_control(buf, sizeof(buf));
 }
 
 void ScrcpyClient::inject_keycode(int action, int keycode) {
-    if (!running_ || control_socket_ == INVALID_SOCKET) return;
-    
     // keycode send. cave man type keys.
     uint8_t buf[14] = {0};
     buf[0] = 0; // SC_CONTROL_MSG_TYPE_INJECT_KEYCODE
-    buf[1] = action; // 0=DOWN, 1=UP
-    
-    // keycode BE
-    buf[2] = (keycode >> 24) & 0xff;
-    buf[3] = (keycode >> 16) & 0xff;
-    buf[4] = (keycode >> 8) & 0xff;
-    buf[5] = keycode & 0xff;
-    
-    // repeat BE = 0 (buf[6..9])
-    // metaState BE = 0 (buf[10..13])
-    
-    send(control_socket_, (const char*)buf, 14, 0);
+    buf[1] = static_cast<uint8_t>(action); // 0=DOWN, 1=UP
+    write32(buf + 2, static_cast<uint32_t>(keycode));
+    // repeat BE = 0 (buf[6..9]), metaState BE = 0 (buf[10..13])
+
+    send_control(buf, sizeof(buf));
 }
 
 void ScrcpyClient::inject_scroll(float x, float y, int w, int h, float hscroll, float vscroll) {
-    if (!running_ || control_socket_ == INVALID_SOCKET) return;
-
     // scroll screen. cave man spin wheel.
-    auto write16 = [](uint8_t* out, uint16_t value) {
-        out[0] = static_cast<uint8_t>((value >> 8) & 0xff);
-        out[1] = static_cast<uint8_t>(value & 0xff);
-    };
-    auto write32 = [](uint8_t* out, uint32_t value) {
-        out[0] = static_cast<uint8_t>((value >> 24) & 0xff);
-        out[1] = static_cast<uint8_t>((value >> 16) & 0xff);
-        out[2] = static_cast<uint8_t>((value >> 8) & 0xff);
-        out[3] = static_cast<uint8_t>(value & 0xff);
-    };
-
     uint8_t buf[21] = {0};
     buf[0] = 3; // SC_CONTROL_MSG_TYPE_INJECT_SCROLL_EVENT
 
-    write32(buf + 1, static_cast<uint32_t>(x));
-    write32(buf + 5, static_cast<uint32_t>(y));
+    write32(buf + 1, static_cast<uint32_t>((std::max)(0.0f, x)));
+    write32(buf + 5, static_cast<uint32_t>((std::max)(0.0f, y)));
     write16(buf + 9, static_cast<uint16_t>(w));
     write16(buf + 11, static_cast<uint16_t>(h));
 
-    // fixed-point: float * 8192
-    float hs_scaled = hscroll * 8192.0f;
-    float vs_scaled = vscroll * 8192.0f;
-
-    // Clamp to int16 range
-    int16_t hs_val = static_cast<int16_t>((std::max)(-32768.0f, (std::min)(hs_scaled, 32767.0f)));
-    int16_t vs_val = static_cast<int16_t>((std::max)(-32768.0f, (std::min)(vs_scaled, 32767.0f)));
-
-    write16(buf + 13, static_cast<uint16_t>(hs_val));
-    write16(buf + 15, static_cast<uint16_t>(vs_val));
+    // fixed-point: float * 8192, clamped to int16 range
+    const float hs_scaled = (std::max)(-32768.0f, (std::min)(hscroll * 8192.0f, 32767.0f));
+    const float vs_scaled = (std::max)(-32768.0f, (std::min)(vscroll * 8192.0f, 32767.0f));
+    write16(buf + 13, static_cast<uint16_t>(static_cast<int16_t>(hs_scaled)));
+    write16(buf + 15, static_cast<uint16_t>(static_cast<int16_t>(vs_scaled)));
 
     // buttons = 0 (4 bytes)
     write32(buf + 17, 0);
 
-    send(control_socket_, (const char*)buf, sizeof(buf), 0);
+    send_control(buf, sizeof(buf));
 }
 
 void ScrcpyClient::inject_text(const std::string& text) {
-    if (!running_ || control_socket_ == INVALID_SOCKET || text.empty()) return;
+    if (text.empty()) return;
 
     // text send. cave man write words.
-    auto write32 = [](uint8_t* out, uint32_t value) {
-        out[0] = static_cast<uint8_t>((value >> 24) & 0xff);
-        out[1] = static_cast<uint8_t>((value >> 16) & 0xff);
-        out[2] = static_cast<uint8_t>((value >> 8) & 0xff);
-        out[3] = static_cast<uint8_t>(value & 0xff);
-    };
-
-    uint32_t len = static_cast<uint32_t>(text.size());
+    const uint32_t len = static_cast<uint32_t>(text.size());
     std::vector<uint8_t> buf(5 + len);
     buf[0] = 1; // SC_CONTROL_MSG_TYPE_INJECT_TEXT
     write32(buf.data() + 1, len);
     std::memcpy(buf.data() + 5, text.data(), len);
 
-    send(control_socket_, (const char*)buf.data(), static_cast<int>(buf.size()), 0);
+    send_control(buf.data(), buf.size());
 }
 
 void ScrcpyClient::inject_set_clipboard(const std::string& text) {
-    if (!running_ || control_socket_ == INVALID_SOCKET || text.empty()) return;
+    if (text.empty()) return;
 
-    auto write32 = [](uint8_t* out, uint32_t value) {
-        out[0] = static_cast<uint8_t>((value >> 24) & 0xff);
-        out[1] = static_cast<uint8_t>((value >> 16) & 0xff);
-        out[2] = static_cast<uint8_t>((value >> 8) & 0xff);
-        out[3] = static_cast<uint8_t>(value & 0xff);
-    };
-
-    uint32_t len = static_cast<uint32_t>(text.size());
-    std::vector<uint8_t> buf(14 + len);
+    const uint32_t len = static_cast<uint32_t>(text.size());
+    std::vector<uint8_t> buf(14 + len, 0);
     buf[0] = 9; // SC_CONTROL_MSG_TYPE_SET_CLIPBOARD
-    std::memset(&buf[1], 0, 8); // 8 bytes sequence = 0
-    buf[9] = 0; // paste = false
+    // buf[1..8] = sequence 0, buf[9] = paste false
     write32(buf.data() + 10, len);
     std::memcpy(buf.data() + 14, text.data(), len);
 
-    send(control_socket_, (const char*)buf.data(), static_cast<int>(buf.size()), 0);
+    send_control(buf.data(), buf.size());
 }
 
 void ScrcpyClient::inject_get_clipboard(uint8_t copy_key) {
-    if (!running_ || control_socket_ == INVALID_SOCKET) return;
-
     // get device clip. cave man request clip text from phone.
     uint8_t buf[2];
     buf[0] = 8; // SC_CONTROL_MSG_TYPE_GET_CLIPBOARD
     buf[1] = copy_key; // 0 = NONE, 1 = COPY, 2 = CUT
 
-    send(control_socket_, (const char*)buf, sizeof(buf), 0);
+    send_control(buf, sizeof(buf));
 }
 
 } // namespace pm::stream

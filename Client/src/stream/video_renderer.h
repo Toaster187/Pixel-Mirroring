@@ -8,6 +8,7 @@
 
 struct SDL_Texture;
 struct SDL_Renderer;
+struct AVFrame;
 
 namespace pm::stream {
 
@@ -35,13 +36,10 @@ private:
     SDL_Renderer* m_cached_renderer{nullptr};
     std::mutex m_frame_mutex;
 
-    // YUV plane data — cave man copy planes, GPU do rest
-    std::vector<uint8_t> m_y_plane;
-    std::vector<uint8_t> m_u_plane;
-    std::vector<uint8_t> m_v_plane;
-    int m_y_linesize{0};
-    int m_u_linesize{0};
-    int m_v_linesize{0};
+    // Ugg! Old cave man carried every picture across the cave by hand (three big
+    // memcpy per frame, ~180 MB every second at 1080p60). Now he just holds on to
+    // the picture FFmpeg already made (av_frame_ref) and the GPU reads it directly.
+    AVFrame* m_frame{nullptr};
 
     int m_frame_width{0};
     int m_frame_height{0};

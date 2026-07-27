@@ -49,6 +49,7 @@ public:
     void set_compatibility_mode(bool enabled) override { compatibility_mode_ = enabled; }
     void set_lowest_brightness(bool enabled) override { lowest_brightness_ = enabled; }
     void set_capture_send_to_phone(bool enabled) override { capture_send_to_phone_ = enabled; }
+    void set_audio_enabled(bool enabled) override { audio_enabled_ = enabled; }
     void set_recording(bool recording) override;
     void trigger_screenshot_flash() override;
     void set_os_clipboard_update_callback(std::function<void(const std::string&)> cb) override { m_os_clipboard_cb_ = std::move(cb); }
@@ -72,6 +73,9 @@ private:
     void toggle_max_height();
     void recalc_layout();
     void update_region();
+    void update_animation_timer();
+    void ensure_fonts();
+    void release_fonts();
     void notify_video_viewport();
     void send_pointer_event(PointerAction action, int x, int y);
     int hit_test_button(POINT client_pt);
@@ -87,6 +91,20 @@ private:
     int width_;
     int height_;
     std::string title_;
+
+    // Ugg! Cave man used to carve fresh letter-stones on every single paint, sixty
+    // times a heartbeat. Now he carves them once and keeps them on the shelf.
+    // Raw pointers, because they MUST die before GdiplusShutdown (release_fonts).
+    Gdiplus::FontFamily* font_family_ui_{nullptr};
+    Gdiplus::FontFamily* font_family_icons_{nullptr};
+    Gdiplus::Font* font_icon_{nullptr};
+    Gdiplus::Font* font_title_{nullptr};
+    Gdiplus::Font* font_body_{nullptr};
+    Gdiplus::Font* font_button_{nullptr};
+    Gdiplus::Font* font_status_{nullptr};
+    Gdiplus::Font* font_live_{nullptr};
+    Gdiplus::Font* font_timer_{nullptr};
+    bool animation_timer_active_{false};
     
     double aspect_ratio_{0.0};
     bool is_landscape_{false};
@@ -125,6 +143,7 @@ private:
     bool compatibility_mode_{false};
     bool lowest_brightness_{true};
     bool capture_send_to_phone_{false};
+    bool audio_enabled_{true};
     bool recording_{false};
     std::chrono::steady_clock::time_point recording_start_time_;
     bool screenshot_flash_{false};
