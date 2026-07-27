@@ -13,9 +13,12 @@ find_package(SDL2 CONFIG REQUIRED)
 
 # Platform-specific sources
 if(WIN32)
+    # Need RC compiler for app icon resource
+    enable_language(RC)
     set(PLATFORM_SOURCES
         src/window/win32_window.cpp
         src/tray/win32_tray.cpp
+        src/app.rc
     )
 elseif(APPLE)
     set(PLATFORM_SOURCES
@@ -261,11 +264,16 @@ if(WIN32)
     set(CPACK_NSIS_URL_INFO_ABOUT "https://github.com/Toasterfritzi/Pixel-Mirroring")
     set(CPACK_NSIS_MODIFY_PATH OFF)
     set(CPACK_NSIS_EXECUTABLES_DIRECTORY ".")
+    # Installer + Start menu shortcut wear the same icon as the app
+    set(CPACK_NSIS_MUI_ICON "${CMAKE_CURRENT_SOURCE_DIR}/assets/app_icon.ico")
+    set(CPACK_NSIS_MUI_UNIICON "${CMAKE_CURRENT_SOURCE_DIR}/assets/app_icon.ico")
+    set(CPACK_NSIS_INSTALLED_ICON_NAME "PixelMirroring.exe")
 
     
     # WiX specific settings (Official Windows Installer)
     set(CPACK_WIX_UPGRADE_GUID "D9F369E9-1A1A-4BE6-B6DF-D7E31BEF8CFD")
     set(CPACK_WIX_PROGRAM_MENU_FOLDER "Pixel Mirroring")
+    set(CPACK_WIX_PRODUCT_ICON "${CMAKE_CURRENT_SOURCE_DIR}/assets/app_icon.ico")
 else()
     set(CPACK_GENERATOR "TGZ")
 endif()
