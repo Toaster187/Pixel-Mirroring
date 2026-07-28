@@ -711,6 +711,19 @@ bool run_first_time_setup(
         }
     } else {
         // App already on phone, skip APK install.
+        //
+        // Ugg! But it may still remember a DIFFERENT PC. The phone stores exactly one
+        // paired clientId and never forgets it on its own — nothing in the app ever
+        // calls removePairedClient(). So once this PC's client_id.txt changes (the
+        // "Werkseinstellungen" menu deletes it!), the phone answers every /connect
+        // with 403 and the PC is locked out for good, with no way back.
+        //
+        // Running setup over USB means the human is holding the phone, cable in hand.
+        // That is proof enough to start the pairing over: wipe the app's stored state
+        // so the fresh clientId gets adopted on the next /connect. The permission is
+        // re-granted right below, because clearing the data drops it too.
+        window.post_task([&window]() { window.set_status_text("Alte Kopplung wird gelöst..."); });
+        adb.execute_shell_command(usb_device->id, std::string("pm clear ") + ANDROID_PACKAGE);
     }
 
     // Cave man check if permission already granted before yelling at phone.
