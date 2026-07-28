@@ -23,15 +23,18 @@ Android/app/src/main/java/dev/pixelmirroring/app/
     data/     PairedClientStore (persisted pairing state, DataStore-Preferences)
     network/  ApiModels, NetworkScanner (local network discovery data)
     service/  MirroringService, BootReceiver, NotificationHelper, DiscoveryHttpServer, AdbWifiManager
+Android/app/proguard-rules.pro  R8 keep rules (manifest components, kotlinx-serialization models)
 Client/                        C++20 desktop client
     CMakeLists.txt              build config (CMake 3.25+, vcpkg toolchain)
     vendor/platform-tools/      bundled Android platform-tools (adb.exe etc.), copied next to the EXE at build time
     scrcpy-server.jar           unmodified upstream scrcpy server binary, pushed to the device at runtime
     src/
         main.cpp                 entry point (WinMain on Windows, main on POSIX); drives ADB/scrcpy/window/tray/settings together
-        settings.{h,cpp}         pm::Settings — persisted user settings (max_fps, max_size, encrypted PIN, brightness, compatibility mode)
+        settings.{h,cpp}         pm::Settings — persisted user settings (max_fps, max_size, encrypted PIN, brightness, compatibility mode, audio on/off)
         adb/                    pm::adb — wraps the adb CLI as a subprocess (discovery, tcpip connect, install/start app, shell exec, push, port fwd)
-        stream/                 pm::stream — scrcpy wire protocol: raw video+control sockets, VideoDecoder (FFmpeg), VideoRenderer (SDL2)
+                                 plus pm::adb::ShellProcess, a killable long-running "adb shell" child
+        stream/                 pm::stream — scrcpy wire protocol: raw video+audio+control sockets, VideoDecoder (FFmpeg),
+                                 VideoRenderer (SDL2), AudioPlayer (SDL2 output), CaptureController (screenshots/recording)
         input/                  pm::input — forwards mouse/keyboard/touch into ScrcpyClient::inject_* over the control socket
         network/                pm::network — LAN subnet scan + discovery via cpp-httplib
         window/                 pm::window — window_interface.h + win32_window.{h,cpp} / cocoa_window.{h,mm}
@@ -39,6 +42,12 @@ Client/                        C++20 desktop client
     vcpkg/                      git submodule (full vcpkg checkout) — huge; exclude from broad searches
 scrcpy_download/scrcpy-server.jar   source copy of the scrcpy server jar
 ```
+
+**macOS is not buildable today** — do not treat it as a working target. `CocoaWindow`
+implements only a fraction of `IWindow`'s pure virtuals, and `src/tray/cocoa_tray.mm`
+is referenced by `CMakeLists.txt` but does not exist. CI builds Android + Windows only.
+Adding a method to `IWindow` therefore cannot "break macOS" — it is already broken —
+but do not claim macOS support in user-facing docs.
 
 ## Build & test commands
 
@@ -49,11 +58,26 @@ cmake --build build
 ```
 Packaging (installers): `cpack -C Release` from `Client/build/` (produces ZIP/NSIS/WIX on Windows, TGZ elsewhere).
 
+Only the DLLs the binaries actually import are copied/installed, listed as
+`PM_RUNTIME_DLL_PATTERNS` in `CMakeLists.txt`. Do **not** go back to copying the whole
+`vcpkg_installed/<triplet>/bin` directory — that shipped `avfilter`, `avdevice`, the
+build tool `pkgconf` and every `.pdb`, ~4 MB nothing ever loads. If you add a library,
+add its pattern there, otherwise it is missing from the installer.
+
 **Android** (from `Android/`):
 ```
-./gradlew assembleDebug
+gradle assembleDebug
 ```
 Note: the Gradle wrapper scripts (`gradlew`, `gradlew.bat`, `gradle/`) are gitignored and not committed — CI installs Gradle 9.4.1 directly rather than using the wrapper.
+
+**The debug variant is the shipped artifact** — the desktop client installs it and CI
+publishes it. That is why `debug` has `isMinifyEnabled`/`isShrinkResources` turned on,
+which is otherwise unusual. Without it the APK is ~60 MB instead of ~4 MB. Consequences:
+- New classes reached only via the manifest or reflection need a keep rule in
+  `app/proguard-rules.pro`.
+- Compose tooling is deliberately not in the shipped APK. For local previews build with
+  `gradle assembleDebug -PcomposeTooling`.
+- R8 runs shrink-only on debuggable builds (no obfuscation), which is the low-risk mode.
 
 **Testing:** there is no automated test suite (no C++ test framework wired into CMake; Android has only default JUnit/Espresso boilerplate). Verification is manual, with a physical/connected Android device, on both sides.
 
@@ -68,6 +92,14 @@ Note: the Gradle wrapper scripts (`gradlew`, `gradlew.bat`, `gradle/`) are gitig
 - **Windows window**: a custom borderless `Win32` window (`win32_window.cpp`) using `WS_THICKFRAME|WS_CAPTION` with a `WM_NCCALCSIZE` override, custom `WM_NCHITTEST` hit-testing (drag/resize, Win11 snap via `HTMAXBUTTON`), and `DwmExtendFrameIntoClientArea` for the native shadow — SDL2 renders inside a Win32 child window. macOS uses a standard Cocoa/AppKit window instead.
 - **Bundled tooling**: the Windows client ships its own `adb.exe`/`AdbWinApi.dll`/`AdbWinUsbApi.dll` under `Client/vendor/platform-tools/`, copied next to the EXE at build time (CMake post-build step also auto-downloads platform-tools from Google if missing). End users should never need Android Studio or an SDK install; ADB search always prefers the bundled copy.
 - **Interface/impl pattern**: platform-specific pieces (window, tray) are split into an `_interface.h` plus per-platform implementation, selected via CMake conditional compilation — not preprocessor branching within shared files.
+- **scrcpy socket order is fixed**: video → audio → control, opened in exactly that order in `connect_sockets()` and matching the server side. Audio is only opened when enabled. Getting this order wrong makes every stream read the wrong socket.
+- **Audio uses raw PCM, deliberately**: `audio_codec=raw` (48 kHz, stereo, s16) means no decoder, no codec-config/extradata handling and no extra FFmpeg dependency on the client; `AudioPlayer` just queues the bytes into SDL2. It costs ~1.5 Mbit/s next to ~20 Mbit/s of video. Do not "optimise" this to Opus without a reason — the config-packet handling is exactly the part that breaks silently.
+- **Audio must never take video down**: every failure (device cannot capture, codec id 0/-1, no PC sound device, unexpected codec) logs to `stream.log` and continues video-only. `Settings::m_audio_enabled` turning audio off reproduces the previous server command line exactly, which makes it a usable escape hatch.
+- **Socket teardown order**: `ScrcpyClient::stop()` does `shutdown()` → `join()` → `closesocket()`. Closing first would let a reading thread sit on a socket number the OS has already handed to someone else. Control-socket writes are serialised through `send_control()` (mutex + full-write loop) because the UI thread and the screen-poll thread both send.
+- **The server process is owned**: the `adb shell app_process ...` that carries the scrcpy server runs in a `pm::adb::ShellProcess` and is killed in `stop()`. Do not go back to a detached thread — that leaked a thread and an `adb.exe` per session.
+- **Renderer holds a frame reference, not a copy**: `VideoRenderer` keeps an `av_frame_ref` of the decoded frame and lets SDL upload from it directly. Do not reintroduce per-frame `memcpy` of the YUV planes (~180 MB/s at 1080p60).
+- **Recording prefers a hardware encoder**: `CaptureController` tries `h264_mf` (and NVENC/QSV/AMF if present) before falling back to `libx264`, and picks the pixel format the chosen encoder advertises (hardware usually wants NV12).
+- **Keyboard shortcuts**: navigation uses **Alt** (`Alt+B` back, `Alt+H` home, `Alt+S` app switch) because Ctrl+C/V carry the clipboard and Ctrl+U/L unlock/lock. Alt keys arrive as `WM_SYSKEYDOWN`/`WM_SYSKEYUP`, not `WM_KEYDOWN`; only B/H/S are claimed so `Alt+F4` still reaches `DefWindowProc`.
 
 ## Coding conventions
 
@@ -102,4 +134,6 @@ The UI is German — every text field must render `ä ö ü Ä Ö Ü ß` correct
 - Use the scrcpy protocol as-is for streaming — do not invent a replacement, and do not modify the vendored `scrcpy-server.jar`.
 - Don't introduce new frameworks, languages, or build systems into either component.
 - No third-party network requests beyond what's needed for ADB/scrcpy/device discovery.
-- Keep Android-side battery usage minimal (this is why ADB-over-WiFi and discovery use a lightweight foreground service and a tiny hand-rolled HTTP server rather than heavier alternatives).
+- Keep Android-side battery usage minimal (this is why ADB-over-WiFi and discovery use a lightweight foreground service and a tiny hand-rolled HTTP server rather than heavier alternatives). Concretely: don't add polling loops that spawn an `adb` process per tick, and keep network-callback handling debounced and WLAN-scoped.
+- **Hardware video decoding is intentionally absent.** `d3d11va`/`dxva2` exist in the bundled FFmpeg, but SDL2 cannot adopt a foreign D3D11 texture, so each frame would need a GPU→CPU readback that is likely slower than the current software decode. Real zero-copy means replacing SDL2 in the video path — measure before attempting it.
+- **The size of shipped artifacts is a feature.** Before adding an Android dependency, check whether it is actually used; before widening the DLL copy rules, check what the binaries import (`dumpbin /DEPENDENTS`).
