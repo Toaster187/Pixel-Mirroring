@@ -882,7 +882,7 @@ bool start_stream(
     if (w <= 0 || h <= 0) {
         window.post_task([&window]() {
             window.set_app_state(pm::window::AppState::SCANNING);
-            window.set_status_text("Stream-Fehler: Ungueltige Video-Dimensionen.");
+            window.set_status_text("Stream-Fehler: Ungültige Video-Dimensionen.");
         });
         scrcpy.stop();
         return false;
@@ -1615,17 +1615,35 @@ static int app_main() {
                 should_stop
             );
             if (!tcp_device || should_stop) {
-                window->post_task([w = window.get(), automatic]() {
-                    w->set_app_state(pm::window::AppState::SETUP);
-                    w->set_status_text(automatic
-                        ? "Geraet nicht erreichbar. Verbinden fuer erneuten Versuch."
-                        : "Neueinrichtung per USB beim naechsten Verbinden.");
-                });
-                if (!automatic) {
-                    // Cave man give up on wireless cave path. Clear setup stone
-                    // so next button press goes full USB setup with app install.
-                    clear_setup_state();
+                // Ugg! Old cave man SMASHED the pairing stone whenever a single manual
+                // attempt failed. A sleeping phone, a WLAN hiccup or a companion app
+                // that was not running was enough to throw the whole setup away — and
+                // the next press then demanded a full USB re-setup. Never again: the
+                // pairing survives a failed attempt.
+                //
+                // If a cable happens to be plugged in, redo the setup right away,
+                // because that is what the human wanted anyway. Otherwise keep
+                // everything and say what actually helps.
+                if (!automatic && !should_stop && find_usb_device(adb.get_devices(), "device")) {
+                    window->post_task([w = window.get()]() {
+                        w->set_status_text("Nicht über WLAN erreichbar — richte per USB neu ein...");
+                    });
+                    if (run_first_time_setup(adb, *window, scrcpy, renderer, input, should_stop,
+                                             &saved_brightness, background_tasks)) {
+                        auto new_state = load_setup_state();
+                        if (new_state.configured && !new_state.device_ip.empty()) {
+                            start_heartbeat(new_state.device_ip);
+                            start_screen_poll(new_state.device_ip, new_state.device_ip + ":5555");
+                        }
+                    }
+                    return;
                 }
+
+                window->post_task([w = window.get()]() {
+                    w->set_app_state(pm::window::AppState::SETUP);
+                    w->set_status_text("Gerät nicht erreichbar. Bitte die Pixel-Mirroring-App "
+                                       "am Handy öffnen, oder für eine Neueinrichtung per USB verbinden.");
+                });
                 return;
             }
 
