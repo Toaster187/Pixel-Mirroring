@@ -1,0 +1,15 @@
+Pixel Mirroring spiegelt den Bildschirm eines Android-Geräts nativ auf den PC —
+ohne Browser-Technik und mit geringem Speicherverbrauch. Es ist ein
+Open-Source-Pendant zu Apples iPhone Mirroring.
+
+Enthalten sind der Desktop-Client, die Android-Begleit-App und die nötigen
+Android-Platform-Tools. Für die Einrichtung wird weder Android Studio noch ein
+separat installiertes SDK benötigt.
+
+Funktionen: Echtzeit-Videostream mit Ton, Steuerung per Maus, Tastatur und
+Multi-Touch, bidirektionale Zwischenablage, Bildschirmfotos und Videoaufnahmen
+sowie automatische Wiederverbindung über WLAN.
+
+ADB über WLAN bleibt dabei nicht dauerhaft offen: Die App aktiviert es nur für
+die laufende Sitzung und schaltet es 60 Sekunden nach dem letzten Lebenszeichen
+des PCs wieder ab.
