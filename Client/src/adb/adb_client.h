@@ -1,12 +1,48 @@
 #pragma once
 
-#include <string>
-#include <vector>
+#include <atomic>
 #include <functional>
+#include <memory>
+#include <string>
+#include <thread>
+#include <vector>
 
 namespace pm::adb {
 
 std::string get_executable_dir();
+
+/**
+ * A long-running "adb shell" child process that can be killed again.
+ *
+ * Ugg! Old cave man threw spear at process and forgot it. Spear never came back,
+ * process never died. Now cave man keeps rope on spear: stop() pulls it back in.
+ */
+class ShellProcess {
+public:
+    ShellProcess() = default;
+    ~ShellProcess();
+
+    ShellProcess(const ShellProcess&) = delete;
+    ShellProcess& operator=(const ShellProcess&) = delete;
+
+    // Starts "adb -s <device> shell <command>" and feeds every stdout line to on_line
+    // on a background thread. Returns false if the process could not be spawned.
+    bool start(const std::string& device_id, const std::string& command,
+               std::function<void(const std::string&)> on_line);
+
+    // Kills the child process (if any) and joins the reader thread. Safe to call twice.
+    void stop();
+
+    bool is_running() const { return m_running.load(); }
+
+private:
+    std::thread m_reader;
+    std::atomic<bool> m_running{false};
+
+    // Native process handle, hidden so the header stays free of <windows.h>.
+    std::atomic<void*> m_process_handle{nullptr};
+    std::atomic<int> m_pid{-1};
+};
 
 /**
  * Basic representation of an ADB Device.
@@ -66,9 +102,6 @@ public:
 
     // Executes a shell command on a specific device
     std::string execute_shell_command(const std::string& device_id, const std::string& command);
-
-    // Executes a shell command asynchronously and returns the stdout lines via callback
-    void execute_shell_command_async(const std::string& device_id, const std::string& command, std::function<void(const std::string&)> on_line);
 
     // Pushes a file to the device
     bool push_file(const std::string& device_id, const std::string& local_path, const std::string& remote_path);

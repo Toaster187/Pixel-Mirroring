@@ -1,4 +1,9 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <style name="Theme.PixelMirroring" parent="Theme.Material3.DayNight.NoActionBar">
+    <!-- Ugg! This theme used to hang on com.google.android.material, a whole View-world
+         library, just to paint a window background. The UI is pure Compose and
+         MaterialTheme does the real work, so the platform theme is enough. -->
+    <style name="Theme.PixelMirroring" parent="android:Theme.DeviceDefault.DayNight">
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowNoTitle">true</item>
     </style>
 </resources>

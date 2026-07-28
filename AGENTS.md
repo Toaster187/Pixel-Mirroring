@@ -12,14 +12,18 @@ Android App (Kotlin/Jetpack Compose)  <--->  ADB/TCP  <--->  Desktop Client (C++
    Background Service                                 Custom Borderless Window
    ADB WiFi Toggle                                    scrcpy Protocol Client
    Material 3 UI                                      FFmpeg H.264 Decoder
-                                                      SDL2 Renderer
+                                                      SDL2 Renderer + Audio
 ```
+
+Drei getrennte TCP-Kanaele des scrcpy-Protokolls, in genau dieser Reihenfolge
+geoeffnet: **Video -> Audio -> Control**.
 
 ### Verzeichnisstruktur
 
 ```text
 Pixel-Mirroring/
 |-- Android/              Kotlin/Jetpack Compose App
+|   |-- app/proguard-rules.pro  R8 Keep-Regeln (Manifest-Klassen, Serializer)
 |   `-- app/src/main/java/dev/pixelmirroring/app/
 |       |-- MainActivity.kt
 |       |-- data/         PairedClientStore, Persistenz
@@ -30,14 +34,22 @@ Pixel-Mirroring/
 |   |-- vendor/platform-tools/  Gebuendelte Android Platform Tools fuer das Desktop-Paket
 |   `-- src/
 |       |-- main.cpp      Entry Point (WinMain auf Windows, main auf POSIX)
-|       |-- adb/          ADB Protocol Client
-|       |-- stream/       scrcpy Protocol, Video Decoder/Renderer
+|       |-- settings.*    Persistente Einstellungen inkl. Ton an/aus
+|       |-- adb/          ADB Protocol Client + ShellProcess (abbrechbarer adb-shell-Prozess)
+|       |-- stream/       scrcpy Protocol, VideoDecoder, VideoRenderer, AudioPlayer, CaptureController
 |       |-- input/        Input Forwarding (Mouse, Keyboard, Touch)
 |       |-- network/      Network Discovery (cpp-httplib, Subnet Scan)
-|       |-- window/       Plattform-spezifische Fenster (Win32, Cocoa)
-|       `-- tray/         System Tray (Win32, Cocoa)
+|       |-- window/       Plattform-spezifische Fenster (Win32; Cocoa unfertig)
+|       `-- tray/         System Tray (Win32)
 `-- scrcpy_download/      scrcpy Server Binary
 ```
+
+**macOS ist derzeit nicht baubar.** `CocoaWindow` implementiert nur einen Bruchteil der
+rein virtuellen `IWindow`-Methoden, und die in `CMakeLists.txt` referenzierte
+`src/tray/cocoa_tray.mm` existiert gar nicht. Die CI baut ausschliesslich Android und
+Windows. Eine neue Methode in `IWindow` kann macOS also nicht "kaputt machen" - es ist
+bereits kaputt. In nutzerseitiger Doku darf macOS trotzdem nicht als unterstuetzt
+auftauchen.
 
 ---
 
@@ -49,7 +61,18 @@ Pixel-Mirroring/
 - UI: Jetpack Compose + Material 3
 - Min SDK: Android 11 (API 30)
 - Target SDK: Android 15 (API 35)
-- Build: Gradle 8.x, JDK 17+
+- Build: Gradle 9.4.1, JDK 17+ (Wrapper ist bewusst nicht eingecheckt)
+
+**Die Debug-Variante ist das ausgelieferte Artefakt** - der Desktop-Client installiert
+sie, die CI veroeffentlicht sie. Deshalb laufen auf `debug` ausnahmsweise
+`isMinifyEnabled` und `isShrinkResources`; ohne sie ist die APK rund 60 statt 4 MB gross.
+Folgen davon:
+
+- Klassen, die nur ueber das Manifest oder per Reflexion erreicht werden, brauchen eine
+  Keep-Regel in `app/proguard-rules.pro`.
+- Compose-Tooling steckt absichtlich nicht in der Auslieferung. Lokale Previews:
+  `gradle assembleDebug -PcomposeTooling`.
+- Bei `debuggable`-Builds macht R8 nur Tree-Shaking, keine Obfuskation - die risikoarme Variante.
 
 ### Desktop Client
 
@@ -90,7 +113,7 @@ ADB **bleibt nicht dauerhaft aktiviert** (Sicherheitslücke geschlossen). Stattd
 - App aktiviert dann `adb_enabled`, `adb_wifi_enabled` und `adb_tcp_port`
 - Desktop Client verbindet sich via ADB TCP/IP
 - Client pusht und startet `scrcpy-server.jar`
-- Video+Control-Sockets werden direkt zur scrcpy-Server öffnet (ADB Shell wird umgangen für Mediendaten)
+- Video-, Audio- und Control-Sockets werden direkt zum scrcpy-Server geöffnet (ADB Shell wird für Mediendaten umgangen)
 - Während Stream: Client sendet alle ~15s `POST /heartbeat` um Session aktiv zu halten
 - **Watchdog auf dem Gerät:** ADB wird nach 60s ohne `/connect` oder `/heartbeat` automatisch deaktiviert (alle drei Settings)
 - **Wichtig:** Manuell aktiviertes Wireless Debugging wird vom Watchdog nie angefasst — nur Sessions, die die App selbst gestartet hat
@@ -175,11 +198,47 @@ jedem Textfeld korrekt dargestellt werden. Damit das dauerhaft haelt, gilt:
 1. Kein Browser-Technologie. Kein Electron, kein WebView, kein CEF.
 2. Aspect Ratio immer beibehalten.
 3. Windows: Custom Borderless Window mit eigenem Hit-Testing.
-4. macOS: Standard Cocoa Window.
-5. scrcpy-Protokoll nutzen, keine eigene Streaming-Losung erfinden.
-6. Android App aktiviert ADB over WiFi selbst via `Settings.Global.putInt("adb_wifi_enabled", 1)`.
-7. Minimaler Akkuverbrauch auf Android.
-8. Der Client soll neue Nutzer sauber durch USB-Ersteinrichtung fuehren und danach automatisch verbinden.
+4. scrcpy-Protokoll nutzen, keine eigene Streaming-Losung erfinden.
+5. Android App aktiviert ADB over WiFi selbst via `Settings.Global.putInt("adb_wifi_enabled", 1)`.
+6. Minimaler Akkuverbrauch auf Android. Konkret: keine Poll-Schleifen, die pro Runde
+   einen `adb`-Prozess starten, und Netzwerk-Callbacks entprellt und auf WLAN begrenzt.
+7. Der Client soll neue Nutzer sauber durch USB-Ersteinrichtung fuehren und danach automatisch verbinden.
+
+### Invarianten im Stream-Pfad (nicht aus Versehen zurueckdrehen)
+
+- **Socket-Reihenfolge liegt fest:** Video -> Audio -> Control, exakt so in
+  `connect_sockets()` und passend zur Server-Seite. Audio nur, wenn aktiviert.
+  Falsche Reihenfolge = jeder Stream liest aus dem falschen Kanal.
+- **Ton laeuft bewusst als rohes PCM** (`audio_codec=raw`, 48 kHz, Stereo, s16): kein
+  Decoder, keine Codec-Konfiguration, keine zusaetzliche FFmpeg-Abhaengigkeit auf der
+  Client-Seite. Kostet ~1,5 Mbit/s neben ~20 Mbit/s Video. Nicht ohne Grund auf Opus
+  "optimieren" - die Config-Pakete sind genau der Teil, der still kaputtgeht.
+- **Ton darf das Bild nie mitreissen:** jeder Fehlerfall (Handy kann nicht aufnehmen,
+  Codec-Kennung 0/-1, kein PC-Audiogeraet) landet in `stream.log` und laeuft video-only
+  weiter. Ton ausschalten stellt exakt die alte Server-Befehlszeile wieder her.
+- **Socket-Abbau:** `stop()` macht `shutdown()` -> `join()` -> `closesocket()`. Zuerst
+  schliessen wuerde einen lesenden Thread auf einer Socket-Nummer sitzen lassen, die das
+  Betriebssystem schon neu vergeben hat. Schreibzugriffe auf den Control-Socket laufen
+  ueber `send_control()` (Mutex + vollstaendige Schreibschleife), weil UI-Thread und
+  Screen-Poll-Thread beide senden.
+- **Der Serverprozess gehoert uns:** das `adb shell app_process ...` laeuft in einem
+  `pm::adb::ShellProcess` und wird in `stop()` beendet. Kein detached Thread mehr - das
+  hat pro Sitzung einen Thread und eine `adb.exe` liegengelassen.
+- **Der Renderer haelt eine Referenz, keine Kopie** (`av_frame_ref`). Kein
+  Pro-Bild-`memcpy` der YUV-Ebenen wieder einbauen (~180 MB/s bei 1080p60).
+- **Aufnahmen bevorzugen den Hardware-Encoder** (`h264_mf`, sonst NVENC/QSV/AMF), mit
+  automatischem Rueckfall auf `libx264` und passendem Pixelformat.
+- **Tastenkuerzel:** Navigation liegt auf **Alt** (`Alt+B` zurueck, `Alt+H` Start,
+  `Alt+S` Uebersicht), weil Strg+C/V die Zwischenablage und Strg+U/L Sperren/Entsperren
+  belegen. Alt-Tasten kommen als `WM_SYSKEYDOWN`/`WM_SYSKEYUP`; nur B/H/S werden
+  abgefangen, damit `Alt+F4` weiter bei `DefWindowProc` ankommt.
+- **Hardware-Dekodierung fehlt mit Absicht:** `d3d11va`/`dxva2` sind vorhanden, aber
+  SDL2 kann keine fremde D3D11-Textur uebernehmen. Die noetige GPU->CPU-Rueckkopie
+  waere vermutlich langsamer als die jetzige Software-Dekodierung. Erst messen.
+- **Artefaktgroesse ist ein Feature:** vor einer neuen Android-Abhaengigkeit pruefen, ob
+  sie ueberhaupt benutzt wird; vor dem Aufweichen der DLL-Kopierregeln pruefen, was die
+  Binaries wirklich importieren (`dumpbin /DEPENDENTS`). Nicht wieder das komplette
+  `vcpkg_installed/<triplet>/bin` kopieren.
 
 ---
 
@@ -192,8 +251,15 @@ jedem Textfeld korrekt dargestellt werden. Damit das dauerhaft haelt, gilt:
 
 ### Android
 
-- Gradle Build: `./gradlew assembleDebug`
+- Gradle Build: `gradle assembleDebug`
 - Manueller Test auf physischem Geraet
+
+### Was sich nicht automatisiert testen laesst
+
+Es gibt keine Testsuite. Alles Verhalten am Geraet ist manuell zu pruefen - besonders
+Verbindungsaufbau/Reconnect, Tonwiedergabe (falsche Abtastrate faellt sofort als
+falsche Tonhoehe auf), Umlauteingabe und die Aufnahme. Kompilieren heisst hier nicht
+"funktioniert".
 
 ---
 

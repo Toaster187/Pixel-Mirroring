@@ -1,0 +1,20 @@
+Pixel Mirroring spiegelt deinen Android-Bildschirm nativ auf diesen PC — ohne
+Browser-Technik, mit geringem Speicherverbrauch.
+
+Dieser Assistent installiert den Desktop-Client. Die passende Android-App ist
+bereits enthalten und wird beim ersten Verbinden automatisch auf dein Handy
+installiert. Android Studio oder ein Android-SDK brauchst du dafür nicht.
+
+So geht es nach der Installation weiter:
+
+  1. Aktiviere am Handy einmalig die USB-Debugging-Option
+     (Einstellungen > Entwickleroptionen).
+  2. Verbinde das Handy per USB-Kabel mit diesem PC.
+  3. Starte Pixel Mirroring und klicke auf „Verbinden".
+
+Das Kabel wird nur für die Ersteinrichtung gebraucht. Danach verbindet sich der
+Client automatisch über das WLAN, sofern PC und Handy im selben Netz sind.
+
+Aus Sicherheitsgründen bleibt ADB über WLAN nicht dauerhaft aktiv: Die App
+schaltet es nur für die laufende Sitzung ein und 60 Sekunden nach dem letzten
+Lebenszeichen des PCs wieder ab.

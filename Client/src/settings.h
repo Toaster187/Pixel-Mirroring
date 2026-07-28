@@ -12,6 +12,7 @@ struct Settings {
     bool m_compatibility_mode = false; // CAVE MAN USE SLOW PIN UNLOCK COMPATIBILITY.
     bool m_lowest_brightness = true;   // CAVE MAN MAKE SCREEN BRIGHTNESS VERY LOW AT START
     bool m_send_captures_to_phone = true; // CAVE MAN PUSH FINISHED CAPTURE BACK TO PHONE
+    bool m_audio_enabled = true;       // CAVE MAN HEAR PHONE SOUND ON PC SPEAKER
 };
 
 Settings load_settings();

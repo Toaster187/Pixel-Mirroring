@@ -3,10 +3,9 @@
 #include <iostream>
 #include <fstream>
 #include <sstream>
-#include <stdexcept>
 #include <array>
+#include <cctype>
 #include <memory>
-#include <regex>
 #include <filesystem>
 #include <thread>
 #include <chrono>
@@ -17,6 +16,7 @@
 #else
 #include <unistd.h>
 #include <limits.h>
+#include <csignal>
 #include <sys/wait.h>
 #endif
 
@@ -56,6 +56,39 @@ std::string trim(const std::string& text) {
     if (first == std::string::npos) return {};
     const auto last = text.find_last_not_of(" \t\r\n");
     return text.substr(first, last - first + 1);
+}
+
+// Ugg! Magic rune engine (std::regex) is fat and slow, and cave man calls it every
+// half heartbeat while waiting for phone. Plain stone-by-stone reading is faster.
+// Grabs the word right after marker, up to the next whitespace.
+std::string value_after(const std::string& text, const std::string& marker) {
+    const auto pos = text.find(marker);
+    if (pos == std::string::npos) return {};
+    const auto start = pos + marker.size();
+    const auto end = text.find_first_of(" \t\r\n", start);
+    return end == std::string::npos ? text.substr(start) : text.substr(start, end - start);
+}
+
+// Cave man picks the first four-dot number stone after marker, e.g. "src 192.168.1.5".
+std::string ipv4_after(const std::string& text, const std::string& marker) {
+    size_t search = 0;
+    while ((search = text.find(marker, search)) != std::string::npos) {
+        size_t i = search + marker.size();
+        while (i < text.size() && (text[i] == ' ' || text[i] == '\t')) ++i;
+
+        const size_t start = i;
+        int dots = 0;
+        while (i < text.size() && (std::isdigit(static_cast<unsigned char>(text[i])) || text[i] == '.')) {
+            if (text[i] == '.') ++dots;
+            ++i;
+        }
+
+        if (dots == 3 && i > start) {
+            return text.substr(start, i - start);
+        }
+        search += marker.size();
+    }
+    return {};
 }
 
 } // namespace
@@ -168,6 +201,139 @@ bool AdbClient::run_command_windows(const std::string& cmdline, const std::funct
 }
 #endif
 
+ShellProcess::~ShellProcess() {
+    stop();
+}
+
+bool ShellProcess::start(const std::string& device_id, const std::string& command,
+                         std::function<void(const std::string&)> on_line) {
+    stop();
+
+    const std::string adb_path = get_adb_path();
+
+#ifdef _WIN32
+    SECURITY_ATTRIBUTES sa = {};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+
+    HANDLE read_end = nullptr;
+    HANDLE write_end = nullptr;
+    if (!CreatePipe(&read_end, &write_end, &sa, 0)) {
+        return false;
+    }
+    SetHandleInformation(read_end, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOA si = {};
+    si.cb = sizeof(si);
+    si.hStdOutput = write_end;
+    si.hStdError = write_end;
+    si.dwFlags |= STARTF_USESTDHANDLES;
+
+    PROCESS_INFORMATION pi = {};
+    std::string cmdline = "\"" + adb_path + "\" -s " + device_id + " shell " + command;
+    std::vector<char> cmd_buf(cmdline.begin(), cmdline.end());
+    cmd_buf.push_back('\0');
+
+    if (!CreateProcessA(nullptr, cmd_buf.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
+                        nullptr, nullptr, &si, &pi)) {
+        CloseHandle(read_end);
+        CloseHandle(write_end);
+        log_adb_event("[ADB] Could not spawn shell process: " + cmdline);
+        return false;
+    }
+
+    CloseHandle(write_end);
+    CloseHandle(pi.hThread);
+    m_process_handle.store(pi.hProcess);
+    m_running.store(true);
+
+    m_reader = std::thread([this, read_end, callback = std::move(on_line)]() {
+        std::string pending;
+        char buffer[4096];
+        DWORD read_bytes = 0;
+        while (ReadFile(read_end, buffer, sizeof(buffer), &read_bytes, nullptr) && read_bytes > 0) {
+            pending.append(buffer, read_bytes);
+            size_t newline;
+            while ((newline = pending.find('\n')) != std::string::npos) {
+                if (callback) callback(pending.substr(0, newline + 1));
+                pending.erase(0, newline + 1);
+            }
+        }
+        if (!pending.empty() && callback) callback(pending);
+        CloseHandle(read_end);
+        m_running.store(false);
+    });
+    return true;
+#else
+    int pipefd[2];
+    if (pipe(pipefd) == -1) {
+        return false;
+    }
+
+    const pid_t pid = fork();
+    if (pid == -1) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return false;
+    }
+
+    if (pid == 0) {
+        close(pipefd[0]);
+        dup2(pipefd[1], STDOUT_FILENO);
+        dup2(pipefd[1], STDERR_FILENO);
+        close(pipefd[1]);
+        execl(adb_path.c_str(), adb_path.c_str(), "-s", device_id.c_str(), "shell",
+              command.c_str(), static_cast<char*>(nullptr));
+        _exit(127);
+    }
+
+    close(pipefd[1]);
+    m_pid.store(pid);
+    m_running.store(true);
+
+    m_reader = std::thread([this, fd = pipefd[0], pid, callback = std::move(on_line)]() {
+        std::string pending;
+        char buffer[4096];
+        ssize_t read_bytes = 0;
+        while ((read_bytes = read(fd, buffer, sizeof(buffer))) > 0) {
+            pending.append(buffer, static_cast<size_t>(read_bytes));
+            size_t newline;
+            while ((newline = pending.find('\n')) != std::string::npos) {
+                if (callback) callback(pending.substr(0, newline + 1));
+                pending.erase(0, newline + 1);
+            }
+        }
+        if (!pending.empty() && callback) callback(pending);
+        close(fd);
+        waitpid(pid, nullptr, 0);
+        m_running.store(false);
+    });
+    return true;
+#endif
+}
+
+void ShellProcess::stop() {
+#ifdef _WIN32
+    // Ugg! Kill child first so its pipe end closes and reader thread stops waiting.
+    HANDLE process = static_cast<HANDLE>(m_process_handle.exchange(nullptr));
+    if (process) {
+        TerminateProcess(process, 0);
+        WaitForSingleObject(process, 2000);
+        CloseHandle(process);
+    }
+#else
+    const int pid = m_pid.exchange(-1);
+    if (pid > 0) {
+        kill(static_cast<pid_t>(pid), SIGKILL);
+    }
+#endif
+
+    if (m_reader.joinable() && m_reader.get_id() != std::this_thread::get_id()) {
+        m_reader.join();
+    }
+    m_running.store(false);
+}
+
 bool Device::is_usb() const {
     // ADB over TCP/IP usually contains an IP address format, USB does not
     return id.find('.') == std::string::npos;
@@ -279,8 +445,6 @@ std::vector<Device> AdbClient::get_devices() {
     
     // Skip the first line ("List of devices attached")
     std::getline(stream, line);
-    
-    static const std::regex model_regex("model:([^\\s]+)");
 
     while (std::getline(stream, line)) {
         if (line.empty() || line.find_first_not_of(" \t\r\n") == std::string::npos) {
@@ -297,12 +461,9 @@ std::vector<Device> AdbClient::get_devices() {
             dev.state = state;
 
             // Cave man read model mark from adb stone.
-            std::smatch match;
-            if (std::regex_search(line, match, model_regex)) {
-                dev.model = match[1].str();
-            }
+            dev.model = value_after(line, "model:");
 
-            devices.push_back(dev);
+            devices.push_back(std::move(dev));
         }
     }
     return devices;
@@ -414,12 +575,24 @@ std::vector<std::string> AdbClient::users_with_app(const std::string& device_id,
     std::vector<std::string> users;
 
     // "pm list users" spits lines like: UserInfo{0:Friedrich:4c13} running
-    std::string user_list = execute_shell_command(device_id, "pm list users");
-    std::regex user_re("UserInfo\\{(\\d+):([^:]*):");
-    auto begin = std::sregex_iterator(user_list.begin(), user_list.end(), user_re);
-    for (auto it = begin; it != std::sregex_iterator(); ++it) {
-        std::string id = (*it)[1].str();
-        std::string name = trim((*it)[2].str());
+    const std::string user_list = execute_shell_command(device_id, "pm list users");
+    const std::string marker = "UserInfo{";
+
+    size_t pos = 0;
+    while ((pos = user_list.find(marker, pos)) != std::string::npos) {
+        const size_t id_start = pos + marker.size();
+        const size_t first_colon = user_list.find(':', id_start);
+        if (first_colon == std::string::npos) break;
+        const size_t second_colon = user_list.find(':', first_colon + 1);
+        if (second_colon == std::string::npos) break;
+        pos = second_colon;
+
+        const std::string id = user_list.substr(id_start, first_colon - id_start);
+        if (id.empty() || id.find_first_not_of("0123456789") != std::string::npos) {
+            continue;
+        }
+        const std::string name = trim(user_list.substr(first_colon + 1, second_colon - first_colon - 1));
+
         std::string packages = execute_shell_command(
             device_id, "pm list packages --user " + id + " " + package_name);
         if (packages.find("package:" + package_name) != std::string::npos) {
@@ -449,79 +622,6 @@ bool AdbClient::start_service(const std::string& device_id, const std::string& s
 
 std::string AdbClient::execute_shell_command(const std::string& device_id, const std::string& command) {
     return run_adb_command({"-s", device_id, "shell", command});
-}
-
-void AdbClient::execute_shell_command_async(const std::string& device_id, const std::string& command, std::function<void(const std::string&)> on_line) {
-    std::string adb_path = get_adb_path();
-
-#ifdef _WIN32
-    // Build command line for Windows
-    std::string cmdline = "\"" + adb_path + "\" -s " + device_id + " shell " + command;
-
-    std::string line;
-    run_command_windows(cmdline, [&line, on_line](const char* buffer, size_t bytesRead) {
-        line.append(buffer, bytesRead);
-        size_t pos;
-        while ((pos = line.find('\n')) != std::string::npos) {
-            if (on_line) on_line(line.substr(0, pos + 1));
-            line.erase(0, pos + 1);
-        }
-    }, false);
-    if (!line.empty() && on_line) on_line(line);
-#else
-    // POSIX: use fork+execvp
-    int pipefd[2];
-    if (pipe(pipefd) == -1) {
-        return;
-    }
-
-    pid_t pid = fork();
-    if (pid == -1) {
-        close(pipefd[0]);
-        close(pipefd[1]);
-        return;
-    }
-
-    if (pid == 0) {
-        // Child process
-        close(pipefd[0]); // Close read end
-        dup2(pipefd[1], STDOUT_FILENO);
-        dup2(pipefd[1], STDERR_FILENO);
-        close(pipefd[1]);
-
-        // Build argv
-        std::vector<const char*> argv;
-        argv.push_back(adb_path.c_str());
-        argv.push_back("-s");
-        argv.push_back(device_id.c_str());
-        argv.push_back("shell");
-        argv.push_back(command.c_str());
-        argv.push_back(nullptr);
-
-        execvp(adb_path.c_str(), const_cast<char* const*>(argv.data()));
-        _exit(127); // exec failed
-    } else {
-        // Parent process
-        close(pipefd[1]); // Close write end
-
-        char buffer[4096];
-        ssize_t bytesRead;
-        std::string line;
-        while ((bytesRead = read(pipefd[0], buffer, sizeof(buffer) - 1)) > 0) {
-            buffer[bytesRead] = '\0';
-            line += buffer;
-            size_t pos;
-            while ((pos = line.find('\n')) != std::string::npos) {
-                if (on_line) on_line(line.substr(0, pos + 1));
-                line.erase(0, pos + 1);
-            }
-        }
-        if (!line.empty() && on_line) on_line(line);
-
-        close(pipefd[0]);
-        waitpid(pid, nullptr, 0);
-    }
-#endif
 }
 
 bool AdbClient::push_file(const std::string& device_id, const std::string& local_path, const std::string& remote_path) {
@@ -614,18 +714,13 @@ bool AdbClient::has_permission(const std::string& device_id, const std::string& 
 
 std::string AdbClient::get_device_ip(const std::string& device_id) {
     std::string output = execute_shell_command(device_id, "ip route");
-    std::smatch route_match;
-    if (std::regex_search(output, route_match, std::regex("\\bsrc\\s+([0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+)"))) {
-        return route_match[1].str();
+    std::string ip = ipv4_after(output, "src ");
+    if (!ip.empty()) {
+        return ip;
     }
 
     output = execute_shell_command(device_id, "ip -f inet addr show wlan0");
-    std::smatch wlan_match;
-    if (std::regex_search(output, wlan_match, std::regex("\\binet\\s+([0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+)/"))) {
-        return wlan_match[1].str();
-    }
-
-    return "";
+    return ipv4_after(output, "inet ");
 }
 
 } // namespace pm::adb

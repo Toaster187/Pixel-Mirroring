@@ -29,7 +29,23 @@ VideoRenderer::~VideoRenderer() {
 
 bool VideoRenderer::init(void* native_window_handle) {
     m_native_window_handle = native_window_handle;
-    return m_native_window_handle != nullptr;
+    if (!m_native_window_handle) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(m_frame_mutex);
+    if (!m_frame) {
+        m_frame = av_frame_alloc();
+        if (!m_frame) {
+            return false;
+        }
+    }
+    // Cave man forget old picture on reconnect, else stale phone screen flashes up.
+    av_frame_unref(m_frame);
+    m_has_frame = false;
+    m_frame_width = 0;
+    m_frame_height = 0;
+    return true;
 }
 
 void VideoRenderer::render_frame(void* frame) {
@@ -53,6 +69,9 @@ void VideoRenderer::render_frame(void* frame) {
 
     {
         std::lock_guard<std::mutex> lock(m_frame_mutex);
+        if (!m_frame) {
+            return;
+        }
 
         // Resize if frame size changed
         if (width != m_frame_width || height != m_frame_height) {
@@ -65,24 +84,13 @@ void VideoRenderer::render_frame(void* frame) {
             }
         }
 
-        // Copy Y plane
-        int y_size = av_frame->linesize[0] * height;
-        m_y_linesize = av_frame->linesize[0];
-        m_y_plane.resize(y_size);
-        std::memcpy(m_y_plane.data(), av_frame->data[0], y_size);
-
-        // Copy U plane (half height)
-        int uv_height = (height + 1) / 2;
-        int u_size = av_frame->linesize[1] * uv_height;
-        m_u_linesize = av_frame->linesize[1];
-        m_u_plane.resize(u_size);
-        std::memcpy(m_u_plane.data(), av_frame->data[1], u_size);
-
-        // Copy V plane (half height)
-        int v_size = av_frame->linesize[2] * uv_height;
-        m_v_linesize = av_frame->linesize[2];
-        m_v_plane.resize(v_size);
-        std::memcpy(m_v_plane.data(), av_frame->data[2], v_size);
+        // Cave man just points at the picture instead of carrying it. FFmpeg counts
+        // the pointers, so the decoder cannot recycle it while the GPU still reads.
+        av_frame_unref(m_frame);
+        if (av_frame_ref(m_frame, av_frame) < 0) {
+            m_has_frame = false;
+            return;
+        }
 
         m_has_frame = true;
     }
@@ -102,7 +110,7 @@ void VideoRenderer::paint(SDL_Renderer* renderer, int x, int y, int width, int h
     }
 
     std::lock_guard<std::mutex> lock(m_frame_mutex);
-    if (!m_has_frame || m_frame_width <= 0 || m_frame_height <= 0) {
+    if (!m_has_frame || !m_frame || !m_frame->data[0] || m_frame_width <= 0 || m_frame_height <= 0) {
         return;
     }
 
@@ -129,13 +137,13 @@ void VideoRenderer::paint(SDL_Renderer* renderer, int x, int y, int width, int h
         SDL_SetTextureScaleMode(m_texture, SDL_ScaleModeBest);
     }
 
-    // Upload YUV planes directly — no CPU conversion needed
+    // Upload YUV planes straight from the decoded frame — no CPU copy, no conversion
     SDL_UpdateYUVTexture(
         m_texture,
         nullptr,
-        m_y_plane.data(), m_y_linesize,
-        m_u_plane.data(), m_u_linesize,
-        m_v_plane.data(), m_v_linesize
+        m_frame->data[0], m_frame->linesize[0],
+        m_frame->data[1], m_frame->linesize[1],
+        m_frame->data[2], m_frame->linesize[2]
     );
 
     // Calculate aspect-ratio-preserving destination rect
@@ -174,9 +182,9 @@ void VideoRenderer::shutdown() {
         m_texture = nullptr;
     }
     m_cached_renderer = nullptr;
-    m_y_plane.clear();
-    m_u_plane.clear();
-    m_v_plane.clear();
+    if (m_frame) {
+        av_frame_free(&m_frame);
+    }
     m_frame_width = 0;
     m_frame_height = 0;
     m_has_frame = false;

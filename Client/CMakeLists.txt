@@ -38,6 +38,7 @@ add_executable(PixelMirroring
     src/stream/video_decoder.cpp
     src/stream/video_renderer.cpp
     src/stream/capture_controller.cpp
+    src/stream/audio_player.cpp
     src/input/input_handler.cpp
     # src/config/settings.cpp
     ${PLATFORM_SOURCES}
@@ -176,14 +177,44 @@ add_custom_command(TARGET PixelMirroring POST_BUILD
     COMMENT "Copy runtime DLLs next to desktop client"
 )
 
+# --- Runtime DLLs we actually load ---
+# Ugg! Cave man used to drag the WHOLE vcpkg cave next to the app: debug stones
+# (.pdb), the build-tool pkgconf, and avfilter/avdevice which nothing ever opens.
+# That was ~4 MB of dead weight in every installer. Now only what the EXE (and the
+# FFmpeg libs themselves) really pull in gets copied. Patterns, not fixed names,
+# so a version bump (avcodec-62 -> avcodec-63) does not silently drop a library.
+set(PM_RUNTIME_DLL_PATTERNS
+    "avcodec-*.dll"     # H.264/H.265/AV1 decode + BMP/x264 encode
+    "avformat-*.dll"    # MP4 muxing for screen recordings
+    "avutil-*.dll"
+    "swscale-*.dll"     # pixel format conversion for captures
+    "swresample-*.dll"  # pulled in by avcodec
+    "libx264-*.dll"     # pulled in by avcodec
+    "SDL2.dll"
+    "brotlienc.dll"     # pulled in by cpp-httplib
+    "brotlidec.dll"
+    "brotlicommon.dll"
+)
+
 if(DEFINED VCPKG_TARGET_TRIPLET)
-    # Ensure FFmpeg and other DLLs that might not be picked up by TARGET_RUNTIME_DLLS are copied
-    add_custom_command(TARGET PixelMirroring POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/bin"
-            "$<TARGET_FILE_DIR:PixelMirroring>"
-        COMMENT "Copy all vcpkg DLLs next to desktop client"
-    )
+    set(PM_VCPKG_BIN "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/bin")
+    set(PM_RUNTIME_DLLS "")
+    foreach(PM_PATTERN IN LISTS PM_RUNTIME_DLL_PATTERNS)
+        file(GLOB PM_MATCHED "${PM_VCPKG_BIN}/${PM_PATTERN}")
+        list(APPEND PM_RUNTIME_DLLS ${PM_MATCHED})
+    endforeach()
+
+    if(PM_RUNTIME_DLLS)
+        add_custom_command(TARGET PixelMirroring POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${PM_RUNTIME_DLLS}
+                "$<TARGET_FILE_DIR:PixelMirroring>"
+            COMMAND_EXPAND_LISTS
+            COMMENT "Copy required vcpkg DLLs next to desktop client"
+        )
+    else()
+        message(WARNING "Ugg! No vcpkg runtime DLLs matched in ${PM_VCPKG_BIN}")
+    endif()
 endif()
 
 if(WIN32)
@@ -209,10 +240,10 @@ install(FILES $<TARGET_RUNTIME_DLLS:PixelMirroring>
     DESTINATION .
 )
 
-if(DEFINED VCPKG_TARGET_TRIPLET)
-    install(DIRECTORY "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/bin/"
+# Same short list as above — the installer ships exactly what gets loaded.
+if(DEFINED VCPKG_TARGET_TRIPLET AND PM_RUNTIME_DLLS)
+    install(FILES ${PM_RUNTIME_DLLS}
         DESTINATION .
-        FILES_MATCHING PATTERN "*.dll"
     )
 endif()
 
@@ -245,35 +276,113 @@ endif()
 
 # --- CPack Packaging Setup ---
 set(CPACK_PACKAGE_NAME "PixelMirroring")
-set(CPACK_PACKAGE_VENDOR "PixelMirroring Team")
-set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Android Screen Mirroring Tool - Apple iPhone Mirroring for Android")
+set(CPACK_PACKAGE_VENDOR "Pixel Mirroring")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Pixel Mirroring - Android-Bildschirm nativ auf dem PC")
 set(CPACK_PACKAGE_VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
 set(CPACK_PACKAGE_VERSION_MINOR ${PROJECT_VERSION_MINOR})
 set(CPACK_PACKAGE_VERSION_PATCH ${PROJECT_VERSION_PATCH})
+set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/Toaster187/Pixel-Mirroring")
+set(CPACK_PACKAGE_CONTACT "https://github.com/Toaster187/Pixel-Mirroring/issues")
+set(CPACK_PACKAGE_INSTALL_DIRECTORY "Pixel Mirroring")
+
+# Ugg! The installer used to greet people with CMake's placeholder text ("This is an
+# installer created using CPack ... No license provided") and showed NO licence at all.
+# Point every page at the real texts instead.
+set(PM_LICENSE_FOR_INSTALLER "${CMAKE_CURRENT_BINARY_DIR}/installer/License.txt")
+
+# The repo LICENSE is UTF-8 and full of German umlauts (the FFmpeg LGPL statement).
+# CPack builds an ANSI NSIS installer — it puts "Unicode true" nowhere, and the
+# defines hook lands after OutFile, which NSIS rejects. So an ANSI installer reads
+# the licence in the system code page: handing it UTF-8 would show "KonformitÃ¤t".
+# Transcode once at configure time. This is fixing the cause, not spelling around it.
+set(PM_LICENSE_TRANSCODED FALSE)
+if(WIN32)
+    execute_process(
+        COMMAND powershell -NoProfile -NonInteractive -Command
+            "[IO.File]::WriteAllText('${PM_LICENSE_FOR_INSTALLER}', [IO.File]::ReadAllText('${CMAKE_CURRENT_SOURCE_DIR}/../LICENSE', [Text.Encoding]::UTF8), [Text.Encoding]::GetEncoding(1252))"
+        RESULT_VARIABLE PM_LICENSE_RC
+        ERROR_QUIET
+    )
+    if(PM_LICENSE_RC EQUAL 0 AND EXISTS "${PM_LICENSE_FOR_INSTALLER}")
+        set(PM_LICENSE_TRANSCODED TRUE)
+    else()
+        message(WARNING "Ugg! Could not transcode LICENSE to cp1252 — installer may show broken umlauts.")
+    endif()
+endif()
+
+if(NOT PM_LICENSE_TRANSCODED)
+    configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../LICENSE" "${PM_LICENSE_FOR_INSTALLER}" COPYONLY)
+endif()
+
+set(CPACK_RESOURCE_FILE_LICENSE "${PM_LICENSE_FOR_INSTALLER}")
+set(CPACK_RESOURCE_FILE_README "${CMAKE_CURRENT_SOURCE_DIR}/installer/Welcome.txt")
+set(CPACK_RESOURCE_FILE_WELCOME "${CMAKE_CURRENT_SOURCE_DIR}/installer/Welcome.txt")
+set(CPACK_PACKAGE_DESCRIPTION_FILE "${CMAKE_CURRENT_SOURCE_DIR}/installer/Description.txt")
 
 if(WIN32)
     set(CPACK_GENERATOR "ZIP;NSIS;WIX")
-    
+
+    # Ugg! Squeeze the bundle harder. LZMA in solid mode packs all files as one
+    # block, which pays off a lot because the APK and the FFmpeg libs sit together.
+    set(CPACK_NSIS_COMPRESSOR "/SOLID lzma")
+    set(CPACK_ARCHIVE_THREADS 0)
+
     # Executables to create shortcuts for
     set(CPACK_PACKAGE_EXECUTABLES "PixelMirroring" "Pixel Mirroring")
     
     # NSIS specific settings
     set(CPACK_NSIS_PACKAGE_NAME "Pixel Mirroring")
-    set(CPACK_NSIS_DISPLAY_NAME "Pixel Mirroring")
-    set(CPACK_NSIS_HELP_LINK "https://github.com/Toasterfritzi/Pixel-Mirroring")
-    set(CPACK_NSIS_URL_INFO_ABOUT "https://github.com/Toasterfritzi/Pixel-Mirroring")
+    set(CPACK_NSIS_DISPLAY_NAME "Pixel Mirroring ${PROJECT_VERSION}")
+    # These pointed at a user that does not own this repo — the "Hilfe" links in
+    # Windows' installed-apps list went nowhere.
+    set(CPACK_NSIS_HELP_LINK "https://github.com/Toaster187/Pixel-Mirroring")
+    set(CPACK_NSIS_URL_INFO_ABOUT "https://github.com/Toaster187/Pixel-Mirroring")
+    set(CPACK_NSIS_CONTACT "https://github.com/Toaster187/Pixel-Mirroring/issues")
     set(CPACK_NSIS_MODIFY_PATH OFF)
     set(CPACK_NSIS_EXECUTABLES_DIRECTORY ".")
     # Installer + Start menu shortcut wear the same icon as the app
     set(CPACK_NSIS_MUI_ICON "${CMAKE_CURRENT_SOURCE_DIR}/assets/app_icon.ico")
     set(CPACK_NSIS_MUI_UNIICON "${CMAKE_CURRENT_SOURCE_DIR}/assets/app_icon.ico")
     set(CPACK_NSIS_INSTALLED_ICON_NAME "PixelMirroring.exe")
+    set(CPACK_NSIS_BRANDING_TEXT "Pixel Mirroring ${PROJECT_VERSION}")
 
-    
+    # Titles and body text for the welcome/finish pages. CPack has no variable for
+    # the page BODY, so it goes in through the defines hook, which lands in the .nsi
+    # before the pages are declared.
+    set(CPACK_NSIS_WELCOME_TITLE "Pixel Mirroring installieren")
+    set(CPACK_NSIS_FINISH_TITLE "Pixel Mirroring ist installiert")
+
+    # Ugg! This value travels through two fires before NSIS sees it: CPack copies it
+    # into CPackConfig.cmake WITHOUT escaping, and CMake then re-parses that file.
+    # So everything has to be escaped for the SECOND pass:
+    #   \\\"     -> lands as \" in CPackConfig -> becomes " in the .nsi
+    #   $\\\\r   -> lands as $\\r             -> becomes $\r in the .nsi (NSIS newline)
+    # Do not "simplify" the backslashes here without repackaging and looking at the
+    # generated project.nsi — a wrong count silently breaks the whole installer.
+    #
+    # NOTE: these strings end up in an ANSI .nsi, so they are worded so that no
+    # umlaut is needed at all. That is word choice. Do NOT "fix" German text
+    # anywhere else by spelling ue/oe/ae — see the encoding rules in CLAUDE.md.
+    set(CPACK_NSIS_DEFINES "
+!define MUI_WELCOMEPAGE_TEXT \\\"Dieser Assistent installiert Pixel Mirroring auf diesem PC.$\\\\r$\\\\n$\\\\r$\\\\nDie Android-App ist bereits enthalten und wird beim ersten Verbinden per USB automatisch auf dem Handy installiert. Ein Android-SDK ist nicht notwendig.$\\\\r$\\\\n$\\\\r$\\\\nNach der Ersteinrichtung verbindet sich der Client automatisch per WLAN.\\\"
+!define MUI_FINISHPAGE_TEXT \\\"Pixel Mirroring wurde installiert.$\\\\r$\\\\n$\\\\r$\\\\nVerbinden Sie das Handy per USB-Kabel, starten Sie Pixel Mirroring und klicken Sie auf Verbinden. Das Kabel wird nur einmal zur Einrichtung gebraucht.\\\"
+")
+
+    # Offer a desktop shortcut, and let the uninstaller take its own leftovers with it.
+    set(CPACK_CREATE_DESKTOP_LINKS "PixelMirroring")
+    set(CPACK_NSIS_DELETE_ICONS_EXTRA "Delete '$DESKTOP\\\\Pixel Mirroring.lnk'")
+
+    # NOTE: deliberately no CPACK_NSIS_MUI_FINISHPAGE_RUN. The installer runs
+    # elevated, so launching the app from it would write the first-run setup state
+    # into the ADMINISTRATOR's %LOCALAPPDATA% — and the user's own launch would then
+    # not find it. Better to let people start it themselves.
+
     # WiX specific settings (Official Windows Installer)
     set(CPACK_WIX_UPGRADE_GUID "D9F369E9-1A1A-4BE6-B6DF-D7E31BEF8CFD")
     set(CPACK_WIX_PROGRAM_MENU_FOLDER "Pixel Mirroring")
     set(CPACK_WIX_PRODUCT_ICON "${CMAKE_CURRENT_SOURCE_DIR}/assets/app_icon.ico")
+    set(CPACK_WIX_PROPERTY_ARPHELPLINK "https://github.com/Toaster187/Pixel-Mirroring")
+    set(CPACK_WIX_PROPERTY_ARPURLINFOABOUT "https://github.com/Toaster187/Pixel-Mirroring")
 else()
     set(CPACK_GENERATOR "TGZ")
 endif()

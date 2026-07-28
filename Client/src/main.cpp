@@ -9,6 +9,8 @@
 #include <filesystem>
 #include <functional>
 #include <fstream>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <utility>
@@ -116,6 +118,57 @@ public:
 
 private:
     std::function<void()> fn_;
+};
+
+// Ugg! Cave man used to throw helper hunters into the woods and forget them
+// (std::thread::detach). When the cave burned down they were still out there,
+// writing on stones that no longer existed. Now every hunter is counted and
+// waited for before the fire goes out.
+class BackgroundTasks {
+public:
+    ~BackgroundTasks() { join_all(); }
+
+    void run(std::function<void()> work) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        collect_finished_locked();
+
+        auto done = std::make_shared<std::atomic<bool>>(false);
+        m_workers.push_back({std::thread([work = std::move(work), done]() {
+            work();
+            done->store(true);
+        }), done});
+    }
+
+    void join_all() {
+        std::vector<Worker> workers;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            workers.swap(m_workers);
+        }
+        for (auto& worker : workers) {
+            if (worker.thread.joinable()) worker.thread.join();
+        }
+    }
+
+private:
+    struct Worker {
+        std::thread thread;
+        std::shared_ptr<std::atomic<bool>> done;
+    };
+
+    void collect_finished_locked() {
+        for (auto it = m_workers.begin(); it != m_workers.end();) {
+            if (it->done->load()) {
+                if (it->thread.joinable()) it->thread.join();
+                it = m_workers.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    std::mutex m_mutex;
+    std::vector<Worker> m_workers;
 };
 
 std::string get_client_name() {
@@ -261,8 +314,14 @@ std::string prompt_user_for_pin(void* parent_hwnd = nullptr) {
         
         g_pin_done = false;
         MSG msg;
-        while (GetMessage(&msg, nullptr, 0, 0)) {
-            if (g_pin_done) break;
+        while (true) {
+            const BOOL got = GetMessage(&msg, nullptr, 0, 0);
+            if (got == 0) {
+                // Ugg! Do not swallow the "leave cave" shout while PIN box is open.
+                PostQuitMessage(static_cast<int>(msg.wParam));
+                break;
+            }
+            if (got == -1 || g_pin_done) break;
             TranslateMessage(&msg);
             DispatchMessage(&msg);
         }
@@ -514,7 +573,8 @@ bool start_stream(
     pm::stream::VideoRenderer& renderer,
     pm::input::InputHandler& input,
     const std::string& device_id,
-    SavedBrightness* out_saved_brightness
+    SavedBrightness* out_saved_brightness,
+    BackgroundTasks& tasks
 );
 
 bool unlock_device_if_needed(const std::string& device_id, pm::window::IWindow* window = nullptr);
@@ -609,7 +669,8 @@ bool run_first_time_setup(
     pm::stream::VideoRenderer& renderer,
     pm::input::InputHandler& input,
     std::atomic<bool>& should_stop,
-    SavedBrightness* out_saved_brightness
+    SavedBrightness* out_saved_brightness,
+    BackgroundTasks& tasks
 ) {
     clear_setup_state();
 
@@ -722,7 +783,7 @@ bool run_first_time_setup(
         return unlock_device_if_needed(tcp_id, &window);
     });
 
-    bool stream_ok = start_stream(window, scrcpy, renderer, input, tcp_device->id, out_saved_brightness);
+    bool stream_ok = start_stream(window, scrcpy, renderer, input, tcp_device->id, out_saved_brightness, tasks);
     bool unlock_ok = unlock_future.get();
 
     if (!unlock_ok || !stream_ok) {
@@ -764,7 +825,8 @@ bool start_stream(
     pm::stream::VideoRenderer& renderer,
     pm::input::InputHandler& input,
     const std::string& device_id,
-    SavedBrightness* out_saved_brightness
+    SavedBrightness* out_saved_brightness,
+    BackgroundTasks& tasks
 ) {
     window.post_task([&window]() { window.set_status_text("Starte Video-Stream..."); });
     pm::stream::ScrcpyClient::Config config;
@@ -775,17 +837,18 @@ bool start_stream(
     config.max_fps = settings.max_fps;
     config.max_size = settings.max_size;
     config.lowest_brightness = settings.m_lowest_brightness;
+    config.audio = settings.m_audio_enabled;
 
     if (settings.m_lowest_brightness) {
         // CAVE MAN DECREASE SUN SHINE SO SMARTPHONE SCREEN IS DARKEST SHADE OF GREY
         std::string dev_id = device_id;
-        std::thread([dev_id, out_saved_brightness]() {
+        tasks.run([dev_id, out_saved_brightness]() {
             pm::adb::AdbClient adb;
             if (out_saved_brightness && out_saved_brightness->brightness < 0) {
                 *out_saved_brightness = read_brightness(adb, dev_id);
             }
             adb.execute_shell_command(dev_id, "settings put system screen_brightness_mode 0; settings put system screen_brightness 0");
-        }).detach();
+        });
     }
 
     if (!renderer.init(window.get_native_handle())) {
@@ -803,8 +866,11 @@ bool start_stream(
     });
 
     if (!scrcpy.start(config)) {
-        window.set_app_state(pm::window::AppState::SCANNING);
-        window.set_status_text("Stream konnte nicht gestartet werden.");
+        // Cave man speaks to the window only through the UI thread, like everywhere else.
+        window.post_task([&window]() {
+            window.set_app_state(pm::window::AppState::SCANNING);
+            window.set_status_text("Stream konnte nicht gestartet werden.");
+        });
         return false;
     }
 
@@ -949,6 +1015,7 @@ static int app_main() {
     window->set_compatibility_mode(initial_settings.m_compatibility_mode);
     window->set_lowest_brightness(initial_settings.m_lowest_brightness);
     window->set_capture_send_to_phone(initial_settings.m_send_captures_to_phone);
+    window->set_audio_enabled(initial_settings.m_audio_enabled);
 
     SavedBrightness saved_brightness; // Cave man remember phone sun level
     std::atomic<bool> should_stop{false};
@@ -965,20 +1032,22 @@ static int app_main() {
     pm::stream::VideoRenderer renderer;
     pm::input::InputHandler input(&scrcpy);
 
-    auto run_on_device = [&scrcpy](auto action) {
+    BackgroundTasks background_tasks;
+
+    auto run_on_device = [&scrcpy, &background_tasks](auto action) {
         if (!scrcpy.is_running()) return;
         std::string device_id = scrcpy.get_device_id();
         if (device_id.empty()) return;
-        std::thread([device_id, action]() {
+        background_tasks.run([device_id, action]() {
             action(device_id);
-        }).detach();
+        });
     };
 
-    auto publish_capture_to_phone = [&scrcpy, w = window.get()](const std::filesystem::path& path) {
+    auto publish_capture_to_phone = [&scrcpy, &background_tasks, w = window.get()](const std::filesystem::path& path) {
         if (!scrcpy.is_running() || path.empty()) return;
         const std::string device_id = scrcpy.get_device_id();
         if (device_id.empty()) return;
-        std::thread([device_id, path, w]() {
+        background_tasks.run([device_id, path, w]() {
             pm::adb::AdbClient adb;
             const std::string remote_dir = "/sdcard/Pictures/PixelMirroring";
             const std::string remote_path = remote_dir + "/" + path.filename().string();
@@ -1000,7 +1069,7 @@ static int app_main() {
                     ? "Aufnahme wurde ans Handy gesendet."
                     : "Aufnahme konnte nicht ans Handy gesendet werden.");
             });
-        }).detach();
+        });
     };
 
     // MEOW. WIRE CONTEXT MENU CALLBACK.
@@ -1099,6 +1168,18 @@ static int app_main() {
                 } else {
                     window->set_status_text("Videoaufnahme braucht einen geladenen Stream-Frame.");
                 }
+                break;
+            }
+            case pm::window::MenuAction::TOGGLE_AUDIO: {
+                current_settings.m_audio_enabled = !current_settings.m_audio_enabled;
+                pm::save_settings(current_settings);
+                window->set_audio_enabled(current_settings.m_audio_enabled);
+                // Ugg! The sound path is set up when the stream starts, so the switch
+                // only bites on the next connection. Say so instead of leaving the
+                // human waiting for a change that will not come.
+                window->set_status_text(current_settings.m_audio_enabled
+                    ? "Ton aktiviert — wirkt ab der nächsten Verbindung."
+                    : "Ton deaktiviert — wirkt ab der nächsten Verbindung.");
                 break;
             }
             case pm::window::MenuAction::TOGGLE_SEND_CAPTURES_TO_PHONE: {
@@ -1300,9 +1381,16 @@ static int app_main() {
             pm::adb::AdbClient poll_adb;
             bool last_screen_on = true;
             int clip_poll_counter = 0;
-            
+            int adb_poll_counter = 0;
+
+            // Cave man keeps ONE messenger instead of carving a new one every round.
+            httplib::Client screen_client(poll_ip.empty() ? "127.0.0.1" : poll_ip, 18294);
+            screen_client.set_connection_timeout(0, 500000); // 500ms
+            screen_client.set_read_timeout(0, 500000);       // 500ms
+
             while (!should_stop && !stop_screen_poll) {
                 bool screen_on = true; // assume on unless check confirms off
+                bool phone_answered = false;
 
                 if (scrcpy.is_running()) {
                     clip_poll_counter++;
@@ -1315,11 +1403,9 @@ static int app_main() {
 
                 // 1. Try HTTP /screen endpoint (fastest & most accurate)
                 if (!poll_ip.empty()) {
-                    httplib::Client cli(poll_ip, 18294);
-                    cli.set_connection_timeout(0, 500000); // 500ms
-                    cli.set_read_timeout(0, 500000);       // 500ms
-                    if (auto res = cli.Get("/screen")) {
+                    if (auto res = screen_client.Get("/screen")) {
                         if (res->status == 200) {
+                            phone_answered = true;
                             if (res->body.find("\"screenOn\":false") != std::string::npos ||
                                 res->body.find("\"screenOn\": false") != std::string::npos) {
                                 screen_on = false;
@@ -1328,8 +1414,14 @@ static int app_main() {
                     }
                 }
 
-                // 2. ADB shell check fallback (broader pattern matching)
-                if (screen_on && !device_id.empty()) {
+                // 2. ADB shell check as a safety net.
+                // Ugg! Old cave man threw a whole adb spear TWICE every heartbeat,
+                // even when the phone had already answered. Starting a process 2x
+                // per second eats fire on both sides for nothing. Now it only runs
+                // every ~2s when the phone stays silent, ~5s as a cross-check.
+                const int adb_check_interval = phone_answered ? 10 : 4;
+                if (screen_on && !device_id.empty() && ++adb_poll_counter >= adb_check_interval) {
+                    adb_poll_counter = 0;
                     // Cave man ask PowerManager instead. dumpsys display gives history log of past OFF events!
                     std::string power_state = poll_adb.execute_shell_command(
                         device_id, "dumpsys power | grep -iE 'mInteractive|mIsInteractive'");
@@ -1397,7 +1489,8 @@ static int app_main() {
 
             SetupState setup_state = load_setup_state();
             if (!setup_state.configured) {
-                if (run_first_time_setup(adb, *window, scrcpy, renderer, input, should_stop, &saved_brightness)) {
+                if (run_first_time_setup(adb, *window, scrcpy, renderer, input, should_stop,
+                                         &saved_brightness, background_tasks)) {
                     auto new_state = load_setup_state();
                     if (new_state.configured && !new_state.device_ip.empty()) {
                         start_heartbeat(new_state.device_ip);
@@ -1442,7 +1535,8 @@ static int app_main() {
                 return unlock_device_if_needed(tcp_id, w);
             });
 
-            bool stream_ok = start_stream(*window, scrcpy, renderer, input, tcp_device->id, &saved_brightness);
+            bool stream_ok = start_stream(*window, scrcpy, renderer, input, tcp_device->id,
+                                          &saved_brightness, background_tasks);
             bool unlock_ok = unlock_future.get();
 
             if (!unlock_ok) {
@@ -1494,10 +1588,17 @@ static int app_main() {
     if (connection_thread.joinable()) connection_thread.join();
     if (screen_poll_thread.joinable()) screen_poll_thread.join();
     if (heartbeat_thread.joinable()) heartbeat_thread.join();
+    // Cave man waits for every helper hunter before the cave stones disappear.
+    background_tasks.join_all();
 
     if (tray) tray->hide();
 
 #ifdef _WIN32
+    // Ugg! Window still holds GDI+ letter-stones. It must die BEFORE GDI+ closes,
+    // otherwise it hands back stones to a workshop that no longer exists.
+    renderer.shutdown();
+    tray.reset();
+    window.reset();
     Gdiplus::GdiplusShutdown(gdiplusToken);
     CloseHandle(mutex);
 #endif

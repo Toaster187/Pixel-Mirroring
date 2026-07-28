@@ -32,7 +32,8 @@ enum class MenuAction {
     TOGGLE_LOWEST_BRIGHTNESS,
     TAKE_SCREENSHOT,
     TOGGLE_RECORDING,
-    TOGGLE_SEND_CAPTURES_TO_PHONE
+    TOGGLE_SEND_CAPTURES_TO_PHONE,
+    TOGGLE_AUDIO
 };
 
 class IWindow {
@@ -104,6 +105,7 @@ public:
     virtual void set_compatibility_mode(bool enabled) = 0;
     virtual void set_lowest_brightness(bool enabled) = 0;
     virtual void set_capture_send_to_phone(bool enabled) = 0;
+    virtual void set_audio_enabled(bool enabled) = 0;
     virtual void set_recording(bool recording) = 0;
     virtual void trigger_screenshot_flash() = 0;
 

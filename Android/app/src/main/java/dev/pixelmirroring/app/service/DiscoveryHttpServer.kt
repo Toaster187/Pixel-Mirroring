@@ -3,6 +3,7 @@ package dev.pixelmirroring.app.service
 import android.util.Log
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
+import java.io.ByteArrayOutputStream
 import java.io.Closeable
 import java.io.InputStream
 import java.net.InetAddress
@@ -28,6 +29,8 @@ class DiscoveryHttpServer(
         private const val SOCKET_TIMEOUT_MS = 5000
         private const val MAX_HEADER_BYTES = 16 * 1024
         private const val MAX_BODY_BYTES = 64 * 1024
+        private const val CR = '\r'.code
+        private const val LF = '\n'.code
     }
 
     private var serverSocket: ServerSocket? = null
@@ -110,22 +113,31 @@ class DiscoveryHttpServer(
     }
 
     private fun parseRequest(input: InputStream): HttpRequest? {
-        val headerBytes = ByteArrayOutput()
-        val marker = byteArrayOf('\r'.code.toByte(), '\n'.code.toByte(), '\r'.code.toByte(), '\n'.code.toByte())
+        val headerBytes = ByteArrayOutputStream(512)
 
-        while (headerBytes.size < MAX_HEADER_BYTES) {
+        // Ugg! Old cave man kept every single byte in a box of its own (ArrayList<Byte>
+        // boxes each one) and then compared the WHOLE pile after every byte. Now he
+        // just remembers the last four stones — same result, far less digging. This
+        // path runs on every heartbeat and every network scan, so it must stay cheap.
+        var b1 = -1
+        var b2 = -1
+        var b3 = -1
+        var b4 = -1
+
+        while (headerBytes.size() < MAX_HEADER_BYTES) {
             val next = input.read()
             if (next == -1) {
                 return null
             }
 
             headerBytes.write(next)
-            if (headerBytes.endsWith(marker)) {
+            b1 = b2; b2 = b3; b3 = b4; b4 = next
+            if (b1 == CR && b2 == LF && b3 == CR && b4 == LF) {
                 break
             }
         }
 
-        if (!headerBytes.endsWith(marker)) {
+        if (!(b1 == CR && b2 == LF && b3 == CR && b4 == LF)) {
             return null
         }
 
@@ -204,33 +216,6 @@ class DiscoveryHttpServer(
         else -> "OK"
     }
 
-    private class ByteArrayOutput {
-        private val buffer = ArrayList<Byte>(256)
-
-        val size: Int
-            get() = buffer.size
-
-        fun write(value: Int) {
-            buffer.add(value.toByte())
-        }
-
-        fun toByteArray(): ByteArray = buffer.toByteArray()
-
-        fun endsWith(suffix: ByteArray): Boolean {
-            if (buffer.size < suffix.size) {
-                return false
-            }
-
-            val start = buffer.size - suffix.size
-            for (i in suffix.indices) {
-                if (buffer[start + i] != suffix[i]) {
-                    return false
-                }
-            }
-
-            return true
-        }
-    }
 }
 
 data class HttpRequest(
