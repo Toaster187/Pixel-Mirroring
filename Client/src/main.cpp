@@ -577,7 +577,10 @@ bool start_stream(
     BackgroundTasks& tasks
 );
 
-bool unlock_device_if_needed(const std::string& device_id, pm::window::IWindow* window = nullptr);
+// user_requested = the human pressed Ctrl+U / used the menu. Then we also type when
+// the lock state cannot be read; on automatic connects we stay quiet instead.
+bool unlock_device_if_needed(const std::string& device_id, pm::window::IWindow* window = nullptr,
+                             bool user_requested = false);
 
 std::optional<pm::adb::Device> wait_for_usb_authorization(
     pm::adb::AdbClient& adb,
@@ -708,6 +711,19 @@ bool run_first_time_setup(
         }
     } else {
         // App already on phone, skip APK install.
+        //
+        // Ugg! But it may still remember a DIFFERENT PC. The phone stores exactly one
+        // paired clientId and never forgets it on its own — nothing in the app ever
+        // calls removePairedClient(). So once this PC's client_id.txt changes (the
+        // "Werkseinstellungen" menu deletes it!), the phone answers every /connect
+        // with 403 and the PC is locked out for good, with no way back.
+        //
+        // Running setup over USB means the human is holding the phone, cable in hand.
+        // That is proof enough to start the pairing over: wipe the app's stored state
+        // so the fresh clientId gets adopted on the next /connect. The permission is
+        // re-granted right below, because clearing the data drops it too.
+        window.post_task([&window]() { window.set_status_text("Alte Kopplung wird gelöst..."); });
+        adb.execute_shell_command(usb_device->id, std::string("pm clear ") + ANDROID_PACKAGE);
     }
 
     // Cave man check if permission already granted before yelling at phone.
@@ -879,7 +895,7 @@ bool start_stream(
     if (w <= 0 || h <= 0) {
         window.post_task([&window]() {
             window.set_app_state(pm::window::AppState::SCANNING);
-            window.set_status_text("Stream-Fehler: Ungueltige Video-Dimensionen.");
+            window.set_status_text("Stream-Fehler: Ungültige Video-Dimensionen.");
         });
         scrcpy.stop();
         return false;
@@ -894,32 +910,124 @@ bool start_stream(
     return true;
 }
 
-bool unlock_device_if_needed(const std::string& device_id, pm::window::IWindow* window) {
-    pm::Settings settings = pm::load_settings();
-    if (settings.m_pin.empty()) return true;
-    
-    pm::adb::AdbClient adb;
-    
-    // Cave man check trust state and power mode in ONE shell command
-    std::string status = adb.execute_shell_command(device_id, "dumpsys trust; echo __DIV__; settings get global low_power");
-    size_t div_pos = status.find("__DIV__");
-    std::string trust_state = (div_pos != std::string::npos) ? status.substr(0, div_pos) : status;
-    std::string low_power_state = (div_pos != std::string::npos) ? status.substr(div_pos + 7) : "";
-    
-    size_t current_pos = trust_state.find("(current):");
+// What the phone is doing right now. "known" says whether we could read the lock
+// state at all — if we could not, cave man must NOT start smashing keys blindly.
+struct DeviceLockState {
+    bool screen_on = true;
+    bool locked = false;
+    bool known = false;
+    bool low_power = false;
+};
+
+// Cave man splits the answer at the __DIV__ marks he asked the phone to print.
+std::vector<std::string> split_sections(const std::string& text, const std::string& marker) {
+    std::vector<std::string> parts;
+    size_t start = 0;
+    for (;;) {
+        const size_t hit = text.find(marker, start);
+        if (hit == std::string::npos) {
+            parts.push_back(text.substr(start));
+            break;
+        }
+        parts.push_back(text.substr(start, hit - start));
+        start = hit + marker.size();
+    }
+    return parts;
+}
+
+// Ugg! Reads a flag like "deviceLocked=true" / "deviceLocked=1". Android says it
+// both ways depending on version, and the old code only understood "=0".
+bool read_bool_flag(const std::string& text, const std::string& key, bool* out) {
+    const auto pos = text.find(key);
+    if (pos == std::string::npos) return false;
+
+    size_t i = pos + key.size();
+    while (i < text.size() && (text[i] == ' ' || text[i] == '=')) ++i;
+    if (text.compare(i, 4, "true") == 0 || (i < text.size() && text[i] == '1')) {
+        *out = true;
+        return true;
+    }
+    if (text.compare(i, 5, "false") == 0 || (i < text.size() && text[i] == '0')) {
+        *out = false;
+        return true;
+    }
+    return false;
+}
+
+DeviceLockState read_lock_state(pm::adb::AdbClient& adb, const std::string& device_id) {
+    DeviceLockState state;
+
+    // One round trip for everything, exactly like the old code did. grep runs on the
+    // phone, so barely any output travels back over the wire.
+    const std::string out = adb.execute_shell_command(device_id,
+        "dumpsys power | grep -iE 'mInteractive|mWakefulness'"
+        "; echo __DIV__; dumpsys trust | grep -i '(current)'"
+        "; echo __DIV__; dumpsys window 2>/dev/null | grep -iE 'mShowingLockscreen|keyguardShowing|mDreamingLockscreen'"
+        "; echo __DIV__; settings get global low_power");
+
+    const std::vector<std::string> parts = split_sections(out, "__DIV__");
+    const std::string power  = parts.size() > 0 ? parts[0] : "";
+    const std::string trust  = parts.size() > 1 ? parts[1] : "";
+    const std::string window = parts.size() > 2 ? parts[2] : "";
+
+    if (parts.size() > 3) {
+        std::string low = parts[3];
+        low.erase(0, low.find_first_not_of(" \n\r\t"));
+        low.erase(low.find_last_not_of(" \n\r\t") + 1);
+        state.low_power = (low == "1" || low == "true");
+    }
+
+    // Screen: mInteractive=false or a wakefulness other than Awake means dark.
+    if (power.find("mInteractive=false") != std::string::npos ||
+        power.find("mWakefulness=Asleep") != std::string::npos ||
+        power.find("mWakefulness=Dozing") != std::string::npos) {
+        state.screen_on = false;
+    }
+
+    // Lock: look inside the CURRENT user's block. The old code only searched the
+    // one line holding "(current):", but Android prints deviceLocked on a LATER
+    // line — so it almost never saw "already unlocked" and typed the PIN into
+    // whatever was on screen. That is how a home screen widget got launched.
+    const size_t current_pos = trust.find("(current)");
     if (current_pos != std::string::npos) {
-        size_t line_end = trust_state.find("\n", current_pos);
-        std::string current_user_line = (line_end == std::string::npos)
-            ? trust_state.substr(current_pos)
-            : trust_state.substr(current_pos, line_end - current_pos);
-        if (current_user_line.find("deviceLocked=0") != std::string::npos) {
-            // Cave man see screen already open, do not key smash!
-            return true;
+        const std::string block = trust.substr(current_pos, 400);
+        if (read_bool_flag(block, "deviceLocked", &state.locked)) {
+            state.known = true;
         }
     }
-    
-    low_power_state.erase(low_power_state.find_last_not_of(" \n\r\t") + 1);
-    if (low_power_state == "1" || low_power_state == "true") {
+    if (!state.known && read_bool_flag(trust, "deviceLocked", &state.locked)) {
+        state.known = true;
+    }
+    if (!state.known) {
+        // Every Android version names this differently. Checked against a Pixel 9,
+        // which answers "isKeyguardShowing=true mDreamingLockscreen=true".
+        for (const char* key : {"isKeyguardShowing", "mShowingLockscreen",
+                                "KeyguardShowing", "mDreamingLockscreen"}) {
+            bool showing = false;
+            if (read_bool_flag(window, key, &showing)) {
+                state.locked = showing;
+                state.known = true;
+                break;
+            }
+        }
+    }
+
+    return state;
+}
+
+bool unlock_device_if_needed(const std::string& device_id, pm::window::IWindow* window, bool user_requested) {
+    pm::Settings settings = pm::load_settings();
+    if (settings.m_pin.empty()) return true;
+
+    pm::adb::AdbClient adb;
+
+    DeviceLockState state = read_lock_state(adb, device_id);
+    if (state.known && !state.locked && state.screen_on) {
+        // Cave man see screen already open, do not key smash!
+        return true;
+    }
+
+    if (state.low_power) {
         bool disable_power_saving = false;
         if (window) {
 #ifdef _WIN32
@@ -939,31 +1047,41 @@ bool unlock_device_if_needed(const std::string& device_id, pm::window::IWindow* 
         }
     }
     
-    // Cave man check compatibility mode for older devices
-    if (settings.m_compatibility_mode) {
-        // Compatibility mode with delays for older/slower devices
-        adb.execute_shell_command(device_id, "input keyevent 224");
-        std::this_thread::sleep_for(std::chrono::milliseconds(400));
-        adb.execute_shell_command(device_id, "input keyevent 66");
-        std::this_thread::sleep_for(std::chrono::milliseconds(800));
-        std::string pin_cmd = "input keyevent";
-        for (char c : settings.m_pin) {
-            pin_cmd += " " + std::to_string(7 + (c - '0'));
-        }
-        pin_cmd += " 66";
-        adb.execute_shell_command(device_id, pin_cmd);
-        // Cave man wait full 1 second unlock animation for old slow phone in compatibility mode
-        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-    } else {
-        // Fast path: batch wake, dismiss fingerprint/show PIN, and PIN keycodes in one single ADB command!
-        std::string cmd = "input keyevent 224 66";
-        for (char c : settings.m_pin) {
-            cmd += " " + std::to_string(7 + (c - '0'));
-        }
-        cmd += " 66";
-        adb.execute_shell_command(device_id, cmd);
+    // Cave man refuses to type into a phone he cannot prove is locked. Without this
+    // guard the keys land on the home screen and open whatever widget has focus —
+    // that is how the weather app kept popping up. An explicit Ctrl+U is different:
+    // there the human asked for it, so we type even when the state is unreadable.
+    if (!state.known && !user_requested) {
+        return true;
     }
-    
+
+    // ONE adb call, exactly like before — the waits happen ON THE PHONE, so this
+    // costs a single round trip and stays as fast as it always was.
+    //
+    // 224 = WAKEUP, 66 = ENTER brings up the PIN pad, digits, 66 = submit.
+    // Do NOT replace the ENTER with "wm dismiss-keyguard": on a Pixel that opens the
+    // FINGERPRINT prompt instead of the PIN pad, the digits then go nowhere, and the
+    // unlock hangs on the sensor. Verified on a Pixel 9.
+    //
+    // The only real change against the old line: the two short sleeps. Previously
+    // everything was fired in one breath ("input keyevent 224 66 <digits> 66"), so on
+    // a sleeping phone the digits arrived before the PIN pad existed and were dropped
+    // — that was the "PIN falsch" on automatic connect, while a later Ctrl+U worked
+    // simply because the phone was already awake by then.
+    const bool slow = settings.m_compatibility_mode;
+
+    std::string digits;
+    for (char c : settings.m_pin) {
+        digits += " " + std::to_string(7 + (c - '0')); // KEYCODE_0 is 7
+    }
+
+    const std::string wake_delay = slow ? "0.6" : "0.3";
+    const std::string pad_delay = slow ? "1.0" : "0.45";
+    adb.execute_shell_command(device_id,
+        "input keyevent 224; sleep " + wake_delay +
+        "; input keyevent 66; sleep " + pad_delay +
+        "; input keyevent" + digits + " 66");
+
     return true;
 }
 
@@ -1220,8 +1338,9 @@ static int app_main() {
                     window->set_status_text("PIN nicht eingerichtet.");
                     break;
                 }
+                // Explicit human command — type even if the lock state is unreadable.
                 run_on_device([w = window.get()](const std::string& id) {
-                    unlock_device_if_needed(id, w);
+                    unlock_device_if_needed(id, w, true);
                 });
                 break;
             }
@@ -1509,17 +1628,35 @@ static int app_main() {
                 should_stop
             );
             if (!tcp_device || should_stop) {
-                window->post_task([w = window.get(), automatic]() {
-                    w->set_app_state(pm::window::AppState::SETUP);
-                    w->set_status_text(automatic
-                        ? "Geraet nicht erreichbar. Verbinden fuer erneuten Versuch."
-                        : "Neueinrichtung per USB beim naechsten Verbinden.");
-                });
-                if (!automatic) {
-                    // Cave man give up on wireless cave path. Clear setup stone
-                    // so next button press goes full USB setup with app install.
-                    clear_setup_state();
+                // Ugg! Old cave man SMASHED the pairing stone whenever a single manual
+                // attempt failed. A sleeping phone, a WLAN hiccup or a companion app
+                // that was not running was enough to throw the whole setup away — and
+                // the next press then demanded a full USB re-setup. Never again: the
+                // pairing survives a failed attempt.
+                //
+                // If a cable happens to be plugged in, redo the setup right away,
+                // because that is what the human wanted anyway. Otherwise keep
+                // everything and say what actually helps.
+                if (!automatic && !should_stop && find_usb_device(adb.get_devices(), "device")) {
+                    window->post_task([w = window.get()]() {
+                        w->set_status_text("Nicht über WLAN erreichbar — richte per USB neu ein...");
+                    });
+                    if (run_first_time_setup(adb, *window, scrcpy, renderer, input, should_stop,
+                                             &saved_brightness, background_tasks)) {
+                        auto new_state = load_setup_state();
+                        if (new_state.configured && !new_state.device_ip.empty()) {
+                            start_heartbeat(new_state.device_ip);
+                            start_screen_poll(new_state.device_ip, new_state.device_ip + ":5555");
+                        }
+                    }
+                    return;
                 }
+
+                window->post_task([w = window.get()]() {
+                    w->set_app_state(pm::window::AppState::SETUP);
+                    w->set_status_text("Gerät nicht erreichbar. Bitte die Pixel-Mirroring-App "
+                                       "am Handy öffnen, oder für eine Neueinrichtung per USB verbinden.");
+                });
                 return;
             }
 
