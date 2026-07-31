@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -10,6 +11,11 @@
 namespace pm::adb {
 
 std::string get_executable_dir();
+
+// Cave man wraps a name in single stones so the phone shell does not chew on spaces,
+// and a stone inside the name cannot break out and become a command of its own.
+// Every path that came from a human — dropped files above all — goes through here.
+std::string shell_quote(const std::string& text);
 
 /**
  * A long-running "adb shell" child process that can be killed again.
@@ -87,6 +93,10 @@ public:
     // never other users, never private space. Ugg! Other caves are not our cave.
     bool install_app(const std::string& device_id, const std::string& apk_path);
 
+    // Cave man tells phone to unpack an APK that already lies on it. That way a
+    // dropped APK travels ONCE — paced — instead of a second time at full speed.
+    bool install_pushed_app(const std::string& device_id, const std::string& remote_apk_path);
+
     // What went wrong last time install_app said no? Raw adb words for human eyes.
     const std::string& last_install_error() const { return m_last_install_error; }
 
@@ -105,6 +115,15 @@ public:
 
     // Pushes a file to the device
     bool push_file(const std::string& device_id, const std::string& local_path, const std::string& remote_path);
+
+    // Same rock, but carried in small pieces. Between pieces cave man rests as long as
+    // the throw took, so the picture-river keeps most of the air. on_progress(sent, total)
+    // is shouted from the calling thread after every piece. cancel may be nothing;
+    // when it turns true the carrying stops and the half rock is swept off the phone.
+    bool push_file_paced(const std::string& device_id, const std::string& local_path,
+                         const std::string& remote_path,
+                         const std::function<void(uint64_t, uint64_t)>& on_progress = {},
+                         const std::atomic<bool>* cancel = nullptr);
 
     // Setup port forwarding/reversing
     bool forward_port(const std::string& device_id, const std::string& local, const std::string& remote);

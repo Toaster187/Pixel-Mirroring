@@ -229,9 +229,39 @@ jedem Textfeld korrekt dargestellt werden. Damit das dauerhaft haelt, gilt:
 - **Aufnahmen bevorzugen den Hardware-Encoder** (`h264_mf`, sonst NVENC/QSV/AMF), mit
   automatischem Rueckfall auf `libx264` und passendem Pixelformat.
 - **Tastenkuerzel:** Navigation liegt auf **Alt** (`Alt+B` zurueck, `Alt+H` Start,
-  `Alt+S` Uebersicht), weil Strg+C/V die Zwischenablage und Strg+U/L Sperren/Entsperren
-  belegen. Alt-Tasten kommen als `WM_SYSKEYDOWN`/`WM_SYSKEYUP`; nur B/H/S werden
-  abgefangen, damit `Alt+F4` weiter bei `DefWindowProc` ankommt.
+  `Alt+S` Uebersicht, `Alt+N` Benachrichtigungen, `Alt+Q` Schnelleinstellungen,
+  `Alt+Umschalt+N/Q` schliesst wieder), weil Strg+C/V die Zwischenablage und Strg+U/L
+  Sperren/Entsperren belegen. Alt-Tasten kommen als `WM_SYSKEYDOWN`/`WM_SYSKEYUP`; nur
+  B/H/S/N/Q werden abgefangen, damit `Alt+F4` weiter bei `DefWindowProc` ankommt.
+  B/H/S sind Android-Keycodes und laufen ueber `set_key_callback`; N/Q sind
+  scrcpy-Control-Messages 5/6/7 und laufen deshalb ueber den `MenuAction`-Weg,
+  genau wie Strg+U/L.
+- **Display komplett aus ist Opt-in und muss IMMER rueckgaengig gemacht werden:**
+  `Settings::m_screen_off` (Standard aus) schickt Control-Message 10
+  `SET_SCREEN_POWER_MODE(OFF)`, sobald der Stream steht - die ehrliche Version von
+  `m_lowest_brightness`, das nur per ADB dimmt. Das Handy bleibt wach und steuerbar,
+  nur das Panel ist dunkel; `PowerManager.isInteractive` bleibt deshalb true und der
+  Screen-Poll-Waechter schlaegt nicht faelschlich an. Zurueckgestellt wird auf drei
+  Wegen, keiner davon ist ueberfluessig: (1) `ScrcpyClient::stop()` schickt `NORMAL`
+  *bevor* die Sockets abgebaut werden, (2) der scrcpy-Server haelt auf dem Handy einen
+  eigenen CleanUp-Prozess, der auch beim Serverabsturz greift, (3) ist
+  `screen_forced_off()` beim Beenden noch true, schickt `main.cpp` per ADB
+  `input keyevent 223; sleep 0.5; input keyevent 224`. Der Schlaf-Weck-Doppelschlag in
+  (3) ist noetig: ein blosses Wecken tut nichts, weil Android einen Display-Power-Mode
+  nur dann neu setzt, wenn sich sein *eigener* Bildschirmzustand aendert - und der ist
+  aus seiner Sicht schon an. `screen_forced_off_` wird in `start()` absichtlich **nicht**
+  zurueckgesetzt: ein Panel, das eine Sitzung mit totem Socket dunkel gelassen hat, muss
+  von der naechsten noch repariert werden koennen.
+- **Dateiuebertragung ist absichtlich langsam:** ins Fenster gezogene Dateien gehen
+  ueber `AdbClient::push_file_paced` in 1-MiB-Stuecken raus, und nach jedem Stueck wartet
+  der Transfer genau so lange, wie das Stueck gedauert hat. Damit gehoert dem Stream
+  mindestens die Haelfte der Funkzeit, unabhaengig davon, wie schnell das WLAN heute ist.
+  Nicht auf ein einzelnes `adb push` "optimieren" - dann ruckelt das Bild waehrend der
+  Uebertragung. Die Stuecke wachsen unter `<ziel>.pmpart` und bekommen erst per `mv` den
+  echten Namen, damit eine abgebrochene Uebertragung keine vorhandene Datei zerstoert.
+  Eine abgelegte APK, die installiert werden soll, wandert nach `/data/local/tmp` und
+  wird von dort per `pm install` entpackt - `adb install` wuerde sie ein zweites Mal
+  ungebremst uebertragen, und der Paketinstallierer kommt nicht an `/sdcard` heran.
 - **Hardware-Dekodierung fehlt mit Absicht:** `d3d11va`/`dxva2` sind vorhanden, aber
   SDL2 kann keine fremde D3D11-Textur uebernehmen. Die noetige GPU->CPU-Rueckkopie
   waere vermutlich langsamer als die jetzige Software-Dekodierung. Erst messen.

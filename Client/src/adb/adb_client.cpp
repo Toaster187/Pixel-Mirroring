@@ -93,6 +93,19 @@ std::string ipv4_after(const std::string& text, const std::string& marker) {
 
 } // namespace
 
+std::string shell_quote(const std::string& text) {
+    std::string quoted = "'";
+    for (char c : text) {
+        if (c == '\'') {
+            quoted += "'\\''";
+        } else {
+            quoted += c;
+        }
+    }
+    quoted += "'";
+    return quoted;
+}
+
 std::string get_executable_dir() {
 #ifdef _WIN32
     char path[MAX_PATH];
@@ -561,6 +574,32 @@ bool AdbClient::install_app(const std::string& device_id, const std::string& apk
     return false;
 }
 
+bool AdbClient::install_pushed_app(const std::string& device_id, const std::string& remote_apk_path) {
+    m_last_install_error.clear();
+
+    // Same rule as install_app: ONLY the cave whose human sits at the fire right now.
+    const std::string user = get_current_user(device_id);
+
+    std::string command = "pm install";
+    if (!user.empty()) {
+        command += " --user " + user;
+    } else {
+        log_adb_event("[ADB] Could not read current user, installing pushed APK without --user");
+    }
+    command += " -g -t -r -d " + shell_quote(remote_apk_path);
+
+    const std::string output = execute_shell_command(device_id, command);
+    if (output.find("Success") != std::string::npos) {
+        log_adb_event("[ADB] Pushed app installed for user " + (user.empty() ? std::string("<default>") : user));
+        return true;
+    }
+
+    m_last_install_error = trim(output);
+    log_adb_event("[ADB] Pushed app install failed (user " +
+        (user.empty() ? std::string("<default>") : user) + "): " + output);
+    return false;
+}
+
 std::string AdbClient::get_current_user(const std::string& device_id) {
     std::string output = trim(execute_shell_command(device_id, "am get-current-user"));
 
@@ -631,6 +670,124 @@ bool AdbClient::push_file(const std::string& device_id, const std::string& local
         return false;
     }
     return true;
+}
+
+bool AdbClient::push_file_paced(const std::string& device_id, const std::string& local_path,
+                               const std::string& remote_path,
+                               const std::function<void(uint64_t, uint64_t)>& on_progress,
+                               const std::atomic<bool>* cancel) {
+    // One piece per throw. Big enough that starting the adb helper does not eat the
+    // whole trip, small enough that the stream only ever loses the air for a blink.
+    constexpr uint64_t CHUNK_BYTES = 1024 * 1024;
+
+    std::error_code ec;
+    const uint64_t total = static_cast<uint64_t>(std::filesystem::file_size(local_path, ec));
+    if (ec) {
+        log_adb_event("[ADB] Cannot measure file for paced push: " + local_path);
+        return false;
+    }
+
+    // Small rock fits in one hand. No point in slicing it.
+    if (total <= CHUNK_BYTES) {
+        const bool ok = push_file(device_id, local_path, remote_path);
+        if (ok && on_progress) on_progress(total, total);
+        return ok;
+    }
+
+    std::ifstream input(local_path, std::ios::binary);
+    if (!input) {
+        log_adb_event("[ADB] Cannot open file for paced push: " + local_path);
+        return false;
+    }
+
+    const std::filesystem::path chunk_path = std::filesystem::temp_directory_path(ec) /
+        ("pixelmirroring-push-" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()) + ".part");
+    // The rock grows under a side name and only takes the real one once it is whole.
+    const std::string remote_part = remote_path + ".pmpart";
+    const std::string remote_glue = remote_path + ".pmglue";
+
+    std::vector<char> buffer(static_cast<size_t>(CHUNK_BYTES));
+    uint64_t sent = 0;
+    bool ok = true;
+
+    while (sent < total) {
+        if (cancel && cancel->load()) {
+            ok = false;
+            break;
+        }
+
+        input.read(buffer.data(), static_cast<std::streamsize>(CHUNK_BYTES));
+        const uint64_t piece = static_cast<uint64_t>(input.gcount());
+        if (piece == 0) {
+            log_adb_event("[ADB] Paced push ran dry before the end: " + local_path);
+            ok = false;
+            break;
+        }
+
+        {
+            std::ofstream chunk(chunk_path, std::ios::binary | std::ios::trunc);
+            if (!chunk.write(buffer.data(), static_cast<std::streamsize>(piece))) {
+                log_adb_event("[ADB] Cannot write push chunk: " + chunk_path.string());
+                ok = false;
+                break;
+            }
+        }
+
+        const auto throw_start = std::chrono::steady_clock::now();
+
+        // Every piece grows a side-rock, never the real name. An older rock of the same
+        // name stays whole until the very last moment — a broken trip must not eat it.
+        const bool first_piece = (sent == 0);
+        if (!push_file(device_id, chunk_path.string(), first_piece ? remote_part : remote_glue)) {
+            ok = false;
+            break;
+        }
+        if (!first_piece) {
+            // Ugg! Silence is a bad sign to trust — some phones mutter warnings even
+            // when all went well. Cave man asks for a word he can actually look for.
+            const std::string answer = execute_shell_command(device_id,
+                "cat " + shell_quote(remote_glue) + " >> " + shell_quote(remote_part) +
+                " && rm -f " + shell_quote(remote_glue) + " && echo PM_PIECE_OK");
+            if (answer.find("PM_PIECE_OK") == std::string::npos) {
+                log_adb_event("[ADB] Paced push could not glue piece on: " + answer);
+                ok = false;
+                break;
+            }
+        }
+
+        sent += piece;
+        if (on_progress) on_progress(sent, total);
+        if (sent >= total) break;
+
+        // Ugg! Picture-river first. Cave man rests as long as the throw took, so no
+        // matter how fast or slow the air is today, at most half of it is ours.
+        auto rest = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - throw_start);
+        rest = std::clamp(rest, std::chrono::milliseconds(20), std::chrono::milliseconds(2000));
+        std::this_thread::sleep_for(rest);
+    }
+
+    input.close();
+    std::filesystem::remove(chunk_path, ec);
+
+    // Whole at last — now it may take the real name. Only here does an older rock of
+    // the same name give way.
+    if (ok) {
+        const std::string answer = execute_shell_command(device_id,
+            "mv -f " + shell_quote(remote_part) + " " + shell_quote(remote_path) + " && echo PM_MOVE_OK");
+        if (answer.find("PM_MOVE_OK") == std::string::npos) {
+            log_adb_event("[ADB] Paced push could not give the rock its name: " + answer);
+            ok = false;
+        }
+    }
+
+    // Half a rock on the phone helps nobody — and would grow further on the next try.
+    if (!ok) {
+        execute_shell_command(device_id,
+            "rm -f " + shell_quote(remote_part) + " " + shell_quote(remote_glue));
+    }
+    return ok;
 }
 
 bool AdbClient::forward_port(const std::string& device_id, const std::string& local, const std::string& remote) {

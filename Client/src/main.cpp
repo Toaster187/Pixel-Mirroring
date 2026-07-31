@@ -41,6 +41,28 @@ constexpr const char* ANDROID_PACKAGE = "dev.pixelmirroring.app";
 constexpr const char* ANDROID_SERVICE = "dev.pixelmirroring.app/.service.MirroringService";
 constexpr int ADB_TCP_PORT = 5555;
 constexpr int HEARTBEAT_INTERVAL_MS = 5000;
+// Where dropped rocks land on the phone. Every file cave on Android knows this one.
+constexpr const char* DROP_TARGET_DIR = "/sdcard/Download";
+
+// Cave man turns UTF-8 rock-name into the name shape this cave's tools speak.
+std::filesystem::path path_from_utf8(const std::string& utf8) {
+#ifdef _WIN32
+    const int len = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), static_cast<int>(utf8.size()), nullptr, 0);
+    if (len <= 0) return std::filesystem::path(utf8);
+    std::wstring wide(len, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), static_cast<int>(utf8.size()), &wide[0], len);
+    return std::filesystem::path(wide);
+#else
+    return std::filesystem::path(utf8);
+#endif
+}
+
+bool has_extension(const std::filesystem::path& file, const char* wanted) {
+    std::string ext = file.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return ext == wanted;
+}
 
 #ifdef _WIN32
 int GetEncoderClsid(const WCHAR* format, CLSID* pClsid) {
@@ -850,8 +872,10 @@ bool start_stream(
 
     // MEOW. WELD SETTINGS TO CONFIG.
     pm::Settings settings = pm::load_settings();
-    config.max_fps = settings.max_fps;
-    config.max_size = settings.max_size;
+    const pm::QualitySpec quality = pm::quality_spec(settings.m_quality);
+    config.max_fps = quality.max_fps;
+    config.max_size = quality.max_size;
+    config.video_bit_rate = quality.video_bit_rate;
     config.lowest_brightness = settings.m_lowest_brightness;
     config.audio = settings.m_audio_enabled;
 
@@ -902,6 +926,16 @@ bool start_stream(
     }
 
     input.set_device_size(w, h);
+
+    // The control socket only exists once the stream is up, so the phone's light is
+    // dealt with here and not next to the brightness dance above. The "else" is not
+    // dead weight: it catches a session whose light-back-on word never arrived.
+    if (settings.m_screen_off) {
+        scrcpy.inject_screen_power_mode(false);
+    } else if (scrcpy.screen_forced_off()) {
+        scrcpy.inject_screen_power_mode(true);
+    }
+
     window.post_task([&window, w, h]() {
         window.set_aspect_ratio((double)w / (double)h);
         window.set_orientation(w > h);
@@ -1128,10 +1162,10 @@ static int app_main() {
 
     // MEOW. INITIAL LOAD SETTINGS AND SYNCHRONIZE CHECKBOXES.
     pm::Settings initial_settings = pm::load_settings();
-    window->set_fps_limited(initial_settings.max_fps == 30);
-    window->set_resolution_limited(initial_settings.max_size == 720);
+    window->set_quality_preset(static_cast<int>(initial_settings.m_quality));
     window->set_compatibility_mode(initial_settings.m_compatibility_mode);
     window->set_lowest_brightness(initial_settings.m_lowest_brightness);
+    window->set_screen_off(initial_settings.m_screen_off);
     window->set_capture_send_to_phone(initial_settings.m_send_captures_to_phone);
     window->set_audio_enabled(initial_settings.m_audio_enabled);
 
@@ -1190,6 +1224,156 @@ static int app_main() {
         });
     };
 
+    // Ugg! Human drags a rock from the PC cave onto the window. Rock flies to phone.
+    // One carrier at a time — two of them would fight over the phone's air.
+    std::atomic<bool> transfer_busy{false};
+    window->set_file_drop_callback([&](const std::vector<std::string>& dropped) {
+        // While the picture is live nobody can read the status line, so a refusal has
+        // to come back as a bubble too.
+        auto refuse = [&](const char* bubble, const char* status) {
+            window->set_status_text(status);
+            window->set_transfer_status(pm::window::TransferState::FAILED, 1.0f, bubble);
+        };
+
+        const std::string device_id = scrcpy.is_running() ? scrcpy.get_device_id() : std::string();
+        if (device_id.empty()) {
+            refuse("Keine Verbindung", "Dateiübertragung braucht eine aktive Verbindung.");
+            return;
+        }
+
+        // Bubble already tells the story of the running trip — do not paint over it.
+        if (transfer_busy.load()) {
+            window->set_status_text("Es läuft bereits eine Dateiübertragung.");
+            return;
+        }
+
+        std::vector<std::filesystem::path> files;
+        for (const auto& raw : dropped) {
+            const std::filesystem::path file = path_from_utf8(raw);
+            std::error_code ec;
+            // Whole caves (folders) need a different kind of carrying — not this trip.
+            if (std::filesystem::is_regular_file(file, ec)) files.push_back(file);
+        }
+        if (files.empty()) {
+            refuse("Nur Dateien", "Nur einzelne Dateien lassen sich übertragen, keine Ordner.");
+            return;
+        }
+
+        // An APK can become an app on the phone — but only if the human says so.
+        const auto apk_count = static_cast<size_t>(std::count_if(files.begin(), files.end(),
+            [](const std::filesystem::path& file) { return has_extension(file, ".apk"); }));
+        bool install_apks = false;
+        if (apk_count > 0) {
+#ifdef _WIN32
+            std::wstring question = (apk_count == 1)
+                ? L"Die abgelegte Datei ist eine Android-App (APK)."
+                : L"Die abgelegten Dateien enthalten " + std::to_wstring(apk_count) + L" Android-Apps (APK).";
+            question += L"\n\nJa\t\tauf dem Handy installieren"
+                        L"\nNein\t\tnur nach /sdcard/Download kopieren"
+                        L"\nAbbrechen\tnichts übertragen";
+            const int answer = MessageBoxW((HWND)window->get_native_handle(), question.c_str(),
+                L"APK abgelegt", MB_YESNOCANCEL | MB_ICONQUESTION);
+            if (answer == IDCANCEL) return;
+            install_apks = (answer == IDYES);
+#endif
+        }
+
+        const std::string drop_label = files.size() == 1
+            ? files.front().filename().string()
+            : (std::to_string(files.size()) + " Dateien");
+        transfer_busy.store(true);
+        window->set_transfer_status(pm::window::TransferState::ACTIVE, 0.0f, drop_label);
+
+        background_tasks.run([&transfer_busy, &should_stop, &scrcpy, w = window.get(),
+                              device_id, files, install_apks, drop_label]() {
+            pm::adb::AdbClient adb;
+            adb.execute_shell_command(device_id, std::string("mkdir -p ") + DROP_TARGET_DIR);
+
+            size_t carried = 0;
+            std::string clipboard_path;
+            std::string failure;
+
+            for (size_t i = 0; i < files.size() && !should_stop; ++i) {
+                const std::filesystem::path& file = files[i];
+                const std::string name = file.filename().string();
+                const bool as_app = install_apks && has_extension(file, ".apk");
+                // An APK the human wants installed rests in the shell's own corner —
+                // the package unpacker cannot read out of /sdcard on modern phones.
+                const std::string remote_path = as_app
+                    ? ("/data/local/tmp/" + name)
+                    : (std::string(DROP_TARGET_DIR) + "/" + name);
+                // With several rocks the bubble counts trips, with one it shows the name.
+                const std::string label = files.size() == 1
+                    ? name
+                    : (std::to_string(i + 1) + "/" + std::to_string(files.size()) + " " + name);
+
+                const float base = static_cast<float>(i) / static_cast<float>(files.size());
+                const float span = 1.0f / static_cast<float>(files.size());
+                int last_percent = -1;
+                const bool sent = adb.push_file_paced(device_id, file.string(), remote_path,
+                    [&](uint64_t done, uint64_t total) {
+                        if (total == 0) return;
+                        const int percent = static_cast<int>(done * 100 / total);
+                        if (percent == last_percent) return;
+                        last_percent = percent;
+                        w->set_transfer_status(pm::window::TransferState::ACTIVE,
+                            base + span * (static_cast<float>(percent) / 100.0f), label);
+                    },
+                    &should_stop);
+
+                if (!sent) {
+                    failure = should_stop ? "Übertragung abgebrochen." : ("Fehlgeschlagen: " + name);
+                    break;
+                }
+
+                if (as_app) {
+                    // Rock already lies on the phone — let the phone unpack it from there
+                    // and sweep the leftovers away either way.
+                    const bool installed = adb.install_pushed_app(device_id, remote_path);
+                    adb.execute_shell_command(device_id,
+                        "rm -f " + pm::adb::shell_quote(remote_path));
+                    if (!installed) {
+                        failure = "Installation fehlgeschlagen: " + adb.last_install_error();
+                        break;
+                    }
+                } else {
+                    // Poke the companion app so the file cave shows the rock right away.
+                    adb.execute_shell_command(device_id,
+                        "am broadcast -a dev.pixelmirroring.app.SCAN_FILE -e path " +
+                        pm::adb::shell_quote(remote_path));
+                    clipboard_path = remote_path;
+                }
+                ++carried;
+            }
+
+            if (should_stop) {
+                transfer_busy.store(false);
+                return;
+            }
+
+            // Ugg! Put the last rock's place in the phone's memory-stone, so the human
+            // can paste it straight into whatever app wants the file.
+            if (!clipboard_path.empty()) {
+                scrcpy.inject_set_clipboard(clipboard_path);
+            }
+
+            const bool all_good = failure.empty() && carried == files.size();
+            w->set_transfer_status(
+                all_good ? pm::window::TransferState::DONE : pm::window::TransferState::FAILED,
+                1.0f, all_good ? drop_label : failure);
+            w->post_task([w, all_good, failure, carried]() {
+                w->set_status_text(all_good
+                    ? (std::to_string(carried) + " Datei(en) ans Handy übertragen.")
+                    : failure);
+            });
+            transfer_busy.store(false);
+        });
+    });
+
+    // MEOW. NEW QUALITY STONE MUST BITE RIGHT NOW. FILLED IN FURTHER DOWN, WHERE
+    // THE HEARTBEAT LIVES — THE MENU ONLY NEEDS TO KNOW IT EXISTS.
+    std::function<void()> apply_quality_now;
+
     // MEOW. WIRE CONTEXT MENU CALLBACK.
     window->set_menu_callback([&](pm::window::MenuAction action) {
         pm::Settings current_settings = pm::load_settings();
@@ -1204,16 +1388,18 @@ static int app_main() {
                 });
                 break;
             }
-            case pm::window::MenuAction::TOGGLE_FPS_LIMIT: {
-                current_settings.max_fps = (current_settings.max_fps == 30) ? 60 : 30;
+            case pm::window::MenuAction::SET_QUALITY_BATTERY:
+            case pm::window::MenuAction::SET_QUALITY_BALANCED:
+            case pm::window::MenuAction::SET_QUALITY_MAXIMUM: {
+                const pm::QualityPreset preset =
+                    (action == pm::window::MenuAction::SET_QUALITY_BATTERY) ? pm::QualityPreset::BATTERY :
+                    (action == pm::window::MenuAction::SET_QUALITY_MAXIMUM) ? pm::QualityPreset::MAXIMUM :
+                                                                             pm::QualityPreset::BALANCED;
+                if (preset == current_settings.m_quality) break;
+                current_settings.m_quality = preset;
                 pm::save_settings(current_settings);
-                window->set_fps_limited(current_settings.max_fps == 30);
-                break;
-            }
-            case pm::window::MenuAction::TOGGLE_RESOLUTION_LIMIT: {
-                current_settings.max_size = (current_settings.max_size == 720) ? 0 : 720;
-                pm::save_settings(current_settings);
-                window->set_resolution_limited(current_settings.max_size == 720);
+                window->set_quality_preset(static_cast<int>(preset));
+                if (apply_quality_now) apply_quality_now();
                 break;
             }
             case pm::window::MenuAction::TOGGLE_COMPATIBILITY_MODE: {
@@ -1228,6 +1414,29 @@ static int app_main() {
                 window->set_lowest_brightness(current_settings.m_lowest_brightness);
                 break;
             }
+            case pm::window::MenuAction::TOGGLE_SCREEN_OFF: {
+                current_settings.m_screen_off = !current_settings.m_screen_off;
+                pm::save_settings(current_settings);
+                window->set_screen_off(current_settings.m_screen_off);
+                // Unlike every other switch here this one bites immediately — a human
+                // who unticks it wants the phone's light back NOW, not next session.
+                if (scrcpy.is_running()) {
+                    scrcpy.inject_screen_power_mode(!current_settings.m_screen_off);
+                }
+                window->set_status_text(current_settings.m_screen_off
+                    ? "Handy-Display wird während der Spiegelung ausgeschaltet."
+                    : "Handy-Display bleibt an.");
+                break;
+            }
+            case pm::window::MenuAction::EXPAND_NOTIFICATION_PANEL:
+                scrcpy.inject_expand_notification_panel();
+                break;
+            case pm::window::MenuAction::EXPAND_SETTINGS_PANEL:
+                scrcpy.inject_expand_settings_panel();
+                break;
+            case pm::window::MenuAction::COLLAPSE_PANELS:
+                scrcpy.inject_collapse_panels();
+                break;
             case pm::window::MenuAction::TAKE_SCREENSHOT: {
                 if (!scrcpy.is_running()) {
                     window->set_status_text("Bildschirmfoto nur bei aktivem Stream möglich.");
@@ -1485,6 +1694,38 @@ static int app_main() {
         });
     };
 
+    // MEOW. QUALITY STONE SWAPPED. SCRCPY ONLY READS ITS NUMBERS WHEN IT IS BORN,
+    // SO THE STREAM MUST DIE AND COME BACK. HEARTBEAT DIES WITH IT — WAKE IT AGAIN.
+    std::atomic<bool> quality_restart_running{false};
+    apply_quality_now = [&]() {
+        // Nothing streaming: the next connect picks the new stone up by itself.
+        if (!scrcpy.is_running()) return;
+        if (renderer.is_recording()) {
+            // Tearing the stream out mid-recording would leave a broken file behind.
+            window->post_task([w = window.get()]() {
+                w->set_status_text("Qualität wirkt nach dem Ende der Aufnahme.");
+            });
+            return;
+        }
+        const std::string device_id = scrcpy.get_device_id();
+        if (device_id.empty()) return;
+        if (quality_restart_running.exchange(true)) return;
+
+        background_tasks.run([&, device_id]() {
+            ScopeExit mark_done([&]() { quality_restart_running = false; });
+            window->post_task([w = window.get()]() {
+                w->set_app_state(pm::window::AppState::CONNECTED);
+                w->set_status_text("Qualität wird umgestellt...");
+            });
+            scrcpy.stop();
+            if (should_stop) return;
+            if (start_stream(*window, scrcpy, renderer, input, device_id,
+                             &saved_brightness, background_tasks)) {
+                start_heartbeat(device_id.substr(0, device_id.rfind(':')));
+            }
+        });
+    };
+
     auto stop_screen_poll_thread = [&]() {
         stop_screen_poll = true;
         if (screen_poll_thread.joinable()) {
@@ -1722,6 +1963,25 @@ static int app_main() {
     }
 
     scrcpy.stop();
+
+    // Ugg! stop() already asks the phone for its light back through the talking-hole,
+    // and the scrcpy server keeps its own helper on the phone for the same job. If BOTH
+    // failed — hole dead before we could shout, helper killed too — the human would be
+    // left holding a phone with no picture at all. Last resort over ADB.
+    //
+    // A lone wake-poke is not enough: Android only hands the panel a new power mode when
+    // its own idea of the screen state CHANGES, and it already thinks the screen is on.
+    // So put the phone to sleep and wake it again — that makes it re-light the panel
+    // itself and throws away the darkness we forced on it.
+    if (scrcpy.screen_forced_off()) {
+        const std::string dark_device = scrcpy.get_device_id();
+        if (!dark_device.empty()) {
+            pm::adb::AdbClient wake_adb;
+            wake_adb.execute_shell_command(dark_device,
+                "input keyevent 223; sleep 0.5; input keyevent 224"); // SLEEP, then WAKEUP
+        }
+    }
+
     if (connection_thread.joinable()) connection_thread.join();
     if (screen_poll_thread.joinable()) screen_poll_thread.join();
     if (heartbeat_thread.joinable()) heartbeat_thread.join();

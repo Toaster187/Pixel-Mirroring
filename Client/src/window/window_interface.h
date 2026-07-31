@@ -2,6 +2,7 @@
 #include <string>
 #include <memory>
 #include <functional>
+#include <vector>
 struct SDL_Renderer;
 struct SDL_Window;
 
@@ -21,15 +22,31 @@ enum class PointerAction {
     UP
 };
 
+// Cave man drags rock onto window. Bubble shows how much of it is already on the phone.
+enum class TransferState {
+    IDLE,   // No bubble
+    ACTIVE, // Ring fills up while the rock travels
+    DONE,   // Green tick, fades away on its own
+    FAILED  // Red mark, fades away on its own
+};
+
 enum class MenuAction {
     FACTORY_RESET,
-    TOGGLE_FPS_LIMIT,
-    TOGGLE_RESOLUTION_LIMIT,
+    // One stone per quality level — FPS, resolution and bitrate travel together.
+    SET_QUALITY_BATTERY,
+    SET_QUALITY_BALANCED,
+    SET_QUALITY_MAXIMUM,
     SET_PIN,
     UNLOCK_DEVICE,
     LOCK_DEVICE,
     TOGGLE_COMPATIBILITY_MODE,
     TOGGLE_LOWEST_BRIGHTNESS,
+    TOGGLE_SCREEN_OFF,
+    // Top curtains of the phone. Alt+Down pulls them, Alt+Shift+Down the switches
+    // behind them, Alt+Up shoves everything back up.
+    EXPAND_NOTIFICATION_PANEL,
+    EXPAND_SETTINGS_PANEL,
+    COLLAPSE_PANELS,
     TAKE_SCREENSHOT,
     TOGGLE_RECORDING,
     TOGGLE_SEND_CAPTURES_TO_PHONE,
@@ -100,14 +117,23 @@ public:
     virtual void set_restore_callback(std::function<void()> cb) = 0;
 
     // Set checkbox states on the menu options from outside
-    virtual void set_fps_limited(bool limited) = 0;
-    virtual void set_resolution_limited(bool limited) = 0;
+    // Selected quality level: 0 = Akku, 1 = Ausgewogen, 2 = Maximal
+    virtual void set_quality_preset(int preset) = 0;
     virtual void set_compatibility_mode(bool enabled) = 0;
     virtual void set_lowest_brightness(bool enabled) = 0;
+    virtual void set_screen_off(bool enabled) = 0;
     virtual void set_capture_send_to_phone(bool enabled) = 0;
     virtual void set_audio_enabled(bool enabled) = 0;
     virtual void set_recording(bool recording) = 0;
     virtual void trigger_screenshot_flash() = 0;
+
+    // Set a callback for files dropped onto the window. Params: UTF-8 paths.
+    virtual void set_file_drop_callback(std::function<void(const std::vector<std::string>&)> cb) = 0;
+
+    // Drives the file-transfer bubble. progress is 0.0 .. 1.0, label is the short text
+    // drawn next to the ring (file name, count, or the reason it went wrong).
+    // Safe to call from any thread.
+    virtual void set_transfer_status(TransferState state, float progress, const std::string& label) = 0;
 
     // Clipboard callbacks & sync
     virtual void set_os_clipboard_update_callback(std::function<void(const std::string&)> cb) = 0;

@@ -9,6 +9,7 @@
 #include <functional>
 #include <mutex>
 #include <chrono>
+#include <vector>
 #include "window_interface.h"
 
 struct SDL_Renderer;
@@ -44,14 +45,16 @@ public:
     
     void set_menu_callback(std::function<void(MenuAction)> cb) override { menu_cb_ = std::move(cb); }
     void set_restore_callback(std::function<void()> cb) override { m_restore_cb_ = std::move(cb); }
-    void set_fps_limited(bool limited) override { fps_limited_ = limited; }
-    void set_resolution_limited(bool limited) override { resolution_limited_ = limited; }
+    void set_quality_preset(int preset) override { quality_preset_ = preset; }
     void set_compatibility_mode(bool enabled) override { compatibility_mode_ = enabled; }
     void set_lowest_brightness(bool enabled) override { lowest_brightness_ = enabled; }
+    void set_screen_off(bool enabled) override { screen_off_ = enabled; }
     void set_capture_send_to_phone(bool enabled) override { capture_send_to_phone_ = enabled; }
     void set_audio_enabled(bool enabled) override { audio_enabled_ = enabled; }
     void set_recording(bool recording) override;
     void trigger_screenshot_flash() override;
+    void set_file_drop_callback(std::function<void(const std::vector<std::string>&)> cb) override { m_file_drop_cb_ = std::move(cb); }
+    void set_transfer_status(TransferState state, float progress, const std::string& label) override;
     void set_os_clipboard_update_callback(std::function<void(const std::string&)> cb) override { m_os_clipboard_cb_ = std::move(cb); }
     void set_pc_clipboard(const std::string& text) override;
     void set_focus_callback(std::function<void()> cb) override { m_focus_cb_ = std::move(cb); }
@@ -81,7 +84,10 @@ private:
     int hit_test_button(POINT client_pt);
     bool is_start_button_hit(POINT client_pt);
     void show_context_menu(POINT pt);
+    void build_settings_menu_items();
     void show_capture_menu(POINT pt);
+    void handle_dropped_files(WPARAM wparam);
+    void draw_transfer_bubble(Gdiplus::Graphics& g);
 
     HWND hwnd_{nullptr};
     HWND hwnd_child_{nullptr};
@@ -119,6 +125,7 @@ private:
     RECT rect_recording_bubble_{0};
     RECT rect_recording_stop_{0};
     RECT rect_screenshot_bubble_{0};
+    RECT rect_transfer_bubble_{0};
     RECT rect_capture_{0}, rect_drag_{0}, rect_min_{0}, rect_max_{0}, rect_close_{0};
     RECT rect_start_btn_{0};
     
@@ -138,10 +145,11 @@ private:
     std::function<void()> start_cb_;
     std::function<void(MenuAction)> menu_cb_;
     std::function<void()> m_restore_cb_;
-    bool fps_limited_{false};
-    bool resolution_limited_{false};
+    int quality_preset_{1};        // 0 = Akku, 1 = Ausgewogen, 2 = Maximal
+    bool quality_expanded_{false}; // Cave man folded the quality stones open?
     bool compatibility_mode_{false};
     bool lowest_brightness_{true};
+    bool screen_off_{false};
     bool capture_send_to_phone_{false};
     bool audio_enabled_{true};
     bool recording_{false};
@@ -149,6 +157,11 @@ private:
     bool screenshot_flash_{false};
     std::chrono::steady_clock::time_point screenshot_flash_start_;
     int screenshot_flash_frames_{0};
+    std::function<void(const std::vector<std::string>&)> m_file_drop_cb_;
+    TransferState transfer_state_{TransferState::IDLE};
+    float transfer_progress_{0.0f};
+    std::string transfer_label_;
+    std::chrono::steady_clock::time_point transfer_settled_at_;
     std::function<void()> m_focus_cb_;
     std::function<void(const std::string&)> m_os_clipboard_cb_;
     std::string last_clipboard_text_;
