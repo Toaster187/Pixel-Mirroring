@@ -33,7 +33,8 @@ enum class MenuAction {
     TAKE_SCREENSHOT,
     TOGGLE_RECORDING,
     TOGGLE_SEND_CAPTURES_TO_PHONE,
-    TOGGLE_AUDIO
+    TOGGLE_AUDIO,
+    TOGGLE_AUTO_ROTATE
 };
 
 class IWindow {
@@ -106,6 +107,10 @@ public:
     virtual void set_lowest_brightness(bool enabled) = 0;
     virtual void set_capture_send_to_phone(bool enabled) = 0;
     virtual void set_audio_enabled(bool enabled) = 0;
+    // Reflects the phone's actual accelerometer_rotation value — read from the
+    // device on connect, never a fixed app default. Toggling it in the menu is
+    // the only thing that ever changes it.
+    virtual void set_auto_rotate_enabled(bool enabled) = 0;
     virtual void set_recording(bool recording) = 0;
     virtual void trigger_screenshot_flash() = 0;
 

@@ -111,6 +111,16 @@ void restore_brightness(pm::adb::AdbClient& adb, const SavedBrightness& saved) {
         "settings put system screen_brightness " + std::to_string(saved.brightness));
 }
 
+// Cave man read phone's OWN rotation switch instead of guessing. The toggle in
+// the menu must always start out matching whatever the human already set on the
+// phone — never a fixed app default that quietly flips it. See issue #46.
+bool read_auto_rotate(pm::adb::AdbClient& adb, const std::string& device_id) {
+    std::string res = adb.execute_shell_command(device_id, "settings get system accelerometer_rotation");
+    res.erase(0, res.find_first_not_of(" \n\r\t"));
+    res.erase(res.find_last_not_of(" \n\r\t") + 1);
+    return res != "0"; // treat unknown/empty output as "on", same as a stock phone default
+}
+
 class ScopeExit {
 public:
     explicit ScopeExit(std::function<void()> fn) : fn_(std::move(fn)) {}
@@ -315,7 +325,7 @@ std::string prompt_user_for_pin(void* parent_hwnd = nullptr) {
         g_pin_done = false;
         MSG msg;
         while (true) {
-            const BOOL got = GetMessage(&msg, nullptr, 0, 0);
+            const BOOL got = GetMessageW(&msg, nullptr, 0, 0);
             if (got == 0) {
                 // Ugg! Do not swallow the "leave cave" shout while PIN box is open.
                 PostQuitMessage(static_cast<int>(msg.wParam));
@@ -323,7 +333,7 @@ std::string prompt_user_for_pin(void* parent_hwnd = nullptr) {
             }
             if (got == -1 || g_pin_done) break;
             TranslateMessage(&msg);
-            DispatchMessage(&msg);
+            DispatchMessageW(&msg);
         }
         
         if (parent) EnableWindow(parent, TRUE);
@@ -574,7 +584,8 @@ bool start_stream(
     pm::input::InputHandler& input,
     const std::string& device_id,
     SavedBrightness* out_saved_brightness,
-    BackgroundTasks& tasks
+    BackgroundTasks& tasks,
+    std::atomic<bool>* out_phone_auto_rotate
 );
 
 // user_requested = the human pressed Ctrl+U / used the menu. Then we also type when
@@ -673,7 +684,8 @@ bool run_first_time_setup(
     pm::input::InputHandler& input,
     std::atomic<bool>& should_stop,
     SavedBrightness* out_saved_brightness,
-    BackgroundTasks& tasks
+    BackgroundTasks& tasks,
+    std::atomic<bool>* out_phone_auto_rotate
 ) {
     clear_setup_state();
 
@@ -799,7 +811,7 @@ bool run_first_time_setup(
         return unlock_device_if_needed(tcp_id, &window);
     });
 
-    bool stream_ok = start_stream(window, scrcpy, renderer, input, tcp_device->id, out_saved_brightness, tasks);
+    bool stream_ok = start_stream(window, scrcpy, renderer, input, tcp_device->id, out_saved_brightness, tasks, out_phone_auto_rotate);
     bool unlock_ok = unlock_future.get();
 
     if (!unlock_ok || !stream_ok) {
@@ -842,7 +854,8 @@ bool start_stream(
     pm::input::InputHandler& input,
     const std::string& device_id,
     SavedBrightness* out_saved_brightness,
-    BackgroundTasks& tasks
+    BackgroundTasks& tasks,
+    std::atomic<bool>* out_phone_auto_rotate
 ) {
     window.post_task([&window]() { window.set_status_text("Starte Video-Stream..."); });
     pm::stream::ScrcpyClient::Config config;
@@ -864,6 +877,19 @@ bool start_stream(
                 *out_saved_brightness = read_brightness(adb, dev_id);
             }
             adb.execute_shell_command(dev_id, "settings put system screen_brightness_mode 0; settings put system screen_brightness 0");
+        });
+    }
+
+    // Cave man read phone's rotation switch, never sets it — the menu toggle
+    // must start out exactly where the phone already was (see issue #46).
+    {
+        std::string dev_id = device_id;
+        pm::window::IWindow* w = &window;
+        tasks.run([dev_id, out_phone_auto_rotate, w]() {
+            pm::adb::AdbClient adb;
+            bool enabled = read_auto_rotate(adb, dev_id);
+            if (out_phone_auto_rotate) *out_phone_auto_rotate = enabled;
+            w->post_task([w, enabled]() { w->set_auto_rotate_enabled(enabled); });
         });
     }
 
@@ -1136,6 +1162,7 @@ static int app_main() {
     window->set_audio_enabled(initial_settings.m_audio_enabled);
 
     SavedBrightness saved_brightness; // Cave man remember phone sun level
+    std::atomic<bool> phone_auto_rotate{true}; // Mirrors the phone's OWN rotation switch, never sets a default
     std::atomic<bool> should_stop{false};
     pm::stream::ScrcpyClient scrcpy;
     scrcpy.set_disconnect_callback([w = window.get()]() {
@@ -1298,6 +1325,21 @@ static int app_main() {
                 window->set_status_text(current_settings.m_audio_enabled
                     ? "Ton aktiviert — wirkt ab der nächsten Verbindung."
                     : "Ton deaktiviert — wirkt ab der nächsten Verbindung.");
+                break;
+            }
+            case pm::window::MenuAction::TOGGLE_AUTO_ROTATE: {
+                // Ugg! This one is NOT a Settings default — it only ever mirrors and
+                // flips the phone's OWN accelerometer_rotation switch (issue #46). The
+                // toggle always starts synced from the phone (see start_stream) and a
+                // click here is the only thing that ever changes it.
+                bool new_value = !phone_auto_rotate.load();
+                phone_auto_rotate = new_value;
+                window->set_auto_rotate_enabled(new_value);
+                run_on_device([new_value](const std::string& device_id) {
+                    pm::adb::AdbClient adb;
+                    adb.execute_shell_command(device_id,
+                        "settings put system accelerometer_rotation " + std::to_string(new_value ? 1 : 0));
+                });
                 break;
             }
             case pm::window::MenuAction::TOGGLE_SEND_CAPTURES_TO_PHONE: {
@@ -1609,7 +1651,7 @@ static int app_main() {
             SetupState setup_state = load_setup_state();
             if (!setup_state.configured) {
                 if (run_first_time_setup(adb, *window, scrcpy, renderer, input, should_stop,
-                                         &saved_brightness, background_tasks)) {
+                                         &saved_brightness, background_tasks, &phone_auto_rotate)) {
                     auto new_state = load_setup_state();
                     if (new_state.configured && !new_state.device_ip.empty()) {
                         start_heartbeat(new_state.device_ip);
@@ -1642,7 +1684,7 @@ static int app_main() {
                         w->set_status_text("Nicht über WLAN erreichbar — richte per USB neu ein...");
                     });
                     if (run_first_time_setup(adb, *window, scrcpy, renderer, input, should_stop,
-                                             &saved_brightness, background_tasks)) {
+                                             &saved_brightness, background_tasks, &phone_auto_rotate)) {
                         auto new_state = load_setup_state();
                         if (new_state.configured && !new_state.device_ip.empty()) {
                             start_heartbeat(new_state.device_ip);
@@ -1673,7 +1715,7 @@ static int app_main() {
             });
 
             bool stream_ok = start_stream(*window, scrcpy, renderer, input, tcp_device->id,
-                                          &saved_brightness, background_tasks);
+                                          &saved_brightness, background_tasks, &phone_auto_rotate);
             bool unlock_ok = unlock_future.get();
 
             if (!unlock_ok) {

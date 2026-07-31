@@ -27,14 +27,14 @@ bool Win32Tray::create(const std::string& tooltip, std::function<void()> on_clic
     HINSTANCE hinst = GetModuleHandle(nullptr);
 
     // Cave man register message-only window class
-    WNDCLASSEXA wc = { sizeof(wc) };
+    WNDCLASSEXW wc = { sizeof(wc) };
     wc.lpfnWndProc = Win32Tray::window_proc;
     wc.hInstance = hinst;
-    wc.lpszClassName = "PixelMirroringTrayMsgClass";
-    RegisterClassExA(&wc);
+    wc.lpszClassName = L"PixelMirroringTrayMsgClass";
+    RegisterClassExW(&wc);
 
     // Create message-only window
-    m_hwnd = CreateWindowExA(0, wc.lpszClassName, nullptr, 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, hinst, this);
+    m_hwnd = CreateWindowExW(0, wc.lpszClassName, nullptr, 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, hinst, this);
     if (!m_hwnd) {
         std::cerr << "[Tray] Failed to create message-only window" << std::endl;
         return false;
@@ -89,7 +89,7 @@ LRESULT CALLBACK Win32Tray::window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
     if (self) {
         return self->handle_message(msg, wp, lp);
     }
-    return DefWindowProc(hwnd, msg, wp, lp);
+    return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
 LRESULT Win32Tray::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
@@ -102,7 +102,7 @@ LRESULT Win32Tray::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
     }
-    return DefWindowProc(m_hwnd, msg, wp, lp);
+    return DefWindowProcW(m_hwnd, msg, wp, lp);
 }
 
 } // namespace pm::tray

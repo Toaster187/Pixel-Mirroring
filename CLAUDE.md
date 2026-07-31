@@ -118,6 +118,12 @@ The UI is German — every text field must render `ä ö ü Ä Ö Ü ß` correct
   the mojibake in release 3.67. Never drop this flag.
 - **Use the `W` variants of every Win32 text API** (`MessageBoxW`, `DrawTextW`, `CreateFontW`,
   `CreateWindowExW`, `RegisterClassExW`, `GetWindowTextW`, …). Never pass German text to an `...A` call.
+- **Message loops must be `GetMessageW`/`DispatchMessageW`.** `TranslateMessage` builds `WM_CHAR`
+  in the flavour of whatever *fetched* the message, not of the window class — so a suffix-less
+  `GetMessage` (= `...A`) routes every keystroke through cp1252 even for a Unicode window.
+  Umlauts happen to survive that detour because cp1252 maps them onto the same numbers as
+  Unicode; everything outside Latin-1 turns into `?`. `UNICODE` is deliberately **not** defined
+  in `Client/CMakeLists.txt`, so every suffix-less Win32 call is the ANSI one — always be explicit.
 - Convert between `std::string` (always UTF-8) and `std::wstring` only via `MultiByteToWideChar` /
   `WideCharToMultiByte` with `CP_UTF8` — never `CP_ACP`.
 - GDI+ draws `wchar_t` only; convert narrow strings to UTF-16 before `DrawString`.
