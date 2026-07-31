@@ -2,7 +2,7 @@
 
 ## Projektübersicht
 
-Pixel Mirroring ist ein Open-Source Android-Screen-Mirroring-Tool - das Apple iPhone Mirroring fur die Android-Welt. Es besteht aus zwei Hauptkomponenten:
+Pixel Mirroring ist ein Open-Source Android-Screen-Mirroring-Tool - das Apple iPhone Mirroring für die Android-Welt. Es besteht aus zwei Hauptkomponenten:
 
 ### Architektur
 
@@ -15,8 +15,8 @@ Android App (Kotlin/Jetpack Compose)  <--->  ADB/TCP  <--->  Desktop Client (C++
                                                       SDL2 Renderer + Audio
 ```
 
-Drei getrennte TCP-Kanaele des scrcpy-Protokolls, in genau dieser Reihenfolge
-geoeffnet: **Video -> Audio -> Control**.
+Drei getrennte TCP-Kanäle des scrcpy-Protokolls, in genau dieser Reihenfolge
+geöffnet: **Video -> Audio -> Control**.
 
 ### Verzeichnisstruktur
 
@@ -31,7 +31,7 @@ Pixel-Mirroring/
 |       `-- service/      MirroringService, BootReceiver, NotificationHelper, DiscoveryHttpServer, AdbWifiManager
 |-- Client/               C++20 Desktop Client
 |   |-- CMakeLists.txt    Build-Config (CMake 3.25+)
-|   |-- vendor/platform-tools/  Gebuendelte Android Platform Tools fuer das Desktop-Paket
+|   |-- vendor/platform-tools/  Gebündelte Android Platform Tools für das Desktop-Paket
 |   `-- src/
 |       |-- main.cpp      Entry Point (WinMain auf Windows, main auf POSIX)
 |       |-- settings.*    Persistente Einstellungen inkl. Ton an/aus
@@ -46,9 +46,9 @@ Pixel-Mirroring/
 
 **macOS ist derzeit nicht baubar.** `CocoaWindow` implementiert nur einen Bruchteil der
 rein virtuellen `IWindow`-Methoden, und die in `CMakeLists.txt` referenzierte
-`src/tray/cocoa_tray.mm` existiert gar nicht. Die CI baut ausschliesslich Android und
+`src/tray/cocoa_tray.mm` existiert gar nicht. Die CI baut ausschließlich Android und
 Windows. Eine neue Methode in `IWindow` kann macOS also nicht "kaputt machen" - es ist
-bereits kaputt. In nutzerseitiger Doku darf macOS trotzdem nicht als unterstuetzt
+bereits kaputt. In nutzerseitiger Doku darf macOS trotzdem nicht als unterstützt
 auftauchen.
 
 ---
@@ -64,11 +64,11 @@ auftauchen.
 - Build: Gradle 9.4.1, JDK 17+ (Wrapper ist bewusst nicht eingecheckt)
 
 **Die Debug-Variante ist das ausgelieferte Artefakt** - der Desktop-Client installiert
-sie, die CI veroeffentlicht sie. Deshalb laufen auf `debug` ausnahmsweise
-`isMinifyEnabled` und `isShrinkResources`; ohne sie ist die APK rund 60 statt 4 MB gross.
+sie, die CI veröffentlicht sie. Deshalb laufen auf `debug` ausnahmsweise
+`isMinifyEnabled` und `isShrinkResources`; ohne sie ist die APK rund 60 statt 4 MB groß.
 Folgen davon:
 
-- Klassen, die nur ueber das Manifest oder per Reflexion erreicht werden, brauchen eine
+- Klassen, die nur über das Manifest oder per Reflexion erreicht werden, brauchen eine
   Keep-Regel in `app/proguard-rules.pro`.
 - Compose-Tooling steckt absichtlich nicht in der Auslieferung. Lokale Previews:
   `gradle assembleDebug -PcomposeTooling`.
@@ -78,7 +78,7 @@ Folgen davon:
 
 - Sprache: C++20
 - Build: CMake 3.25+ mit vcpkg
-- Abhangigkeiten: SDL2, FFmpeg, nlohmann-json, cpp-httplib
+- Abhängigkeiten: SDL2, FFmpeg, nlohmann-json, cpp-httplib
 - Windows: Win32 API, GDI+, DWM, UxTheme, WIN32_EXECUTABLE, AppState-Maschine
 - macOS: Cocoa/AppKit
 - Namensraum: `pm::` mit `pm::adb`, `pm::stream`, `pm::window`, `pm::input`, `pm::tray`, `pm::network`
@@ -124,22 +124,22 @@ ADB **bleibt nicht dauerhaft aktiviert** (Sicherheitslücke geschlossen). Stattd
 
 ### Eingebundene Tools
 
-- Der Windows-Client benutzt sein eigenes gebuendeltes `adb.exe`.
+- Der Windows-Client benutzt sein eigenes gebündeltes `adb.exe`.
 - Die Android Platform Tools liegen unter `Client/vendor/platform-tools/`.
-- Fur Nutzer soll Android Studio nicht notwendig sein.
+- Für Nutzer soll Android Studio nicht notwendig sein.
 - Beim Build werden `adb.exe`, `AdbWinApi.dll` und `AdbWinUsbApi.dll` neben die EXE kopiert.
 
 ### ADB-Suche
 
-- Bevorzugt wird immer das gebuendelte ADB aus dem App-Paket oder dem lokalen Client-Ordner.
-- Android-Studio-Installationen oder SDK-Pfade sollen fur den normalen Nutzer keine Voraussetzung sein.
+- Bevorzugt wird immer das gebündelte ADB aus dem App-Paket oder dem lokalen Client-Ordner.
+- Android-Studio-Installationen oder SDK-Pfade sollen für den normalen Nutzer keine Voraussetzung sein.
 
 ### Zustandslogik
 
 - `SETUP`: Erste Einrichtung oder fehlgeschlagene Einrichtung
 - `SCANNING`: Automatische Verbindung oder Wiederverbindungsversuch
 - `CONNECTED`: ADB steht, Stream wird vorbereitet
-- `STREAMING`: Video-Stream laeuft
+- `STREAMING`: Video-Stream läuft
 
 ---
 
@@ -153,7 +153,7 @@ ADB **bleibt nicht dauerhaft aktiviert** (Sicherheitslücke geschlossen). Stattd
 - Methoden: snake_case
 - Konstanten: SCREAMING_SNAKE_CASE
 - Member-Variablen: `m_` Prefix
-- Ownership: `std::unique_ptr` fuer Ownership, Raw Pointer nur non-owning
+- Ownership: `std::unique_ptr` für Ownership, Raw Pointer nur non-owning
 - Error Handling: Return-Werte (`bool`, `std::optional`), keine Exceptions
 - Kommentare: Caveman-Sprache
 
@@ -165,16 +165,16 @@ ADB **bleibt nicht dauerhaft aktiviert** (Sicherheitslücke geschlossen). Stattd
 - Packages: `dev.pixelmirroring.app.*`
 - Kommentare: Caveman-Sprache
 
-### Plattformuebergreifend
+### Plattformübergreifend
 
-- Interface/Impl Pattern fuer Fenster und platform-spezifische Teile
-- Bedingte Kompilierung ueber CMake, nicht mit wildem Preprocessor-Gewuehl
+- Interface/Impl Pattern für Fenster und platform-spezifische Teile
+- Bedingte Kompilierung über CMake, nicht mit wildem Preprocessor-Gewühl
 - Keine hartcodierten Pfade
 
 ### Textkodierung / Umlaute (PFLICHT)
 
-Alle deutschen Umlaute (ä ö ü Ä Ö Ü ß) und sonstigen Nicht-ASCII-Zeichen muessen in
-jedem Textfeld korrekt dargestellt werden. Damit das dauerhaft haelt, gilt:
+Alle deutschen Umlaute (ä ö ü Ä Ö Ü ß) und sonstigen Nicht-ASCII-Zeichen müssen in
+jedem Textfeld korrekt dargestellt werden. Damit das dauerhaft hält, gilt:
 
 - **Alle Quelldateien sind UTF-8** (ohne BOM). `.editorconfig` im Repo-Root setzt `charset = utf-8`.
 - **MSVC braucht `/utf-8`** (in `Client/CMakeLists.txt` gesetzt). Ohne diesen Schalter liest MSVC
@@ -182,11 +182,18 @@ jedem Textfeld korrekt dargestellt werden. Damit das dauerhaft haelt, gilt:
   und die gesamte deutsche UI zeigt Buchstabensalat. Diesen Schalter niemals entfernen.
 - **Windows-API immer die `W`-Variante** verwenden (`MessageBoxW`, `DrawTextW`, `CreateFontW`,
   `CreateWindowExW`, `RegisterClassExW`, ...). Nie `...A` mit deutschem Text.
-- Zwischen `std::string` (immer UTF-8) und `std::wstring` nur ueber `MultiByteToWideChar` /
+- **Nachrichtenschleifen brauchen `GetMessageW`/`DispatchMessageW`.** `TranslateMessage` erzeugt
+  `WM_CHAR` in der Variante dessen, der die Nachricht *abgeholt* hat - nicht in der der
+  Fensterklasse. Ein `GetMessage` ohne Suffix (= `...A`) schickt also jeden Tastendruck durch
+  cp1252, selbst bei einem Unicode-Fenster. Umlaute überleben das nur zufällig, weil cp1252 sie
+  auf dieselben Zahlen wie Unicode legt; alles außerhalb von Latin-1 wird zu `?`. `UNICODE` ist
+  in `Client/CMakeLists.txt` bewusst **nicht** definiert - jeder suffixlose Win32-Aufruf ist die
+  ANSI-Variante. Immer explizit schreiben.
+- Zwischen `std::string` (immer UTF-8) und `std::wstring` nur über `MultiByteToWideChar` /
   `WideCharToMultiByte` mit `CP_UTF8` konvertieren - nie `CP_ACP`.
 - GDI+ zeichnet nur `wchar_t`: narrow Strings vorher nach UTF-16 konvertieren.
 - **Android**: `-Dfile.encoding=UTF-8` in `gradle.properties`, `compileOptions.encoding = "UTF-8"`
-  und `options.encoding = "UTF-8"` fuer alle `JavaCompile`-Tasks.
+  und `options.encoding = "UTF-8"` für alle `JavaCompile`-Tasks.
 - **Netzwerk**: HTTP-Bodies immer explizit mit `StandardCharsets.UTF_8` lesen/schreiben und
   `charset=utf-8` im Content-Type mitschicken.
 - Umlaute nicht durch `ue`/`oe`/`ae` ersetzen, um ein Encoding-Problem zu umgehen - die Ursache fixen.
@@ -198,45 +205,45 @@ jedem Textfeld korrekt dargestellt werden. Damit das dauerhaft haelt, gilt:
 1. Kein Browser-Technologie. Kein Electron, kein WebView, kein CEF.
 2. Aspect Ratio immer beibehalten.
 3. Windows: Custom Borderless Window mit eigenem Hit-Testing.
-4. scrcpy-Protokoll nutzen, keine eigene Streaming-Losung erfinden.
+4. scrcpy-Protokoll nutzen, keine eigene Streaming-Lösung erfinden.
 5. Android App aktiviert ADB over WiFi selbst via `Settings.Global.putInt("adb_wifi_enabled", 1)`.
 6. Minimaler Akkuverbrauch auf Android. Konkret: keine Poll-Schleifen, die pro Runde
    einen `adb`-Prozess starten, und Netzwerk-Callbacks entprellt und auf WLAN begrenzt.
-7. Der Client soll neue Nutzer sauber durch USB-Ersteinrichtung fuehren und danach automatisch verbinden.
+7. Der Client soll neue Nutzer sauber durch USB-Ersteinrichtung führen und danach automatisch verbinden.
 
-### Invarianten im Stream-Pfad (nicht aus Versehen zurueckdrehen)
+### Invarianten im Stream-Pfad (nicht aus Versehen zurückdrehen)
 
 - **Socket-Reihenfolge liegt fest:** Video -> Audio -> Control, exakt so in
   `connect_sockets()` und passend zur Server-Seite. Audio nur, wenn aktiviert.
   Falsche Reihenfolge = jeder Stream liest aus dem falschen Kanal.
-- **Ton laeuft bewusst als rohes PCM** (`audio_codec=raw`, 48 kHz, Stereo, s16): kein
-  Decoder, keine Codec-Konfiguration, keine zusaetzliche FFmpeg-Abhaengigkeit auf der
+- **Ton läuft bewusst als rohes PCM** (`audio_codec=raw`, 48 kHz, Stereo, s16): kein
+  Decoder, keine Codec-Konfiguration, keine zusätzliche FFmpeg-Abhängigkeit auf der
   Client-Seite. Kostet ~1,5 Mbit/s neben ~20 Mbit/s Video. Nicht ohne Grund auf Opus
   "optimieren" - die Config-Pakete sind genau der Teil, der still kaputtgeht.
-- **Ton darf das Bild nie mitreissen:** jeder Fehlerfall (Handy kann nicht aufnehmen,
-  Codec-Kennung 0/-1, kein PC-Audiogeraet) landet in `stream.log` und laeuft video-only
+- **Ton darf das Bild nie mitreißen:** jeder Fehlerfall (Handy kann nicht aufnehmen,
+  Codec-Kennung 0/-1, kein PC-Audiogerät) landet in `stream.log` und läuft video-only
   weiter. Ton ausschalten stellt exakt die alte Server-Befehlszeile wieder her.
 - **Socket-Abbau:** `stop()` macht `shutdown()` -> `join()` -> `closesocket()`. Zuerst
-  schliessen wuerde einen lesenden Thread auf einer Socket-Nummer sitzen lassen, die das
+  schließen würde einen lesenden Thread auf einer Socket-Nummer sitzen lassen, die das
   Betriebssystem schon neu vergeben hat. Schreibzugriffe auf den Control-Socket laufen
-  ueber `send_control()` (Mutex + vollstaendige Schreibschleife), weil UI-Thread und
+  über `send_control()` (Mutex + vollständige Schreibschleife), weil UI-Thread und
   Screen-Poll-Thread beide senden.
-- **Der Serverprozess gehoert uns:** das `adb shell app_process ...` laeuft in einem
+- **Der Serverprozess gehört uns:** das `adb shell app_process ...` läuft in einem
   `pm::adb::ShellProcess` und wird in `stop()` beendet. Kein detached Thread mehr - das
   hat pro Sitzung einen Thread und eine `adb.exe` liegengelassen.
-- **Der Renderer haelt eine Referenz, keine Kopie** (`av_frame_ref`). Kein
+- **Der Renderer hält eine Referenz, keine Kopie** (`av_frame_ref`). Kein
   Pro-Bild-`memcpy` der YUV-Ebenen wieder einbauen (~180 MB/s bei 1080p60).
 - **Aufnahmen bevorzugen den Hardware-Encoder** (`h264_mf`, sonst NVENC/QSV/AMF), mit
-  automatischem Rueckfall auf `libx264` und passendem Pixelformat.
-- **Tastenkuerzel:** Navigation liegt auf **Alt** (`Alt+B` zurueck, `Alt+H` Start,
-  `Alt+S` Uebersicht), weil Strg+C/V die Zwischenablage und Strg+U/L Sperren/Entsperren
+  automatischem Rückfall auf `libx264` und passendem Pixelformat.
+- **Tastenkürzel:** Navigation liegt auf **Alt** (`Alt+B` zurück, `Alt+H` Start,
+  `Alt+S` Übersicht), weil Strg+C/V die Zwischenablage und Strg+U/L Sperren/Entsperren
   belegen. Alt-Tasten kommen als `WM_SYSKEYDOWN`/`WM_SYSKEYUP`; nur B/H/S werden
   abgefangen, damit `Alt+F4` weiter bei `DefWindowProc` ankommt.
 - **Hardware-Dekodierung fehlt mit Absicht:** `d3d11va`/`dxva2` sind vorhanden, aber
-  SDL2 kann keine fremde D3D11-Textur uebernehmen. Die noetige GPU->CPU-Rueckkopie
-  waere vermutlich langsamer als die jetzige Software-Dekodierung. Erst messen.
-- **Artefaktgroesse ist ein Feature:** vor einer neuen Android-Abhaengigkeit pruefen, ob
-  sie ueberhaupt benutzt wird; vor dem Aufweichen der DLL-Kopierregeln pruefen, was die
+  SDL2 kann keine fremde D3D11-Textur übernehmen. Die nötige GPU->CPU-Rückkopie
+  wäre vermutlich langsamer als die jetzige Software-Dekodierung. Erst messen.
+- **Artefaktgröße ist ein Feature:** vor einer neuen Android-Abhängigkeit prüfen, ob
+  sie überhaupt benutzt wird; vor dem Aufweichen der DLL-Kopierregeln prüfen, was die
   Binaries wirklich importieren (`dumpbin /DEPENDENTS`). Nicht wieder das komplette
   `vcpkg_installed/<triplet>/bin` kopieren.
 
@@ -247,28 +254,28 @@ jedem Textfeld korrekt dargestellt werden. Damit das dauerhaft haelt, gilt:
 ### Desktop Client
 
 - CMake Build: `cmake --preset default && cmake --build build/`
-- Manueller Test mit angeschlossenem Android-Gerat
+- Manueller Test mit angeschlossenem Android-Gerät
 
 ### Android
 
 - Gradle Build: `gradle assembleDebug`
-- Manueller Test auf physischem Geraet
+- Manueller Test auf physischem Gerät
 
-### Was sich nicht automatisiert testen laesst
+### Was sich nicht automatisiert testen lässt
 
-Es gibt keine Testsuite. Alles Verhalten am Geraet ist manuell zu pruefen - besonders
-Verbindungsaufbau/Reconnect, Tonwiedergabe (falsche Abtastrate faellt sofort als
-falsche Tonhoehe auf), Umlauteingabe und die Aufnahme. Kompilieren heisst hier nicht
+Es gibt keine Testsuite. Alles Verhalten am Gerät ist manuell zu prüfen - besonders
+Verbindungsaufbau/Reconnect, Tonwiedergabe (falsche Abtastrate fällt sofort als
+falsche Tonhöhe auf), Umlauteingabe und die Aufnahme. Kompilieren heißt hier nicht
 "funktioniert".
 
 ---
 
 ## Was der Agent nicht tun soll
 
-- Keine neuen Frameworks einfuehren
+- Keine neuen Frameworks einführen
 - Keine Sprache wechseln
 - Nicht den offiziellen scrcpy-Server modifizieren
-- Keine neuen Build-Systeme einfuehren
+- Keine neuen Build-Systeme einführen
 - Keine externen Netzwerk-Requests an Drittanbieter
 
 ---

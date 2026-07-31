@@ -50,6 +50,7 @@ public:
     void set_lowest_brightness(bool enabled) override { lowest_brightness_ = enabled; }
     void set_capture_send_to_phone(bool enabled) override { capture_send_to_phone_ = enabled; }
     void set_audio_enabled(bool enabled) override { audio_enabled_ = enabled; }
+    void set_auto_rotate_enabled(bool enabled) override { auto_rotate_enabled_ = enabled; }
     void set_recording(bool recording) override;
     void trigger_screenshot_flash() override;
     void set_os_clipboard_update_callback(std::function<void(const std::string&)> cb) override { m_os_clipboard_cb_ = std::move(cb); }
@@ -144,6 +145,7 @@ private:
     bool lowest_brightness_{true};
     bool capture_send_to_phone_{false};
     bool audio_enabled_{true};
+    bool auto_rotate_enabled_{true};
     bool recording_{false};
     std::chrono::steady_clock::time_point recording_start_time_;
     bool screenshot_flash_{false};

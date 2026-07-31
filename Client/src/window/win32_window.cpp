@@ -267,9 +267,16 @@ bool Win32Window::is_visible() const { return visible_; }
 void Win32Window::process_messages() {
     MSG msg;
     // GetMessage returns -1 on error. Treating that as "true" spins forever.
-    while (GetMessage(&msg, nullptr, 0, 0) > 0) {
+    //
+    // Ugg! The W ending is not decoration. TranslateMessage builds WM_CHAR in the
+    // flavour of whoever FETCHED the message, not of the window class. With the
+    // plain (= ...A) pair every typed letter takes a detour through cp1252, and
+    // everything cp1252 cannot hold comes out as "?". Umlauts happen to survive
+    // that detour by luck — cp1252 maps them onto the same numbers as Unicode —
+    // but nothing else does. Fetch wide, stay wide.
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
         TranslateMessage(&msg);
-        DispatchMessage(&msg);
+        DispatchMessageW(&msg);
     }
 }
 
@@ -1144,6 +1151,7 @@ namespace {
     constexpr UINT ID_TOGGLE_LOWEST_BRIGHTNESS = 1007;
     constexpr UINT ID_LOCK_DEVICE   = 1008;
     constexpr UINT ID_TOGGLE_AUDIO  = 1009;
+    constexpr UINT ID_TOGGLE_AUTO_ROTATE = 1010;
 
     constexpr UINT ID_SCREENSHOT = 1101;
     constexpr UINT ID_TOGGLE_RECORDING = 1102;
@@ -1323,7 +1331,7 @@ namespace {
                 return 0;
             }
         }
-        return DefWindowProcA(hwnd, msg, wp, lp);
+        return DefWindowProcW(hwnd, msg, wp, lp);
     }
 }
 
@@ -1338,6 +1346,7 @@ void Win32Window::show_context_menu(POINT pt) {
     g_menu_items.push_back({0, L"", false, false, true});
     g_menu_items.push_back({ID_SET_PIN, L"PIN zum Entsperren festlegen", false, false, false});
     if (app_state_ == AppState::STREAMING) {
+        g_menu_items.push_back({ID_TOGGLE_AUTO_ROTATE, L"Automatische Bildschirmdrehung (Handy)", true, auto_rotate_enabled_, false});
         g_menu_items.push_back({ID_UNLOCK_DEVICE, L"Handy entsperren (Strg+U)", false, false, false});
         g_menu_items.push_back({ID_LOCK_DEVICE, L"Handy sperren & Bildschirm aus (Strg+L)", false, false, false});
         // One hint row for all three navigation keys — otherwise nobody finds them.
@@ -1353,23 +1362,23 @@ void Win32Window::show_context_menu(POINT pt) {
 
     static bool class_registered = false;
     if (!class_registered) {
-        WNDCLASSEXA wc = {sizeof(WNDCLASSEXA)};
+        WNDCLASSEXW wc = {sizeof(WNDCLASSEXW)};
         wc.style = CS_HREDRAW | CS_VREDRAW | CS_DROPSHADOW;
         wc.lpfnWndProc = SettingsMenuProc;
         wc.hInstance = GetModuleHandle(nullptr);
-        wc.lpszClassName = "PixelMirroringSettingsMenu";
+        wc.lpszClassName = L"PixelMirroringSettingsMenu";
         wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-        RegisterClassExA(&wc);
+        RegisterClassExW(&wc);
         class_registered = true;
     }
 
     ClientToScreen(hwnd_, &pt);
-    
+
     g_selected_action = 0;
     g_hovered_item = -1;
-    
-    HWND hMenu = CreateWindowExA(WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-        "PixelMirroringSettingsMenu", "",
+
+    HWND hMenu = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        L"PixelMirroringSettingsMenu", L"",
         WS_POPUP | WS_VISIBLE,
         pt.x, pt.y, 320, height,
         hwnd_, nullptr, GetModuleHandle(nullptr), nullptr);
@@ -1381,7 +1390,7 @@ void Win32Window::show_context_menu(POINT pt) {
 
     MSG msg;
     while (true) {
-        const BOOL got = GetMessage(&msg, nullptr, 0, 0);
+        const BOOL got = GetMessageW(&msg, nullptr, 0, 0);
         if (got == 0) {
             // Ugg! Tribe shouted "leave cave" while menu still hangs open. Old cave
             // man ate that shout and the app kept breathing invisibly. Pass it on!
@@ -1400,6 +1409,7 @@ void Win32Window::show_context_menu(POINT pt) {
                 case ID_TOGGLE_COMPAT: action = MenuAction::TOGGLE_COMPATIBILITY_MODE; break;
                 case ID_TOGGLE_LOWEST_BRIGHTNESS: action = MenuAction::TOGGLE_LOWEST_BRIGHTNESS; break;
                 case ID_TOGGLE_AUDIO:  action = MenuAction::TOGGLE_AUDIO; break;
+                case ID_TOGGLE_AUTO_ROTATE: action = MenuAction::TOGGLE_AUTO_ROTATE; break;
                 case ID_SET_PIN:       action = MenuAction::SET_PIN; break;
                 case ID_UNLOCK_DEVICE: action = MenuAction::UNLOCK_DEVICE; break;
                 case ID_LOCK_DEVICE:   action = MenuAction::LOCK_DEVICE; break;
@@ -1409,7 +1419,7 @@ void Win32Window::show_context_menu(POINT pt) {
             continue;
         }
         TranslateMessage(&msg);
-        DispatchMessage(&msg);
+        DispatchMessageW(&msg);
     }
     
     if (IsWindow(hMenu)) {
@@ -1426,6 +1436,7 @@ void Win32Window::show_context_menu(POINT pt) {
         case ID_TOGGLE_COMPAT: action = MenuAction::TOGGLE_COMPATIBILITY_MODE; break;
         case ID_TOGGLE_LOWEST_BRIGHTNESS: action = MenuAction::TOGGLE_LOWEST_BRIGHTNESS; break;
         case ID_TOGGLE_AUDIO:  action = MenuAction::TOGGLE_AUDIO; break;
+        case ID_TOGGLE_AUTO_ROTATE: action = MenuAction::TOGGLE_AUTO_ROTATE; break;
         case ID_SET_PIN:       action = MenuAction::SET_PIN; break;
         case ID_UNLOCK_DEVICE: action = MenuAction::UNLOCK_DEVICE; break;
         case ID_LOCK_DEVICE:   action = MenuAction::LOCK_DEVICE; break;
@@ -1454,21 +1465,21 @@ void Win32Window::show_capture_menu(POINT pt) {
 
     static bool class_registered = false;
     if (!class_registered) {
-        WNDCLASSEXA wc = {sizeof(WNDCLASSEXA)};
+        WNDCLASSEXW wc = {sizeof(WNDCLASSEXW)};
         wc.style = CS_HREDRAW | CS_VREDRAW | CS_DROPSHADOW;
         wc.lpfnWndProc = SettingsMenuProc;
         wc.hInstance = GetModuleHandle(nullptr);
-        wc.lpszClassName = "PixelMirroringCaptureMenu";
+        wc.lpszClassName = L"PixelMirroringCaptureMenu";
         wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-        RegisterClassExA(&wc);
+        RegisterClassExW(&wc);
         class_registered = true;
     }
 
     ClientToScreen(hwnd_, &pt);
     g_selected_action = 0;
     g_hovered_item = -1;
-    HWND hMenu = CreateWindowExA(WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-        "PixelMirroringCaptureMenu", "", WS_POPUP | WS_VISIBLE,
+    HWND hMenu = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        L"PixelMirroringCaptureMenu", L"", WS_POPUP | WS_VISIBLE,
         pt.x, pt.y, 320, height, hwnd_, nullptr, GetModuleHandle(nullptr), nullptr);
     if (!hMenu) return;
 
@@ -1479,7 +1490,7 @@ void Win32Window::show_capture_menu(POINT pt) {
 
     MSG msg;
     while (true) {
-        const BOOL got = GetMessage(&msg, nullptr, 0, 0);
+        const BOOL got = GetMessageW(&msg, nullptr, 0, 0);
         if (got == 0) {
             PostQuitMessage(static_cast<int>(msg.wParam));
             break;
@@ -1499,7 +1510,7 @@ void Win32Window::show_capture_menu(POINT pt) {
             continue;
         }
         TranslateMessage(&msg);
-        DispatchMessage(&msg);
+        DispatchMessageW(&msg);
     }
     if (IsWindow(hMenu)) DestroyWindow(hMenu);
 

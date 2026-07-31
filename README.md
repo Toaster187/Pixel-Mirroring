@@ -123,6 +123,7 @@ festen Reihenfolge geöffnet: **Video → Audio → Control**.
 | **Custom Borderless Window** | Win32 `WM_NCCALCSIZE` + `DwmExtendFrameIntoClientArea` für native Schatten |
 | **Aspect Ratio Lock** | Video behält immer korrektes Seitenverhältnis, Fenster frei skalierbar |
 | **Auto-Rotate** | Fenster dreht sich automatisch bei Handy-Rotation (Portrait ↔ Landscape) |
+| **Bildschirmdrehung-Schalter** | Menü-Schalter für die automatische Bildschirmdrehung des Handys; startet synchron zum aktuellen Wert des Handys, wird nie von der App automatisch aktiviert |
 | **Win11 Snap Layouts** | Custom Hit-Testing für Drag, Resize, Snap-Buttons (`HTMAXBUTTON`) |
 | **System Tray** | Icon in der Taskleiste für schnellen Zugriff |
 | **FFmpeg H.264/H.265/AV1** | Video-Dekodierung in Software, Skalierung & Farbraum auf der GPU |
