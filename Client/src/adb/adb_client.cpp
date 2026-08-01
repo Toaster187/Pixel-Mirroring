@@ -586,7 +586,14 @@ bool AdbClient::install_pushed_app(const std::string& device_id, const std::stri
     } else {
         log_adb_event("[ADB] Could not read current user, installing pushed APK without --user");
     }
-    command += " -g -t -r -d " + shell_quote(remote_apk_path);
+    // Ugg! NO -g here, unlike install_app. -g means "hand this app every key to the
+    // cave at once" — camera, ear, where the human stands — without the phone ever
+    // asking. For OUR OWN app the human already said yes by setting the thing up. A
+    // rock somebody dragged into the window is a stranger: it gets installed, and then
+    // it asks for its keys the normal way, like every app from the store does.
+    // -t (test builds) and -d (older version) stay: those hand out nothing, they only
+    // stop the phone from refusing an APK the human clearly meant to install.
+    command += " -t -r -d " + shell_quote(remote_apk_path);
 
     const std::string output = execute_shell_command(device_id, command);
     if (output.find("Success") != std::string::npos) {

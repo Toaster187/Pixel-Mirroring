@@ -236,13 +236,16 @@ jedem Textfeld korrekt dargestellt werden. Damit das dauerhaft hält, gilt:
 - **Aufnahmen bevorzugen den Hardware-Encoder** (`h264_mf`, sonst NVENC/QSV/AMF), mit
   automatischem Rückfall auf `libx264` und passendem Pixelformat.
 - **Tastenkürzel:** Navigation liegt auf **Alt** (`Alt+B` zurück, `Alt+H` Start,
-  `Alt+S` Übersicht, `Alt+N` Benachrichtigungen, `Alt+Q` Schnelleinstellungen,
-  `Alt+Umschalt+N/Q` schließt wieder), weil Strg+C/V die Zwischenablage und Strg+U/L
+  `Alt+S` Übersicht, `Alt+↓` Benachrichtigungen, `Alt+Umschalt+↓` Schnelleinstellungen,
+  `Alt+↑` schließt wieder), weil Strg+C/V die Zwischenablage und Strg+U/L
   Sperren/Entsperren belegen. Alt-Tasten kommen als `WM_SYSKEYDOWN`/`WM_SYSKEYUP`; nur
-  B/H/S/N/Q werden abgefangen, damit `Alt+F4` weiter bei `DefWindowProc` ankommt.
-  B/H/S sind Android-Keycodes und laufen über `set_key_callback`; N/Q sind
-  scrcpy-Control-Messages 5/6/7 und laufen deshalb über den `MenuAction`-Weg,
-  genau wie Strg+U/L.
+  B/H/S und die Pfeiltasten hoch/runter werden abgefangen, damit `Alt+F4` weiter bei
+  `DefWindowProc` ankommt. B/H/S sind Android-Keycodes und laufen über
+  `set_key_callback`; die Pfeiltasten sind scrcpy-Control-Messages 5/6/7 und laufen
+  deshalb über den `MenuAction`-Weg, genau wie Strg+U/L. Bei `Alt+↑`/`Alt+↓` müssen
+  Druck **und** jede Wiederholung geschluckt werden — ein einzelnes Alt, das bis
+  `DefWindowProc` durchkommt, lässt Windows nach einer Menüleiste piepsen, die es
+  nicht gibt.
 - **Display komplett aus ist Opt-in und muss IMMER rückgängig gemacht werden:**
   `Settings::m_screen_off` (Standard aus) schickt Control-Message 10
   `SET_SCREEN_POWER_MODE(OFF)`, sobald der Stream steht - die ehrliche Version von
@@ -269,6 +272,14 @@ jedem Textfeld korrekt dargestellt werden. Damit das dauerhaft hält, gilt:
   Eine abgelegte APK, die installiert werden soll, wandert nach `/data/local/tmp` und
   wird von dort per `pm install` entpackt - `adb install` würde sie ein zweites Mal
   ungebremst übertragen, und der Paketinstallierer kommt nicht an `/sdcard` heran.
+  `install_pushed_app()` lässt das `-g` von `install_app()` bewusst weg: bei der
+  eigenen APK, die der Mensch absichtlich einrichtet, sind vorab erteilte
+  Berechtigungen vertretbar - eine ins Fenster gezogene Datei ist ein Fremder und
+  muss Kamera, Mikrofon und Standort genauso beim Handy erfragen wie jede andere App.
+  Zwei Namen sind hier außerdem kodierungskritisch: der Dateiname geht auf zwei
+  verschiedenen Wegen ans Fenster (UTF-8, über `path_to_utf8()`) und an adb
+  (`CreateProcessA`, also ANSI-Codepage, über `path::string()`). Wer sie vertauscht,
+  malt `Größe.pdf` als `Gr��e.pdf` in die Transfer-Bubble.
 - **Optionale UHID-Tastatur** (`Settings::m_uhid_keyboard`, standardmäßig aus): statt
   `inject_text` hängt eine virtuelle USB-HID-Tastatur am Handy (scrcpy-Control-Messages
   12 `UHID_CREATE`, 13 `UHID_INPUT`, 14 `UHID_DESTROY` sowie 15

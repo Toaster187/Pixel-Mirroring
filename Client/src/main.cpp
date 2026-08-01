@@ -57,6 +57,30 @@ std::filesystem::path path_from_utf8(const std::string& utf8) {
 #endif
 }
 
+// Ugg! And the same road back. A rock-name that goes onto the window must be UTF-8,
+// because the window chews every text with CP_UTF8. path::string() hands out the
+// tribe's OWN old letter-table instead (cp1252 here), where "ö" is a single stone —
+// the window then finds half a letter and paints a black diamond. So: never let
+// path::string() near the window, only this.
+//
+// The other road, the one to adb, deliberately keeps path::string(): adb is started
+// with CreateProcessA, which reads the same old letter-table, so both sides agree.
+std::string path_to_utf8(const std::filesystem::path& path) {
+#ifdef _WIN32
+    const std::wstring wide = path.wstring();
+    if (wide.empty()) return std::string();
+    const int len = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), static_cast<int>(wide.size()),
+                                        nullptr, 0, nullptr, nullptr);
+    if (len <= 0) return path.string();
+    std::string utf8(len, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), static_cast<int>(wide.size()),
+                        &utf8[0], len, nullptr, nullptr);
+    return utf8;
+#else
+    return path.string();
+#endif
+}
+
 bool has_extension(const std::filesystem::path& file, const char* wanted) {
     std::string ext = file.extension().string();
     std::transform(ext.begin(), ext.end(), ext.begin(),
@@ -1349,7 +1373,7 @@ static int app_main() {
         }
 
         const std::string drop_label = files.size() == 1
-            ? files.front().filename().string()
+            ? path_to_utf8(files.front().filename())
             : (std::to_string(files.size()) + " Dateien");
         transfer_busy.store(true);
         window->set_transfer_status(pm::window::TransferState::ACTIVE, 0.0f, drop_label);
@@ -1365,7 +1389,11 @@ static int app_main() {
 
             for (size_t i = 0; i < files.size() && !should_stop; ++i) {
                 const std::filesystem::path& file = files[i];
+                // TWO names for the same rock, and they must not be swapped: the first
+                // one walks to adb (old letter-table, see path_to_utf8), the second one
+                // onto the window (UTF-8). Same letters, different stones.
                 const std::string name = file.filename().string();
+                const std::string name_ui = path_to_utf8(file.filename());
                 const bool as_app = install_apks && has_extension(file, ".apk");
                 // An APK the human wants installed rests in the shell's own corner —
                 // the package unpacker cannot read out of /sdcard on modern phones.
@@ -1374,8 +1402,8 @@ static int app_main() {
                     : (std::string(DROP_TARGET_DIR) + "/" + name);
                 // With several rocks the bubble counts trips, with one it shows the name.
                 const std::string label = files.size() == 1
-                    ? name
-                    : (std::to_string(i + 1) + "/" + std::to_string(files.size()) + " " + name);
+                    ? name_ui
+                    : (std::to_string(i + 1) + "/" + std::to_string(files.size()) + " " + name_ui);
 
                 const float base = static_cast<float>(i) / static_cast<float>(files.size());
                 const float span = 1.0f / static_cast<float>(files.size());
@@ -1392,7 +1420,7 @@ static int app_main() {
                     &should_stop);
 
                 if (!sent) {
-                    failure = should_stop ? "Übertragung abgebrochen." : ("Fehlgeschlagen: " + name);
+                    failure = should_stop ? "Übertragung abgebrochen." : ("Fehlgeschlagen: " + name_ui);
                     break;
                 }
 
@@ -1411,7 +1439,10 @@ static int app_main() {
                     adb.execute_shell_command(device_id,
                         "am broadcast -a dev.pixelmirroring.app.SCAN_FILE -e path " +
                         pm::adb::shell_quote(remote_path));
-                    clipboard_path = remote_path;
+                    // The memory-stone is NOT adb: the control hole speaks UTF-8, and
+                    // the rock on the phone already carries its real name. Hand over the
+                    // name the phone itself sees, not the one the tribe's table made.
+                    clipboard_path = std::string(DROP_TARGET_DIR) + "/" + name_ui;
                 }
                 ++carried;
             }
