@@ -218,8 +218,9 @@ if(DEFINED VCPKG_TARGET_TRIPLET)
 endif()
 
 if(WIN32)
-    # Required for custom window frame and GDI drawing on Windows
-    target_link_libraries(PixelMirroring PRIVATE dwmapi uxtheme gdi32 gdiplus user32)
+    # Required for custom window frame and GDI drawing on Windows.
+    # shell32 brings DragAcceptFiles/DragQueryFileW for files dropped onto the window.
+    target_link_libraries(PixelMirroring PRIVATE dwmapi uxtheme gdi32 gdiplus user32 shell32)
     # No console window — we are GUI cave people
     set_target_properties(PixelMirroring PROPERTIES WIN32_EXECUTABLE TRUE)
 elseif(APPLE)

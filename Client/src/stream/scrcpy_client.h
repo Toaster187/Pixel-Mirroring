@@ -62,6 +62,20 @@ public:
     void inject_set_clipboard(const std::string& text);
     void inject_get_clipboard(uint8_t copy_key = 0);
 
+    // Cave man pulls the phone's top curtains down or shoves them back up.
+    // Server 2.7 message types 5, 6 and 7 — one bare byte each.
+    void inject_expand_notification_panel();
+    void inject_expand_settings_panel();
+    void inject_collapse_panels();
+
+    // Type 10: the phone's light itself, not just its brightness. false = panel dark,
+    // true = panel back to normal. The phone stays awake and steerable either way.
+    void inject_screen_power_mode(bool on);
+
+    // True while WE hold the phone's light down. Stays true across stop() when the
+    // "light back on" word never reached the phone — then somebody else must fix it.
+    bool screen_forced_off() const { return screen_forced_off_.load(); }
+
 private:
     bool setup_tunnel();
     bool start_server_process();
@@ -100,6 +114,10 @@ private:
     std::thread audio_thread_;
     std::thread control_thread_;
     std::atomic<bool> running_{false};
+
+    // Deliberately NOT reset in start(): if the phone's light is still down from a
+    // session whose socket died, the next session has to know and put it back.
+    std::atomic<bool> screen_forced_off_{false};
 
     // Turns false when the phone says it cannot capture sound. Video must not care.
     bool audio_available_{false};

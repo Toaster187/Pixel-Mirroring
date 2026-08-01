@@ -14,6 +14,7 @@
 - ⌨️ **Tastenkürzel** – Zurück, Startbildschirm, App-Übersicht, Sperren/Entsperren
 - 📋 **Bidirektionale Clipboard-Synchronisation** – Text einfach kopieren/einfügen
 - 📸 **Screenshot & Screen Recording** – Aufnahmen mit Hardware-Encoder, optional direkt aufs Handy
+- 📥 **Drag & Drop aufs Handy** – Dateien ins Fenster ziehen, APKs wahlweise direkt installieren
 - 🔄 **Auto-Reconnect** – Automatische Wiederverbindung beim Start
 - 🎨 **Custom Borderless Window** – Win11 Snap Layouts, Auto-Rotation, Aspect-Ratio Lock
 - 🔒 **On-Demand ADB** – ADB WiFi wird nur bei Bedarf aktiviert, nach 60s automatisch deaktiviert
@@ -101,6 +102,8 @@ festen Reihenfolge geöffnet: **Video → Audio → Control**.
 4. **Input-Forwarding**: Maus-, Tastatur- & Touch-Eingaben werden zurück über Control-Socket geschickt
 5. **Clipboard-Sync**: Text wird bidirektional zwischen PC & Handy synchronisiert
 6. **Capture/Recording**: Screenshots & Screen-Recordings möglich (speichern lokal oder aufs Handy senden)
+7. **Dateiübertragung**: Ins Fenster gezogene Dateien wandern in 1-MiB-Häppchen aufs Handy — zwischen den
+   Häppchen pausiert der Transfer so lange, wie er gedauert hat, damit der Stream Vorrang behält
 
 ---
 
@@ -130,6 +133,7 @@ festen Reihenfolge geöffnet: **Video → Audio → Control**.
 | **Tonübertragung** | Roh-PCM über eigenen Socket, Wiedergabe via SDL2, im Menü abschaltbar |
 | **Input Forwarding** | Maus, Tastatur, Multi-Touch über scrcpy Control-Socket |
 | **Screenshot/Recording** | Captures als PNG, Videos mit Hardware-H.264 (`h264_mf`), optional aufs Handy senden |
+| **Drag & Drop** | Dateien ins Fenster ziehen → `/sdcard/Download`, Pfad landet in der Handy-Zwischenablage; APKs auf Nachfrage direkt installieren. Fortschritt in einer eigenen Bubble, Übertragung gedrosselt zugunsten des Streams |
 | **Auto-Reconnect** | Bei Start automatische Verbindung zum letzten bekannten Gerät |
 | **Portable Build Mode** | Optional: Konfiguration im App-Ordner statt AppData (Entwicklung/USB-Stick) |
 
@@ -150,6 +154,9 @@ Alle Kürzel wirken nur, solange der Stream läuft.
 | **Alt + B** | Zurück |
 | **Alt + H** | Startbildschirm |
 | **Alt + S** | App-Übersicht (Task-Manager) |
+| **Alt + ↓** | Benachrichtigungen aufziehen |
+| **Alt + Umschalt + ↓** | Schnelleinstellungen aufziehen |
+| **Alt + ↑** | Aufgezogenes Panel wieder schließen |
 | **Strg + U** | Handy entsperren (benötigt gespeicherte PIN) |
 | **Strg + L** | Handy sperren & Bildschirm aus |
 | **Strg + C** | Zwischenablage vom Handy holen |
@@ -158,6 +165,30 @@ Alle Kürzel wirken nur, solange der Stream läuft.
 Für die Navigation ist bewusst **Alt** statt Strg belegt: Strg+C/V werden für die
 Zwischenablage gebraucht, und Strg+U/L für Sperren und Entsperren. `Alt+F4` und
 `Alt+Tab` funktionieren wie gewohnt weiter.
+
+---
+
+## 🌑 Handy-Display während der Spiegelung
+
+Standardmäßig dimmt der Client das Handy-Display beim Verbinden auf die niedrigste
+Helligkeit (**„Bildschirm auf niedrigste Helligkeit"** im Kontextmenü) und stellt die
+ursprüngliche Helligkeit beim Trennen wieder her.
+
+Wer das Display wirklich komplett dunkel haben möchte — weniger Akkuverbrauch, und im
+Büro liest niemand mit —, aktiviert zusätzlich **„Handy-Display komplett aus"**. Diese
+Option ist **bewusst Opt-in** und standardmäßig aus.
+
+Das Handy bleibt dabei wach und vollständig steuerbar, nur das Panel ist dunkel. Damit
+niemand mit einem scheinbar defekten Handy dasteht, wird das Display auf drei Wegen
+wieder eingeschaltet:
+
+1. Der Client schickt beim Trennen `SET_SCREEN_POWER_MODE(NORMAL)` über den
+   Control-Socket, **bevor** die Sockets abgebaut werden.
+2. Der scrcpy-Server hält dafür einen eigenen Aufräum-Prozess auf dem Handy bereit, der
+   auch dann greift, wenn der Server abstürzt.
+3. Schlägt beides fehl (Socket schon tot, Server mitgerissen), schickt der Client beim
+   Beenden über ADB einmal Schlafen + Aufwecken. Android vergibt den Display-Zustand
+   dann selbst neu und wirft die erzwungene Dunkelheit weg.
 
 ---
 

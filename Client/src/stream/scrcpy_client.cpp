@@ -19,6 +19,7 @@ extern "C" {
 #pragma comment(lib, "ws2_32.lib")
 #else
 #include <sys/socket.h>
+#include <sys/ioctl.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
@@ -162,6 +163,13 @@ bool ScrcpyClient::start(const Config& config) {
 }
 
 void ScrcpyClient::stop() {
+    // Ugg! Give the phone its light back BEFORE the talking-hole gets filled in.
+    // Afterwards nobody can reach the phone any more and the human is left holding a
+    // black stone. Runs while running_ is still true, or send_control refuses.
+    if (screen_forced_off_.load()) {
+        inject_screen_power_mode(true);
+    }
+
     bool expected = true;
     if (!running_.compare_exchange_strong(expected, false)) {
         return;
@@ -623,6 +631,15 @@ void ScrcpyClient::video_thread_loop() {
     const uint32_t MAX_PACKET_SIZE = 10 * 1024 * 1024; // 10 MB max packet size
     bool logged_first_frame = false;
 
+    // Ugg! Cave man must SEE when the picture falls behind instead of guessing. He
+    // counts what he carved, how long carving took, and how big the pile of untouched
+    // stones in the socket grew. A pile that keeps growing IS the latency.
+    auto stats_since = std::chrono::steady_clock::now();
+    int stats_packets = 0;
+    long long stats_decode_us = 0;
+    unsigned long long stats_bytes = 0;
+    unsigned long stats_backlog_peak = 0;
+
     while (running_) {
         uint8_t header[12];
         if (!recv_all((char*)header, 12)) break;
@@ -643,7 +660,28 @@ void ScrcpyClient::video_thread_loop() {
         packet_data.resize(size);
         if (!recv_all((char*)packet_data.data(), size)) break;
         
-        if (decoder_.decode(packet_data.data(), size, is_config)) {
+        // What is already waiting in the socket while we still chew on this packet.
+        {
+#ifdef _WIN32
+            unsigned long backlog = 0;
+            if (ioctlsocket(video_socket_, FIONREAD, &backlog) == 0 && backlog > stats_backlog_peak) {
+#else
+            int backlog = 0;
+            if (ioctl(video_socket_, FIONREAD, &backlog) == 0 &&
+                (unsigned long)backlog > stats_backlog_peak) {
+#endif
+                stats_backlog_peak = (unsigned long)backlog;
+            }
+        }
+
+        const auto decode_begin = std::chrono::steady_clock::now();
+        const bool got_frame = decoder_.decode(packet_data.data(), size, is_config);
+        stats_decode_us += std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - decode_begin).count();
+        ++stats_packets;
+        stats_bytes += size;
+
+        if (got_frame) {
             if (frame_cb_) {
                 AVFrame* frame = (AVFrame*)decoder_.get_frame();
                 if (!logged_first_frame && frame) {
@@ -656,6 +694,23 @@ void ScrcpyClient::video_thread_loop() {
                 }
                 frame_cb_(frame);
             }
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        const auto window_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - stats_since).count();
+        if (window_ms >= 5000 && stats_packets > 0) {
+            std::ostringstream oss;
+            oss << "[Scrcpy] " << (stats_packets * 1000 / window_ms) << " fps"
+                << ", decode " << (stats_decode_us / stats_packets / 1000.0) << " ms/frame"
+                << ", " << (stats_bytes * 8 / window_ms / 1000) << " Mbit/s"
+                << ", socket backlog peak " << (stats_backlog_peak / 1024) << " KiB";
+            log_stream_event(oss.str());
+            stats_since = now;
+            stats_packets = 0;
+            stats_decode_us = 0;
+            stats_bytes = 0;
+            stats_backlog_peak = 0;
         }
     }
 
@@ -831,6 +886,36 @@ void ScrcpyClient::inject_set_clipboard(const std::string& text) {
     std::memcpy(buf.data() + 14, text.data(), len);
 
     send_control(buf.data(), buf.size());
+}
+
+void ScrcpyClient::inject_expand_notification_panel() {
+    uint8_t buf[1] = {5}; // SC_CONTROL_MSG_TYPE_EXPAND_NOTIFICATION_PANEL
+    send_control(buf, sizeof(buf));
+}
+
+void ScrcpyClient::inject_expand_settings_panel() {
+    uint8_t buf[1] = {6}; // SC_CONTROL_MSG_TYPE_EXPAND_SETTINGS_PANEL
+    send_control(buf, sizeof(buf));
+}
+
+void ScrcpyClient::inject_collapse_panels() {
+    uint8_t buf[1] = {7}; // SC_CONTROL_MSG_TYPE_COLLAPSE_PANELS
+    send_control(buf, sizeof(buf));
+}
+
+void ScrcpyClient::inject_screen_power_mode(bool on) {
+    uint8_t buf[2];
+    buf[0] = 10;             // SC_CONTROL_MSG_TYPE_SET_SCREEN_POWER_MODE
+    buf[1] = on ? 2 : 0;     // 2 = POWER_MODE_NORMAL, 0 = POWER_MODE_OFF
+    // Ugg! Only remember the phone as dark once the word really left the cave.
+    // A word that never arrived changed nothing on the other side.
+    if (send_control(buf, sizeof(buf))) {
+        screen_forced_off_.store(!on);
+        log_stream_event(on ? "[Scrcpy] Device screen power back to normal"
+                            : "[Scrcpy] Device screen power turned off");
+    } else if (!on) {
+        log_stream_event("[Scrcpy] Could not turn device screen off — control socket silent");
+    }
 }
 
 void ScrcpyClient::inject_get_clipboard(uint8_t copy_key) {

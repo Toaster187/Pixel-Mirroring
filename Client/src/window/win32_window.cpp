@@ -2,6 +2,7 @@
 #include "win32_window.h"
 #include "../resource.h"
 #include <windowsx.h>
+#include <shellapi.h>
 #include <algorithm>
 #include <SDL2/SDL.h>
 #include <dwmapi.h>
@@ -18,13 +19,21 @@ namespace {
     const int BUBBLE_GAP = 6;
     const int MIN_PHONE_W = 140;
     const int MIN_PHONE_H = 200;
+    // Transfer bubble shows the file name next to the ring; when the window is too
+    // narrow for that it shrinks down to just the ring.
+    const int TRANSFER_BUBBLE_W = 132;
+    const int TRANSFER_RING_ONLY_W = 40;
     const UINT WM_VIDEO_RENDER = WM_APP + 2;
+    // Cave man does not open talking-stone while the drag hand still holds the rock.
+    // Drop is handed back to ourselves first, so Explorer is free again.
+    const UINT WM_FILES_DROPPED = WM_APP + 4;
     const wchar_t* ICON_DRAG = L"\uE700";
     const wchar_t* ICON_MINIMIZE = L"\uE921";
     const wchar_t* ICON_MAXIMIZE = L"\uE922";
     const wchar_t* ICON_RESTORE = L"\uE923";
     const wchar_t* ICON_CLOSE = L"\uE8BB";
     const wchar_t* ICON_CAPTURE = L"\uE722";
+    const wchar_t* ICON_CHECK = L"\uE73E";
 
     void AddRoundedRect(Gdiplus::GraphicsPath& path, Gdiplus::RectF r, float rad) {
         float d = rad * 2;
@@ -210,6 +219,15 @@ bool Win32Window::create() {
 
     AddClipboardFormatListener(hwnd_);
 
+    // Cave man opens window for rocks thrown in from the file cave. The SDL child is
+    // WS_DISABLED, so WindowFromPoint walks past it and every drop lands right here.
+    DragAcceptFiles(hwnd_, TRUE);
+    // Ugg! If our fire burns higher than Explorer's, Windows eats the drop messages
+    // in silence. Let them through explicitly. 0x0049 = WM_COPYGLOBALDATA.
+    ChangeWindowMessageFilterEx(hwnd_, WM_DROPFILES, MSGFLT_ALLOW, nullptr);
+    ChangeWindowMessageFilterEx(hwnd_, WM_COPYDATA, MSGFLT_ALLOW, nullptr);
+    ChangeWindowMessageFilterEx(hwnd_, 0x0049, MSGFLT_ALLOW, nullptr);
+
     // MEOW. REMOVE WINDOW 11 BORDER AND CORNER ARTIFACTS.
     COLORREF border_color = 0xFFFFFFFE; // DWM_COLOR_DONT_DRAW
     DwmSetWindowAttribute(hwnd_, 34, &border_color, sizeof(border_color)); // 34 = DWMWA_BORDER_COLOR
@@ -345,6 +363,21 @@ void Win32Window::recalc_layout() {
         rect_screenshot_bubble_ = {0,0,0,0};
     }
 
+    // Transfer bubble always sits at the far left end of the row — second bubble on a
+    // quiet day, third one while the phone is being filmed or photographed.
+    if (transfer_state_ != TransferState::IDLE) {
+        int t_right = rect_bubble_.left;
+        if (screenshot_flash_)  t_right = rect_screenshot_bubble_.left;
+        else if (recording_)    t_right = rect_recording_bubble_.left;
+
+        int t_bw = (t_right - BUBBLE_GAP >= TRANSFER_BUBBLE_W) ? TRANSFER_BUBBLE_W : TRANSFER_RING_ONLY_W;
+        int t_bx = t_right - BUBBLE_GAP - t_bw;
+        if (t_bx < 0) t_bx = 0;
+        rect_transfer_bubble_ = {t_bx, 0, t_bx + t_bw, BUBBLE_H};
+    } else {
+        rect_transfer_bubble_ = {0,0,0,0};
+    }
+
     // Start button in phone area
     int sbw = 180, sbh = 40;
     int px = (rect_phone_.left + rect_phone_.right) / 2;
@@ -393,7 +426,13 @@ void Win32Window::update_region() {
         CombineRgn(rgn, rgn, br3, RGN_OR);
         DeleteObject(br3);
     }
-    
+    if (transfer_state_ != TransferState::IDLE) {
+        HRGN br4 = CreateRoundRectRgn(rect_transfer_bubble_.left, rect_transfer_bubble_.top,
+            rect_transfer_bubble_.right+1, rect_transfer_bubble_.bottom+1, BUBBLE_CORNER_RADIUS*2, BUBBLE_CORNER_RADIUS*2);
+        CombineRgn(rgn, rgn, br4, RGN_OR);
+        DeleteObject(br4);
+    }
+
     SetWindowRgn(hwnd_, rgn, TRUE);
     DeleteObject(br); DeleteObject(pr);
 }
@@ -613,6 +652,8 @@ void Win32Window::handle_paint() {
             g.DrawString(L"\xE722", -1, font_icon_, iconRect, &sfmt, &whiteB);
         }
 
+        draw_transfer_bubble(g);
+
         if (app_state_ != AppState::STREAMING) {
             switch (app_state_) {
             case AppState::SETUP:    draw_setup_screen(g); break;
@@ -629,6 +670,80 @@ void Win32Window::handle_paint() {
     DeleteObject(bmp);
     DeleteDC(mem);
     EndPaint(hwnd_, &ps);
+}
+
+// Ugg! Rock is on its way to the phone. Ring fills up, name says which rock.
+void Win32Window::draw_transfer_bubble(Gdiplus::Graphics& g) {
+    if (transfer_state_ == TransferState::IDLE) return;
+
+    Gdiplus::RectF box((float)rect_transfer_bubble_.left, (float)rect_transfer_bubble_.top,
+        (float)(rect_transfer_bubble_.right - rect_transfer_bubble_.left) - 1.0f,
+        (float)(rect_transfer_bubble_.bottom - rect_transfer_bubble_.top) - 1.0f);
+    if (box.Width <= 0.0f || box.Height <= 0.0f) return;
+
+    Gdiplus::Color accent(255, 90, 170, 255);
+    if (transfer_state_ == TransferState::DONE)   accent = Gdiplus::Color(255, 60, 190, 110);
+    if (transfer_state_ == TransferState::FAILED) accent = Gdiplus::Color(255, 244, 67, 54);
+
+    {
+        Gdiplus::GraphicsPath bp;
+        AddRoundedRect(bp, box, (float)BUBBLE_CORNER_RADIUS);
+        Gdiplus::SolidBrush bb(Gdiplus::Color(255, 50, 50, 50));
+        g.FillPath(&bb, &bp);
+        Gdiplus::Pen pen(Gdiplus::Color(255, 75, 75, 75), 1.0f);
+        g.DrawPath(&pen, &bp);
+    }
+
+    Gdiplus::StringFormat centred;
+    centred.SetAlignment(Gdiplus::StringAlignmentCenter);
+    centred.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+
+    // Wide bubble: ring hugs the right end, name sits left of it. Narrow bubble has
+    // no room for a name, so the ring moves to the middle.
+    const float ring_d = 20.0f;
+    const bool has_room_for_name =
+        (rect_transfer_bubble_.right - rect_transfer_bubble_.left) > TRANSFER_RING_ONLY_W;
+    const float ring_x = has_room_for_name
+        ? box.GetRight() - (BUBBLE_H - ring_d) * 0.5f - ring_d
+        : box.X + (box.Width - ring_d) * 0.5f;
+    Gdiplus::RectF ring(ring_x, box.Y + (box.Height - ring_d) * 0.5f, ring_d, ring_d);
+
+    Gdiplus::Pen track(Gdiplus::Color(255, 92, 92, 92), 3.0f);
+    g.DrawEllipse(&track, ring);
+
+    if (transfer_state_ == TransferState::ACTIVE) {
+        const float done = std::clamp(transfer_progress_, 0.0f, 1.0f);
+        if (done > 0.002f) {
+            Gdiplus::Pen arc(accent, 3.0f);
+            arc.SetStartCap(Gdiplus::LineCapRound);
+            arc.SetEndCap(Gdiplus::LineCapRound);
+            g.DrawArc(&arc, ring, -90.0f, done * 360.0f);
+        }
+        wchar_t percent[8];
+        swprintf_s(percent, 8, L"%d", (int)(done * 100.0f + 0.5f));
+        Gdiplus::SolidBrush pb(Gdiplus::Color(255, 235, 235, 235));
+        g.DrawString(percent, -1, font_live_, ring, &centred, &pb);
+    } else {
+        Gdiplus::Pen full(accent, 3.0f);
+        g.DrawEllipse(&full, ring);
+        Gdiplus::SolidBrush mark(accent);
+        if (transfer_state_ == TransferState::DONE) {
+            g.DrawString(ICON_CHECK, -1, font_icon_, ring, &centred, &mark);
+        } else {
+            g.DrawString(L"!", -1, font_timer_, ring, &centred, &mark);
+        }
+    }
+
+    const float name_w = ring_x - box.X - 14.0f;
+    if (has_room_for_name && name_w > 20.0f && !transfer_label_.empty()) {
+        Gdiplus::StringFormat name_fmt;
+        name_fmt.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+        name_fmt.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
+        name_fmt.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
+        Gdiplus::SolidBrush nb(Gdiplus::Color(255, 225, 225, 225));
+        Gdiplus::RectF nr(box.X + 12.0f, box.Y, name_w, box.Height);
+        g.DrawString(utf8_to_wstring(transfer_label_).c_str(), -1, font_timer_, nr, &name_fmt, &nb);
+    }
 }
 
 void Win32Window::draw_setup_screen(Gdiplus::Graphics& g) {
@@ -779,7 +894,9 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
         int bubble_req = BUBBLE_W + BUBBLE_GAP * 2; // ~200
         if (recording_) bubble_req += 100 + BUBBLE_GAP;
         if (screenshot_flash_) bubble_req += 40 + BUBBLE_GAP;
-        
+        // Only the ring is non-negotiable — the file name gives way on narrow windows.
+        if (transfer_state_ != TransferState::IDLE) bubble_req += TRANSFER_RING_ONLY_W + BUBBLE_GAP;
+
         if (bubble_req > min_w) {
             min_w = bubble_req;
         }
@@ -849,6 +966,20 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
             InvalidateRect(hwnd_, &rect_recording_bubble_, FALSE);
             return 0;
         }
+        if (wp == 4) {
+            // Only runs while the bubble rests on a tick or a bang — the travelling
+            // ring is repainted by the progress shouts themselves.
+            if (transfer_state_ == TransferState::DONE || transfer_state_ == TransferState::FAILED) {
+                const auto rested = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - transfer_settled_at_).count();
+                if (rested > 2500) {
+                    set_transfer_status(TransferState::IDLE, 0.0f, "");
+                }
+            } else {
+                KillTimer(hwnd_, 4);
+            }
+            return 0;
+        }
         if (wp == 1 && app_state_ != AppState::STREAMING) {
             InvalidateRect(hwnd_, &rect_phone_, FALSE);
             return 0;
@@ -906,6 +1037,17 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
         // Deferred start callback — cave man wait for paint, then go
         if (start_cb_) start_cb_();
         return 0;
+    case WM_DROPFILES:
+        handle_dropped_files(wp);
+        return 0;
+    case WM_FILES_DROPPED: {
+        auto* paths = reinterpret_cast<std::vector<std::string>*>(lp);
+        if (paths) {
+            if (m_file_drop_cb_) m_file_drop_cb_(*paths);
+            delete paths;
+        }
+        return 0;
+    }
     case WM_NCMOUSEMOVE: {
         POINT pt = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
         ScreenToClient(hwnd_, &pt);
@@ -1012,11 +1154,38 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
         // Ugg! While Alt is pressed Windows sends SYS messages instead of the normal
         // ones. Everything we do not claim falls through to DefWindowProc, so Alt+F4
         // and friends keep working.
-        if (app_state_ == AppState::STREAMING && m_key_cb_ && (GetKeyState(VK_MENU) & 0x8000)) {
-            const int ak = alt_shortcut_to_android_keycode(wp);
-            if (ak != 0) {
-                m_key_cb_(msg == WM_SYSKEYDOWN ? 0 : 1, ak);
+        //
+        // AltGr is NOT Alt: the tribe sends it as Ctrl+Alt together. On a German
+        // keyboard AltGr+Q is how a human writes "@". Claiming it here would eat that
+        // letter before it ever reaches the phone, so Ctrl must be off the stone.
+        const bool alt_alone = (GetKeyState(VK_MENU) & 0x8000) != 0 &&
+                               (GetKeyState(VK_CONTROL) & 0x8000) == 0;
+        if (app_state_ == AppState::STREAMING && alt_alone) {
+            // The phone's top curtains are not keys — they ride the menu path, the
+            // same way Strg+U/L do. Alt+Down pulls them down like a thumb on the
+            // phone would, Alt+Up shoves them back. Down, up and every repeat in
+            // between get eaten here, otherwise DefWindowProc hears a lonely Alt and
+            // beeps at a menu bar that does not exist.
+            if (wp == VK_DOWN || wp == VK_UP) {
+                const bool first_press = (msg == WM_SYSKEYDOWN) && !(lp & (1 << 30));
+                if (first_press && menu_cb_) {
+                    if (wp == VK_UP) {
+                        menu_cb_(MenuAction::COLLAPSE_PANELS);
+                    } else {
+                        // One thumb-pull opens the messages, a harder one the switches.
+                        menu_cb_((GetKeyState(VK_SHIFT) & 0x8000)
+                            ? MenuAction::EXPAND_SETTINGS_PANEL
+                            : MenuAction::EXPAND_NOTIFICATION_PANEL);
+                    }
+                }
                 return 0;
+            }
+            if (m_key_cb_) {
+                const int ak = alt_shortcut_to_android_keycode(wp);
+                if (ak != 0) {
+                    m_key_cb_(msg == WM_SYSKEYDOWN ? 0 : 1, ak);
+                    return 0;
+                }
             }
         }
         break;
@@ -1143,15 +1312,21 @@ void Win32Window::post_task(std::function<void()> task) {
 
 namespace {
     constexpr UINT ID_FACTORY_RESET = 1001;
-    constexpr UINT ID_TOGGLE_FPS    = 1002;
-    constexpr UINT ID_TOGGLE_RES    = 1003;
+    constexpr UINT ID_QUALITY_HEADER = 1002; // folds the three quality stones open
+    constexpr UINT ID_QUALITY_BATTERY  = 1010;
+    constexpr UINT ID_QUALITY_BALANCED = 1011;
+    constexpr UINT ID_QUALITY_MAXIMUM  = 1012;
     constexpr UINT ID_SET_PIN       = 1004;
     constexpr UINT ID_UNLOCK_DEVICE = 1005;
     constexpr UINT ID_TOGGLE_COMPAT = 1006;
     constexpr UINT ID_TOGGLE_LOWEST_BRIGHTNESS = 1007;
     constexpr UINT ID_LOCK_DEVICE   = 1008;
     constexpr UINT ID_TOGGLE_AUDIO  = 1009;
-    constexpr UINT ID_TOGGLE_AUTO_ROTATE = 1010;
+    constexpr UINT ID_TOGGLE_SCREEN_OFF = 1013;
+    // Ugg! 1010 already belongs to the battery preset since the quality stones
+    // arrived. Two menu rows with the same number means one of them fires the
+    // other's action, so the rotation switch moved out of the way.
+    constexpr UINT ID_TOGGLE_AUTO_ROTATE = 1016;
 
     constexpr UINT ID_SCREENSHOT = 1101;
     constexpr UINT ID_TOGGLE_RECORDING = 1102;
@@ -1165,12 +1340,56 @@ namespace {
         bool is_separator;
         // Ugg! A row that only tells, never listens. No hover, no click.
         bool is_info = false;
+        // Row that folds its children open instead of doing something.
+        bool is_expander = false;
+        // One of the folded-out children. Only one of them wears the dot.
+        bool is_radio = false;
+        bool is_selected = false;
     };
 
     std::vector<MenuItem> g_menu_items;
     int g_hovered_item = -1;
     UINT g_selected_action = 0;
     bool g_menu_done = false;
+    constexpr int MENU_WIDTH = 320;
+
+    int menu_height_for_items() {
+        int height = 10;
+        for (const auto& item : g_menu_items) {
+            height += item.is_separator ? 11 : 30;
+        }
+        return height;
+    }
+
+    // Ugg! Menu must not hang off the edge of the cave wall — especially once it
+    // grows by three rows while it is already open.
+    void clamp_menu_to_monitor(POINT& pt, int height) {
+        HMONITOR monitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO mi = {sizeof(MONITORINFO)};
+        if (!GetMonitorInfo(monitor, &mi)) return;
+        if (pt.y + height > mi.rcWork.bottom) {
+            pt.y = mi.rcWork.bottom - height;
+        }
+        if (pt.y < mi.rcWork.top) pt.y = mi.rcWork.top;
+        if (pt.x + MENU_WIDTH > mi.rcWork.right) {
+            pt.x = mi.rcWork.right - MENU_WIDTH;
+        }
+        if (pt.x < mi.rcWork.left) pt.x = mi.rcWork.left;
+    }
+
+    // Menu grew or shrank. New stone size, new round corners, fresh paint.
+    void resize_menu_window(HWND hMenu) {
+        const int height = menu_height_for_items();
+        RECT wr = {0};
+        GetWindowRect(hMenu, &wr);
+        POINT pt = {wr.left, wr.top};
+        clamp_menu_to_monitor(pt, height);
+        SetWindowPos(hMenu, nullptr, pt.x, pt.y, MENU_WIDTH, height,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowRgn(hMenu, CreateRoundRectRgn(0, 0, MENU_WIDTH, height, 14, 14), TRUE);
+        g_hovered_item = -1;
+        InvalidateRect(hMenu, nullptr, TRUE);
+    }
 
     LRESULT CALLBACK SettingsMenuProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         switch (msg) {
@@ -1231,6 +1450,47 @@ namespace {
                         g.DrawString(item.text.c_str(), -1, &infoFont, textRect, &format, &infoBrush);
                         y += 30;
                         continue;
+                    }
+
+                    if (item.is_radio) {
+                        // Dot on the left, text pushed in — reads as "pick one of these".
+                        const float cx = 26.0f;
+                        const float cy = (float)y + 15.0f;
+                        const Gdiplus::Color accent(255, 76, 175, 80);
+                        Gdiplus::Pen ring(item.is_selected ? accent : Gdiplus::Color(255, 110, 110, 110), 1.5f);
+                        g.DrawEllipse(&ring, cx - 7.0f, cy - 7.0f, 14.0f, 14.0f);
+                        if (item.is_selected) {
+                            Gdiplus::SolidBrush dot(accent);
+                            g.FillEllipse(&dot, cx - 3.5f, cy - 3.5f, 7.0f, 7.0f);
+                        }
+                        Gdiplus::Font childFont(&fontFamily, 9.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
+                        Gdiplus::SolidBrush childBrush(item.is_selected
+                            ? Gdiplus::Color(255, 240, 240, 240)
+                            : Gdiplus::Color(255, 190, 190, 190));
+                        textRect.X = 42.0f;
+                        textRect.Width = (float)rc.right - 42.0f - 15.0f;
+                        g.DrawString(item.text.c_str(), -1, &childFont, textRect, &format, &childBrush);
+                        y += 30;
+                        continue;
+                    }
+
+                    if (item.is_expander) {
+                        // Little arrow instead of a switch: points down while folded open.
+                        const float ax = (float)rc.right - 35.0f;
+                        const float ay = (float)y + 15.0f;
+                        Gdiplus::PointF tri[3];
+                        if (item.is_toggled) {
+                            tri[0] = Gdiplus::PointF(ax - 5.0f, ay - 3.0f);
+                            tri[1] = Gdiplus::PointF(ax + 5.0f, ay - 3.0f);
+                            tri[2] = Gdiplus::PointF(ax, ay + 4.0f);
+                        } else {
+                            tri[0] = Gdiplus::PointF(ax - 3.0f, ay - 5.0f);
+                            tri[1] = Gdiplus::PointF(ax + 4.0f, ay);
+                            tri[2] = Gdiplus::PointF(ax - 3.0f, ay + 5.0f);
+                        }
+                        Gdiplus::SolidBrush arrow(Gdiplus::Color(255, 180, 180, 180));
+                        g.FillPolygon(&arrow, tri, 3);
+                        textRect.Width = ax - 25.0f;
                     }
 
                     if (item.has_toggle) {
@@ -1310,7 +1570,11 @@ namespace {
             case WM_LBUTTONUP: {
                 if (g_hovered_item >= 0 && g_hovered_item < (int)g_menu_items.size()) {
                     const auto& item = g_menu_items[g_hovered_item];
-                    if (item.has_toggle) {
+                    if (item.is_expander) {
+                        // Folding happens where the window state lives — just tell it.
+                        const UINT id = item.id;
+                        PostMessage(hwnd, WM_APP + 5, id, 0);
+                    } else if (item.has_toggle) {
                         g_menu_items[g_hovered_item].is_toggled = !item.is_toggled;
                         InvalidateRect(hwnd, nullptr, FALSE);
                         PostMessage(hwnd, WM_APP + 5, item.id, 0);
@@ -1335,13 +1599,36 @@ namespace {
     }
 }
 
-void Win32Window::show_context_menu(POINT pt) {
+// Cave man carves the whole settings menu again — also while it stays open, because
+// folding the quality stones out changes how many rows there are.
+void Win32Window::build_settings_menu_items() {
+    static const wchar_t* const QUALITY_NAMES[3] = {L"Akku sparen", L"Ausgewogen", L"Maximal"};
+    const int quality = (quality_preset_ >= 0 && quality_preset_ <= 2) ? quality_preset_ : 1;
 
     g_menu_items.clear();
-    g_menu_items.push_back({ID_TOGGLE_FPS, L"FPS begrenzen (30)", true, fps_limited_, false});
-    g_menu_items.push_back({ID_TOGGLE_RES, L"Auflösung begrenzen (720p)", true, resolution_limited_, false});
+
+    MenuItem header{ID_QUALITY_HEADER, std::wstring(L"Qualität: ") + QUALITY_NAMES[quality],
+                    false, quality_expanded_, false};
+    header.is_expander = true;
+    g_menu_items.push_back(header);
+
+    if (quality_expanded_) {
+        const struct { UINT id; const wchar_t* text; int index; } presets[3] = {
+            {ID_QUALITY_BATTERY,  L"Akku sparen · 30 FPS · 720p · 4 Mbit/s",           0},
+            {ID_QUALITY_BALANCED, L"Ausgewogen · 60 FPS · volle Auflösung · 15 Mbit/s", 1},
+            {ID_QUALITY_MAXIMUM,  L"Maximal · 120 FPS · volle Auflösung · 40 Mbit/s",  2},
+        };
+        for (const auto& preset : presets) {
+            MenuItem row{preset.id, preset.text, false, false, false};
+            row.is_radio = true;
+            row.is_selected = (preset.index == quality);
+            g_menu_items.push_back(row);
+        }
+    }
+
     g_menu_items.push_back({ID_TOGGLE_COMPAT, L"Kompatibilitätsmodus (langsame PIN)", true, compatibility_mode_, false});
     g_menu_items.push_back({ID_TOGGLE_LOWEST_BRIGHTNESS, L"Bildschirm auf niedrigste Helligkeit", true, lowest_brightness_, false});
+    g_menu_items.push_back({ID_TOGGLE_SCREEN_OFF, L"Handy-Display komplett aus", true, screen_off_, false});
     g_menu_items.push_back({ID_TOGGLE_AUDIO, L"Ton vom Handy übertragen", true, audio_enabled_, false});
     g_menu_items.push_back({0, L"", false, false, true});
     g_menu_items.push_back({ID_SET_PIN, L"PIN zum Entsperren festlegen", false, false, false});
@@ -1349,16 +1636,20 @@ void Win32Window::show_context_menu(POINT pt) {
         g_menu_items.push_back({ID_TOGGLE_AUTO_ROTATE, L"Automatische Bildschirmdrehung (Handy)", true, auto_rotate_enabled_, false});
         g_menu_items.push_back({ID_UNLOCK_DEVICE, L"Handy entsperren (Strg+U)", false, false, false});
         g_menu_items.push_back({ID_LOCK_DEVICE, L"Handy sperren & Bildschirm aus (Strg+L)", false, false, false});
-        // One hint row for all three navigation keys — otherwise nobody finds them.
+        // Two hint rows for the key shortcuts — otherwise nobody finds them.
         g_menu_items.push_back({0, L"Alt+B Zurück · Alt+H Start · Alt+S Übersicht", false, false, false, true});
+        g_menu_items.push_back({0, L"Alt+↓ Benachrichtigungen · Alt+Umschalt+↓ Schnelleinstellungen", false, false, false, true});
+        g_menu_items.push_back({0, L"Alt+↑ schließt sie wieder", false, false, false, true});
     }
     g_menu_items.push_back({0, L"", false, false, true});
     g_menu_items.push_back({ID_FACTORY_RESET, L"Werkseinstellungen zurücksetzen", false, false, false});
+}
 
-    int height = 10;
-    for (const auto& item : g_menu_items) {
-        height += item.is_separator ? 11 : 30;
-    }
+void Win32Window::show_context_menu(POINT pt) {
+
+    quality_expanded_ = false; // Every fresh menu starts folded.
+    build_settings_menu_items();
+    const int height = menu_height_for_items();
 
     static bool class_registered = false;
     if (!class_registered) {
@@ -1373,6 +1664,7 @@ void Win32Window::show_context_menu(POINT pt) {
     }
 
     ClientToScreen(hwnd_, &pt);
+    clamp_menu_to_monitor(pt, height);
 
     g_selected_action = 0;
     g_hovered_item = -1;
@@ -1380,10 +1672,10 @@ void Win32Window::show_context_menu(POINT pt) {
     HWND hMenu = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
         L"PixelMirroringSettingsMenu", L"",
         WS_POPUP | WS_VISIBLE,
-        pt.x, pt.y, 320, height,
+        pt.x, pt.y, MENU_WIDTH, height,
         hwnd_, nullptr, GetModuleHandle(nullptr), nullptr);
-        
-    HRGN rgn = CreateRoundRectRgn(0, 0, 320, height, 14, 14);
+
+    HRGN rgn = CreateRoundRectRgn(0, 0, MENU_WIDTH, height, 14, 14);
     SetWindowRgn(hMenu, rgn, TRUE);
     SetFocus(hMenu);
     g_menu_done = false;
@@ -1401,13 +1693,19 @@ void Win32Window::show_context_menu(POINT pt) {
         if (!IsWindow(hMenu) || g_menu_done) break;
         if (msg.hwnd == hMenu && msg.message == WM_APP + 5) {
             UINT action_id = static_cast<UINT>(msg.wParam);
+            if (action_id == ID_QUALITY_HEADER) {
+                // Fold the three stones in or out and grow the menu around them.
+                quality_expanded_ = !quality_expanded_;
+                build_settings_menu_items();
+                resize_menu_window(hMenu);
+                continue;
+            }
             MenuAction action;
             switch (action_id) {
                 case ID_FACTORY_RESET: action = MenuAction::FACTORY_RESET; break;
-                case ID_TOGGLE_FPS:    action = MenuAction::TOGGLE_FPS_LIMIT; break;
-                case ID_TOGGLE_RES:    action = MenuAction::TOGGLE_RESOLUTION_LIMIT; break;
                 case ID_TOGGLE_COMPAT: action = MenuAction::TOGGLE_COMPATIBILITY_MODE; break;
                 case ID_TOGGLE_LOWEST_BRIGHTNESS: action = MenuAction::TOGGLE_LOWEST_BRIGHTNESS; break;
+                case ID_TOGGLE_SCREEN_OFF: action = MenuAction::TOGGLE_SCREEN_OFF; break;
                 case ID_TOGGLE_AUDIO:  action = MenuAction::TOGGLE_AUDIO; break;
                 case ID_TOGGLE_AUTO_ROTATE: action = MenuAction::TOGGLE_AUTO_ROTATE; break;
                 case ID_SET_PIN:       action = MenuAction::SET_PIN; break;
@@ -1431,10 +1729,12 @@ void Win32Window::show_context_menu(POINT pt) {
     MenuAction action;
     switch (g_selected_action) {
         case ID_FACTORY_RESET: action = MenuAction::FACTORY_RESET; break;
-        case ID_TOGGLE_FPS:    action = MenuAction::TOGGLE_FPS_LIMIT; break;
-        case ID_TOGGLE_RES:    action = MenuAction::TOGGLE_RESOLUTION_LIMIT; break;
+        case ID_QUALITY_BATTERY:  action = MenuAction::SET_QUALITY_BATTERY; break;
+        case ID_QUALITY_BALANCED: action = MenuAction::SET_QUALITY_BALANCED; break;
+        case ID_QUALITY_MAXIMUM:  action = MenuAction::SET_QUALITY_MAXIMUM; break;
         case ID_TOGGLE_COMPAT: action = MenuAction::TOGGLE_COMPATIBILITY_MODE; break;
         case ID_TOGGLE_LOWEST_BRIGHTNESS: action = MenuAction::TOGGLE_LOWEST_BRIGHTNESS; break;
+        case ID_TOGGLE_SCREEN_OFF: action = MenuAction::TOGGLE_SCREEN_OFF; break;
         case ID_TOGGLE_AUDIO:  action = MenuAction::TOGGLE_AUDIO; break;
         case ID_TOGGLE_AUTO_ROTATE: action = MenuAction::TOGGLE_AUTO_ROTATE; break;
         case ID_SET_PIN:       action = MenuAction::SET_PIN; break;
@@ -1536,6 +1836,61 @@ void Win32Window::set_recording(bool recording) {
         recalc_layout();
         update_region();
         InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+}
+
+void Win32Window::handle_dropped_files(WPARAM wparam) {
+    HDROP drop = reinterpret_cast<HDROP>(wparam);
+    if (!drop) return;
+
+    std::vector<std::string> paths;
+    const UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+    for (UINT i = 0; i < count; ++i) {
+        const UINT chars = DragQueryFileW(drop, i, nullptr, 0);
+        if (chars == 0) continue;
+        std::wstring path(chars, L'\0');
+        if (DragQueryFileW(drop, i, path.data(), chars + 1) == 0) continue;
+        paths.push_back(wstring_to_utf8(path));
+    }
+    // Ugg! Hand the rock back to Explorer FIRST. Whatever we do next — even open a
+    // talking-stone the human must answer — must not freeze the cave we took it from.
+    DragFinish(drop);
+
+    if (paths.empty() || !m_file_drop_cb_) return;
+    auto* handover = new std::vector<std::string>(std::move(paths));
+    if (!PostMessage(hwnd_, WM_FILES_DROPPED, 0, reinterpret_cast<LPARAM>(handover))) {
+        delete handover;
+    }
+}
+
+void Win32Window::set_transfer_status(TransferState state, float progress, const std::string& label) {
+    if (!hwnd_) return;
+
+    // Rock carriers live on their own thread. Bubbles belong to the window thread.
+    if (GetCurrentThreadId() != GetWindowThreadProcessId(hwnd_, nullptr)) {
+        post_task([this, state, progress, label]() { set_transfer_status(state, progress, label); });
+        return;
+    }
+
+    const bool was_shown = transfer_state_ != TransferState::IDLE;
+    const bool is_shown = state != TransferState::IDLE;
+    transfer_state_ = state;
+    transfer_progress_ = progress;
+    transfer_label_ = label;
+
+    if (state == TransferState::DONE || state == TransferState::FAILED) {
+        transfer_settled_at_ = std::chrono::steady_clock::now();
+        SetTimer(hwnd_, 4, 250, nullptr);
+    } else {
+        KillTimer(hwnd_, 4);
+    }
+
+    if (was_shown != is_shown) {
+        recalc_layout();
+        update_region();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    } else if (is_shown) {
+        InvalidateRect(hwnd_, &rect_transfer_bubble_, FALSE);
     }
 }
 
