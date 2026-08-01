@@ -3,6 +3,13 @@
 
 namespace pm::input {
 
+namespace {
+// The name the phone shows under Einstellungen -> System -> Sprachen & Eingabe ->
+// Physische Tastatur, where the German layout gets assigned. scrcpy puts its own
+// "scrcpy: " in front, so the human sees "scrcpy: Pixel Mirroring".
+const char* const UHID_KEYBOARD_NAME = "Pixel Mirroring";
+}
+
 InputHandler::InputHandler(pm::stream::ScrcpyClient* client) : client_(client) {}
 
 void InputHandler::set_device_size(int width, int height) {
@@ -73,8 +80,66 @@ void InputHandler::handle_scroll(int x, int y, int ww, int wh, float hscroll, fl
 }
 
 void InputHandler::handle_text(const std::string& text) {
+    // Ugg! With the USB keyboard hanging on the phone the key itself already flew
+    // over. Writing the letter a second time would type everything twice.
+    if (m_uhid_active.load()) return;
+
     // text inject. cave man send string.
     client_->inject_text(text);
+}
+
+void InputHandler::send_hid_report(const uint8_t* report) {
+    client_->uhid_input(HidKeyboard::DEVICE_ID, report, HidKeyboard::REPORT_SIZE);
+}
+
+void InputHandler::handle_raw_key(int action, uint32_t scancode, bool extended) {
+    if (!m_uhid_active.load()) return;
+
+    uint8_t report[HidKeyboard::REPORT_SIZE];
+    if (!m_hid_keyboard.process_key(action == 0, scancode, extended, report)) {
+        return;
+    }
+    send_hid_report(report);
+}
+
+void InputHandler::release_all_keys() {
+    if (!m_uhid_active.load()) return;
+
+    uint8_t report[HidKeyboard::REPORT_SIZE];
+    if (!m_hid_keyboard.release_all(report)) {
+        return;
+    }
+    send_hid_report(report);
+}
+
+bool InputHandler::enable_uhid_keyboard() {
+    if (m_uhid_active.load()) return true;
+    if (!client_->device_supports_uhid()) return false;
+
+    size_t desc_size = 0;
+    const uint8_t* desc = HidKeyboard::report_descriptor(&desc_size);
+    if (!client_->uhid_create(HidKeyboard::DEVICE_ID, UHID_KEYBOARD_NAME, desc, desc_size)) {
+        return false;
+    }
+
+    // Fresh board, no key held. Set the flag LAST — until it is true nobody else
+    // looks at the state above.
+    m_hid_keyboard = HidKeyboard();
+    m_uhid_active.store(true);
+    return true;
+}
+
+void InputHandler::disable_uhid_keyboard() {
+    if (!m_uhid_active.load()) return;
+
+    release_all_keys();
+    m_uhid_active.store(false);
+    client_->uhid_destroy(HidKeyboard::DEVICE_ID);
+}
+
+void InputHandler::reset_uhid_keyboard() {
+    m_uhid_active.store(false);
+    m_hid_keyboard = HidKeyboard();
 }
 
 } // namespace pm::input

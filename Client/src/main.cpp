@@ -610,6 +610,24 @@ bool start_stream(
     std::atomic<bool>* out_phone_auto_rotate
 );
 
+// Ugg! A switch that is on but does nothing is worse than no switch at all. When
+// the phone refuses the virtual keyboard, cave man says so once, out loud — the
+// status line under the picture is invisible while the stream runs.
+void show_uhid_unavailable_message(pm::window::IWindow& window) {
+#ifdef _WIN32
+    MessageBoxW(
+        (HWND)window.get_native_handle(),
+        L"Dieses Handy erlaubt keine virtuelle USB-Tastatur.\n\n"
+        L"Die Option wurde wieder abgeschaltet, die normale Texteingabe "
+        L"funktioniert weiterhin.",
+        L"USB-Tastatur nicht verfügbar",
+        MB_OK | MB_ICONINFORMATION
+    );
+#else
+    (void)window;
+#endif
+}
+
 // user_requested = the human pressed Ctrl+U / used the menu. Then we also type when
 // the lock state cannot be read; on automatic connects we stay quiet instead.
 bool unlock_device_if_needed(const std::string& device_id, pm::window::IWindow* window = nullptr,
@@ -880,6 +898,11 @@ bool start_stream(
     std::atomic<bool>* out_phone_auto_rotate
 ) {
     window.post_task([&window]() { window.set_status_text("Starte Video-Stream..."); });
+
+    // A new session gets a fresh keyboard. Whatever the last one left behind is
+    // gone with its control socket, so nothing is sent here — only forgotten.
+    input.reset_uhid_keyboard();
+
     pm::stream::ScrcpyClient::Config config;
     config.device_id = device_id;
 
@@ -962,7 +985,26 @@ bool start_stream(
         scrcpy.inject_screen_power_mode(true);
     }
 
-    window.post_task([&window, w, h]() {
+    // Ugg! The USB keyboard can only be built once the control hole is open, and
+    // only on a phone that actually allows it — asking a phone that does not kills
+    // the whole control thread on the other side (see device_supports_uhid).
+    bool uhid_keyboard = false;
+    if (settings.m_uhid_keyboard) {
+        uhid_keyboard = input.enable_uhid_keyboard();
+        if (!uhid_keyboard) {
+            // Turn the wish off instead of leaving a switch on that does nothing.
+            pm::Settings stored = pm::load_settings();
+            stored.m_uhid_keyboard = false;
+            pm::save_settings(stored);
+            window.post_task([&window]() {
+                window.set_status_text("Dieses Handy erlaubt keine USB-Tastatur. Texteingabe bleibt aktiv.");
+                show_uhid_unavailable_message(window);
+            });
+        }
+    }
+
+    window.post_task([&window, w, h, uhid_keyboard]() {
+        window.set_uhid_keyboard(uhid_keyboard);
         window.set_aspect_ratio((double)w / (double)h);
         window.set_orientation(w > h);
         window.set_app_state(pm::window::AppState::STREAMING);
@@ -1194,6 +1236,7 @@ static int app_main() {
     window->set_screen_off(initial_settings.m_screen_off);
     window->set_capture_send_to_phone(initial_settings.m_send_captures_to_phone);
     window->set_audio_enabled(initial_settings.m_audio_enabled);
+    window->set_uhid_keyboard(initial_settings.m_uhid_keyboard);
 
     SavedBrightness saved_brightness; // Cave man remember phone sun level
     std::atomic<bool> phone_auto_rotate{true}; // Mirrors the phone's OWN rotation switch, never sets a default
@@ -1551,6 +1594,57 @@ static int app_main() {
                 });
                 break;
             }
+            case pm::window::MenuAction::TOGGLE_UHID_KEYBOARD: {
+                const bool wanted = !current_settings.m_uhid_keyboard;
+                current_settings.m_uhid_keyboard = wanted;
+                pm::save_settings(current_settings);
+
+                if (!scrcpy.is_running()) {
+                    window->set_uhid_keyboard(wanted);
+                    window->set_status_text(wanted
+                        ? "USB-Tastatur aktiviert — wirkt ab der nächsten Verbindung."
+                        : "USB-Tastatur deaktiviert.");
+                    break;
+                }
+                if (!wanted) {
+                    input.disable_uhid_keyboard();
+                    window->set_uhid_keyboard(false);
+                    window->set_status_text("USB-Tastatur deaktiviert — normale Texteingabe ist wieder aktiv.");
+                    break;
+                }
+
+                // Building the keyboard asks the phone a question first, and a
+                // question over ADB must never block the drawing hand. The switch
+                // that routes keys only flips once the phone really has it —
+                // flipping it early would drop every key hit in between.
+                background_tasks.run([&input, w = window.get()]() {
+                    const bool created = input.enable_uhid_keyboard();
+                    if (!created) {
+                        pm::Settings failed = pm::load_settings();
+                        failed.m_uhid_keyboard = false;
+                        pm::save_settings(failed);
+                    }
+                    w->post_task([w, created]() {
+                        w->set_uhid_keyboard(created);
+                        if (created) {
+                            w->set_status_text("USB-Tastatur aktiv. Layout am Handy auf Deutsch stellen.");
+                        } else {
+                            w->set_status_text("Dieses Handy erlaubt keine USB-Tastatur. Texteingabe bleibt aktiv.");
+                            show_uhid_unavailable_message(*w);
+                        }
+                    });
+                });
+                break;
+            }
+            case pm::window::MenuAction::OPEN_KEYBOARD_SETTINGS: {
+                if (!scrcpy.is_running()) {
+                    window->set_status_text("Tastatur-Einstellungen nur bei aktivem Stream.");
+                    break;
+                }
+                scrcpy.open_hard_keyboard_settings();
+                window->set_status_text("Tastatur-Einstellungen am Handy geöffnet.");
+                break;
+            }
             case pm::window::MenuAction::TOGGLE_SEND_CAPTURES_TO_PHONE: {
                 current_settings.m_send_captures_to_phone = !current_settings.m_send_captures_to_phone;
                 pm::save_settings(current_settings);
@@ -1663,11 +1757,27 @@ static int app_main() {
         // text write. cave man write words.
         input.handle_text(text);
     });
+    window->set_raw_key_callback([&](int action, uint32_t scancode, bool extended) {
+        // key hole hit. cave man send the position, phone picks the letter.
+        input.handle_raw_key(action, scancode, extended);
+    });
+    window->set_focus_lost_callback([&]() {
+        // cave man leaves. nothing stays pressed on the phone.
+        input.release_all_keys();
+    });
     window->set_scroll_callback([&](int x, int y, int w, int h, float hscroll, float vscroll) {
         // scroll wheel. cave man scroll screen.
         input.handle_scroll(x, y, w, h, hscroll, vscroll);
     });
 
+    // Ugg! If the phone's control thread dies the picture keeps flowing while every
+    // tap and key falls into a hole. Say it instead of letting the human poke a
+    // corpse — nothing here can be repaired from this side, only reconnected.
+    scrcpy.set_control_lost_callback([w = window.get()]() {
+        w->post_task([w]() {
+            w->set_status_text("Eingabe am Handy abgebrochen — bitte neu verbinden.");
+        });
+    });
     scrcpy.set_device_clipboard_callback([w = window.get()](const std::string& text) {
         w->post_task([w, text]() {
             w->set_pc_clipboard(text);

@@ -132,6 +132,7 @@ festen Reihenfolge geöffnet: **Video → Audio → Control**.
 | **FFmpeg H.264/H.265/AV1** | Video-Dekodierung in Software, Skalierung & Farbraum auf der GPU |
 | **Tonübertragung** | Roh-PCM über eigenen Socket, Wiedergabe via SDL2, im Menü abschaltbar |
 | **Input Forwarding** | Maus, Tastatur, Multi-Touch über scrcpy Control-Socket |
+| **Echte USB-Tastatur (UHID)** | Optional: virtuelle HID-Tastatur am Handy statt Text-Injection — deutsches Layout, Umlaute und tote Tasten wirken geräteseitig |
 | **Screenshot/Recording** | Captures als PNG, Videos mit Hardware-H.264 (`h264_mf`), optional aufs Handy senden |
 | **Drag & Drop** | Dateien ins Fenster ziehen → `/sdcard/Download`, Pfad landet in der Handy-Zwischenablage; APKs auf Nachfrage direkt installieren. Fortschritt in einer eigenen Bubble, Übertragung gedrosselt zugunsten des Streams |
 | **Auto-Reconnect** | Bei Start automatische Verbindung zum letzten bekannten Gerät |
@@ -165,6 +166,54 @@ Alle Kürzel wirken nur, solange der Stream läuft.
 Für die Navigation ist bewusst **Alt** statt Strg belegt: Strg+C/V werden für die
 Zwischenablage gebraucht, und Strg+U/L für Sperren und Entsperren. `Alt+F4` und
 `Alt+Tab` funktionieren wie gewohnt weiter.
+
+Diese Kürzel bleiben auch bei aktiver USB-Tastatur (siehe unten) dem PC vorbehalten;
+alle übrigen Tasten gehen dann als echte Tastendrücke ans Handy.
+
+---
+
+## ⌨️ Echte USB-Tastatur (UHID)
+
+Standardmäßig wird Text als **Text** ans Handy geschickt (`inject_text` des
+scrcpy-Protokolls). Das funktioniert in Eingabefeldern, aber nicht überall:
+Terminals und Spiele sehen gar keinen Tastendruck, tote Tasten (`^`, `` ` ``, `´`)
+lassen sich nicht kombinieren und Modifier-Kombinationen kommen nicht an.
+
+Im Kontextmenü (Rechtsklick auf den Ziehgriff) lässt sich unter **„Echte
+USB-Tastatur am Handy"** stattdessen eine virtuelle HID-Tastatur ans Handy hängen
+(scrcpy-UHID-Protokoll, Nachrichtentypen 12/13/14 — ab Server 2.4 vorhanden). Der
+PC schickt dann nicht mehr den Buchstaben, sondern die **physische Tastenposition**
+(PC-Set-1-Scancode → USB-HID-Usage). Welches Zeichen daraus wird, entscheidet das
+Handy — und damit gilt:
+
+- **deutsches Layout wirkt geräteseitig**, inklusive `ä ö ü ß` und AltGr-Zeichen
+- **tote Tasten** funktionieren, weil das Handy die Kombination selbst auflöst
+- **Modifier-Kombis** (Strg/Shift/Alt/AltGr, links und rechts getrennt) kommen sauber an
+- funktioniert auch dort, wo `inject_text` nichts ausrichtet: **Terminals, Spiele, IMEs**
+- die Bildschirmtastatur des Handys lässt sich abschalten
+
+**Einmalig einzurichten:** Das Layout muss am **Handy** auf Deutsch stehen, sonst
+kommen falsche Zeichen an. Bei laufendem Stream öffnet der Menüpunkt
+**„Tastaturlayout am Handy einstellen"** direkt die passende Android-Seite
+(Einstellungen → System → Sprachen & Eingabe → Physische Tastatur). Das Gerät
+erscheint dort als **„scrcpy: Pixel Mirroring"**.
+
+**Technische Hinweise:**
+- Die Option ist **standardmäßig aus** und wird in `settings.txt` gespeichert.
+- Vor dem Anlegen der Tastatur wird geprüft, ob das Handy `/dev/uhid` überhaupt
+  freigibt. Das ist kein Luxus: Lehnt das Handy ab und der Server soll die Tastatur
+  trotzdem bauen, **stirbt der komplette Control-Thread auf der Handy-Seite** — Maus,
+  Touch, Tastatur und Zwischenablage wären still, während das Bild weiterläuft.
+  Schlägt die Prüfung fehl, schaltet sich die Option selbst wieder ab und die normale
+  Texteingabe bleibt aktiv. Details stehen in `stream.log`.
+- Windows erzeugt bei **AltGr** immer zusätzlich ein linkes Strg. Dieses Phantom-Strg
+  wird herausgefiltert, sonst käme AltGr+Q als Strg+AltGr+Q an und das `@` bliebe aus.
+- **Tastenwiederholung** übernimmt das Handy selbst, so wie bei einer echten
+  angeschlossenen Tastatur — der PC schickt jeden Tastendruck nur einmal.
+- Verliert das Fenster den Fokus, werden alle gehaltenen Tasten freigegeben, damit
+  nichts am Handy hängen bleibt.
+- **Lautstärketasten** laufen weiterhin über den Android-Keycode-Pfad: eine
+  Boot-Tastatur hat solche Tasten nicht.
 
 ---
 
@@ -240,7 +289,7 @@ Pixel-Mirroring/
 │   │   ├── settings.{h,cpp}     ← Persistente Einstellungen (max_fps, max_size, PIN, Ton, etc.)
 │   │   ├── adb/                 ← ADB Protocol Client (Subprocess Wrapper, ShellProcess)
 │   │   ├── stream/              ← scrcpy Protocol, VideoDecoder, VideoRenderer, AudioPlayer, CaptureController
-│   │   ├── input/               ← Input Forwarding (Mouse, Keyboard, Touch)
+│   │   ├── input/               ← Input Forwarding (Mouse, Keyboard, Touch) + HID-Tastatur (UHID)
 │   │   ├── network/             ← LAN Discovery (Subnet Scan, cpp-httplib)
 │   │   ├── window/              ← Custom Borderless Window (win32_window.cpp)
 │   │   └── tray/                ← System Tray (win32_tray.cpp)
@@ -377,6 +426,7 @@ Das Projekt ist unter **Apache License 2.0** lizenziert. Alle Abhängigkeiten si
 | Tastenkürzel | ✅ Produktionsreif | Navigation, Sperren/Entsperren, Zwischenablage |
 | Auto-Reconnect | ✅ Produktionsreif | Nächster Start verbindet automatisch |
 | Tonübertragung | 🆕 Neu | Roh-PCM, abschaltbar; noch wenig Feldpraxis |
+| Echte USB-Tastatur (UHID) | 🆕 Neu | Optional, standardmäßig aus; Layout muss am Handy stehen |
 
 ### 🎯 Mögliche zukünftige Erweiterungen
 - Gamepad-Unterstützung
@@ -465,6 +515,21 @@ gradle assembleDebug
 - Sicherstellen, dass alle Dateien UTF-8 sind (`.editorconfig` setzen)
 - MSVC Compiler-Flag `/utf-8` überprüfen
 - App neu compilieren mit `cmake --build build/`
+
+### Problem: Bei aktiver USB-Tastatur kommen falsche Zeichen am Handy an
+**Lösung:**
+- Layout am **Handy** auf Deutsch stellen: Menüpunkt „Tastaturlayout am Handy
+  einstellen" (oder Einstellungen → System → Sprachen & Eingabe → Physische Tastatur)
+- Das Gerät heißt dort **„scrcpy: Pixel Mirroring"**
+- Im Zweifel die Option „Echte USB-Tastatur am Handy" abschalten — dann greift wieder
+  die normale Texteingabe
+
+### Problem: USB-Tastatur lässt sich nicht aktivieren
+**Lösung:**
+- Manche Geräte geben `/dev/uhid` für ADB nicht frei; die App erkennt das und schaltet
+  die Option selbst wieder ab (Meldung im Fenster, Details in `stream.log`)
+- Es gibt dafür keinen Workaround von der PC-Seite — die normale Texteingabe bleibt
+  vollständig nutzbar
 
 ### Problem: Framedrops oder Laggy Video
 **Lösung:**

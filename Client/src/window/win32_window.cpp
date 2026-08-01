@@ -459,6 +459,27 @@ void Win32Window::send_pointer_event(PointerAction action, int x, int y) {
     m_pointer_cb_(action, x, y, w, h);
 }
 
+bool Win32Window::send_raw_key(bool pressed, LPARAM lparam) {
+    if (!m_raw_key_cb_) return false;
+
+    // Ugg! The number Windows shouts first is the LETTER its own layout painted on
+    // the key — exactly what the phone must not inherit. The hardware number of
+    // the hole sits in the upper stones of lparam, with one extra bit for the keys
+    // the small old keyboards never had (arrows, right Alt, keypad Enter, ...).
+    const uint32_t scancode = static_cast<uint32_t>((lparam >> 16) & 0xFF);
+    if (scancode == 0) return false;
+
+    const bool extended = (lparam & (1 << 24)) != 0;
+
+    // A held key repeats by itself on the phone, the same way a cabled keyboard
+    // works. Cave man does not carve the same stone sixty times a heartbeat — but
+    // he still swallows the message, or the key would be typed twice.
+    if (pressed && (lparam & (1 << 30)) != 0) return true;
+
+    m_raw_key_cb_(pressed ? 0 : 1, scancode, extended);
+    return true;
+}
+
 int Win32Window::hit_test_button(POINT pt) {
     if (recording_ && PtInRect(&rect_recording_stop_, pt)) return 5;
     if (PtInRect(&rect_capture_, pt)) return 4;
@@ -1108,8 +1129,9 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
             m_focus_cb_();
         }
         break;
-    case WM_KEYDOWN: {
-        if (app_state_ == AppState::STREAMING) {
+    case WM_KEYDOWN:
+    case WM_KEYUP: {
+        if (msg == WM_KEYDOWN && app_state_ == AppState::STREAMING) {
             if (wp == 'C' && (GetKeyState(VK_CONTROL) & 0x8000)) {
                 // ctrl+c press. cave man fetch clipboard.
                 if (m_focus_cb_) {
@@ -1130,20 +1152,19 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
                 return 0;
             }
         }
-        if (app_state_ == AppState::STREAMING && m_key_cb_) {
-            int ak = vk_to_android_keycode(wp);
-            if (ak != 0) {
-                m_key_cb_(0, ak);
+        // With the virtual USB keyboard hanging on the phone every key travels as
+        // a real key press instead. Volume keys stay behind: a boot keyboard has
+        // no such button, so they keep riding the Android keycode path below.
+        if (uhid_keyboard_ && app_state_ == AppState::STREAMING &&
+            wp != VK_VOLUME_UP && wp != VK_VOLUME_DOWN && wp != VK_VOLUME_MUTE) {
+            if (send_raw_key(msg == WM_KEYDOWN, lp)) {
                 return 0;
             }
         }
-        break;
-    }
-    case WM_KEYUP: {
         if (app_state_ == AppState::STREAMING && m_key_cb_) {
             int ak = vk_to_android_keycode(wp);
             if (ak != 0) {
-                m_key_cb_(1, ak);
+                m_key_cb_(msg == WM_KEYDOWN ? 0 : 1, ak);
                 return 0;
             }
         }
@@ -1188,10 +1209,27 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
                 }
             }
         }
+        // The USB keyboard needs the Alt key itself, otherwise the phone never
+        // learns Alt went down and every Alt combo arrives naked. Alt+F4 stays
+        // with the tribe so cave man can still close the cave.
+        if (uhid_keyboard_ && app_state_ == AppState::STREAMING && wp != VK_F4) {
+            if (send_raw_key(msg == WM_SYSKEYDOWN, lp)) {
+                return 0;
+            }
+        }
+        break;
+    }
+    case WM_KILLFOCUS: {
+        // Cave man walks away mid-word. Everything he still held goes up now.
+        if (m_focus_lost_cb_) {
+            m_focus_lost_cb_();
+        }
         break;
     }
     case WM_CHAR: {
-        if (app_state_ == AppState::STREAMING && m_text_cb_) {
+        // In USB keyboard mode the key itself already flew over — typing the
+        // letter on top of it would double every single character.
+        if (app_state_ == AppState::STREAMING && m_text_cb_ && !uhid_keyboard_) {
             wchar_t wch = static_cast<wchar_t>(wp);
             if (wch >= 32) {
                 std::string utf8 = wchar_to_utf8(wch);
@@ -1327,6 +1365,8 @@ namespace {
     // arrived. Two menu rows with the same number means one of them fires the
     // other's action, so the rotation switch moved out of the way.
     constexpr UINT ID_TOGGLE_AUTO_ROTATE = 1016;
+    constexpr UINT ID_TOGGLE_UHID_KEYBOARD = 1014;
+    constexpr UINT ID_OPEN_KEYBOARD_SETTINGS = 1015;
 
     constexpr UINT ID_SCREENSHOT = 1101;
     constexpr UINT ID_TOGGLE_RECORDING = 1102;
@@ -1630,6 +1670,15 @@ void Win32Window::build_settings_menu_items() {
     g_menu_items.push_back({ID_TOGGLE_LOWEST_BRIGHTNESS, L"Bildschirm auf niedrigste Helligkeit", true, lowest_brightness_, false});
     g_menu_items.push_back({ID_TOGGLE_SCREEN_OFF, L"Handy-Display komplett aus", true, screen_off_, false});
     g_menu_items.push_back({ID_TOGGLE_AUDIO, L"Ton vom Handy übertragen", true, audio_enabled_, false});
+    g_menu_items.push_back({ID_TOGGLE_UHID_KEYBOARD, L"Echte USB-Tastatur am Handy", true, uhid_keyboard_, false});
+    if (uhid_keyboard_) {
+        if (app_state_ == AppState::STREAMING) {
+            g_menu_items.push_back({ID_OPEN_KEYBOARD_SETTINGS, L"Tastaturlayout am Handy einstellen", false, false, false});
+        }
+        // Without a German layout on the phone side the whole point is lost, and
+        // nobody guesses that on their own. One line, or it does not fit the row.
+        g_menu_items.push_back({0, L"Layout am Handy muss auf Deutsch stehen", false, false, false, true});
+    }
     g_menu_items.push_back({0, L"", false, false, true});
     g_menu_items.push_back({ID_SET_PIN, L"PIN zum Entsperren festlegen", false, false, false});
     if (app_state_ == AppState::STREAMING) {
@@ -1708,6 +1757,8 @@ void Win32Window::show_context_menu(POINT pt) {
                 case ID_TOGGLE_SCREEN_OFF: action = MenuAction::TOGGLE_SCREEN_OFF; break;
                 case ID_TOGGLE_AUDIO:  action = MenuAction::TOGGLE_AUDIO; break;
                 case ID_TOGGLE_AUTO_ROTATE: action = MenuAction::TOGGLE_AUTO_ROTATE; break;
+                case ID_TOGGLE_UHID_KEYBOARD: action = MenuAction::TOGGLE_UHID_KEYBOARD; break;
+                case ID_OPEN_KEYBOARD_SETTINGS: action = MenuAction::OPEN_KEYBOARD_SETTINGS; break;
                 case ID_SET_PIN:       action = MenuAction::SET_PIN; break;
                 case ID_UNLOCK_DEVICE: action = MenuAction::UNLOCK_DEVICE; break;
                 case ID_LOCK_DEVICE:   action = MenuAction::LOCK_DEVICE; break;
@@ -1737,6 +1788,8 @@ void Win32Window::show_context_menu(POINT pt) {
         case ID_TOGGLE_SCREEN_OFF: action = MenuAction::TOGGLE_SCREEN_OFF; break;
         case ID_TOGGLE_AUDIO:  action = MenuAction::TOGGLE_AUDIO; break;
         case ID_TOGGLE_AUTO_ROTATE: action = MenuAction::TOGGLE_AUTO_ROTATE; break;
+        case ID_TOGGLE_UHID_KEYBOARD: action = MenuAction::TOGGLE_UHID_KEYBOARD; break;
+        case ID_OPEN_KEYBOARD_SETTINGS: action = MenuAction::OPEN_KEYBOARD_SETTINGS; break;
         case ID_SET_PIN:       action = MenuAction::SET_PIN; break;
         case ID_UNLOCK_DEVICE: action = MenuAction::UNLOCK_DEVICE; break;
         case ID_LOCK_DEVICE:   action = MenuAction::LOCK_DEVICE; break;

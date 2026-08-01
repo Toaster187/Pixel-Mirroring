@@ -40,6 +40,7 @@ add_executable(PixelMirroring
     src/stream/capture_controller.cpp
     src/stream/audio_player.cpp
     src/input/input_handler.cpp
+    src/input/hid_keyboard.cpp
     # src/config/settings.cpp
     ${PLATFORM_SOURCES}
 )

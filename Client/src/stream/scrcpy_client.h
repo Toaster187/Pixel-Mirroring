@@ -35,6 +35,11 @@ public:
         bool lowest_brightness = true;
     };
 
+    // Biggest HID report this client will carry to the phone. A keyboard report
+    // is 8 bytes; the cap only exists so the hot send path can use a stone from
+    // the stack instead of digging in the heap on every keystroke.
+    static constexpr size_t UHID_MAX_REPORT_SIZE = 64;
+
     ScrcpyClient();
     ~ScrcpyClient();
 
@@ -50,9 +55,14 @@ public:
     using FrameCallback = std::function<void(AVFrame* frame)>;
     using DisconnectCallback = std::function<void()>;
     using ClipboardCallback = std::function<void(const std::string& text)>;
+    using ControlLostCallback = std::function<void()>;
     void set_frame_callback(FrameCallback cb);
     void set_disconnect_callback(DisconnectCallback cb);
     void set_device_clipboard_callback(ClipboardCallback cb);
+
+    // Fires when the phone's control thread falls over. The picture keeps running
+    // but nothing listens any more — no keys, no mouse, no clipboard.
+    void set_control_lost_callback(ControlLostCallback cb);
 
     // Input Injection
     void inject_touch(int action, float x, float y, int w, int h);
@@ -75,6 +85,22 @@ public:
     // True while WE hold the phone's light down. Stays true across stop() when the
     // "light back on" word never reached the phone — then somebody else must fix it.
     bool screen_forced_off() const { return screen_forced_off_.load(); }
+
+    // Virtual USB devices (scrcpy UHID protocol).
+    //
+    // Ugg! ASK FIRST. If the phone refuses /dev/uhid and we tell the server to
+    // build a keyboard anyway, the server's whole control thread dies with it —
+    // keys, mouse, touch and clipboard all go quiet while the picture happily
+    // keeps running. device_supports_uhid() is what stops that from happening.
+    bool device_supports_uhid();
+    bool uhid_create(uint16_t id, const std::string& name,
+                     const uint8_t* report_desc, size_t desc_size);
+    void uhid_input(uint16_t id, const uint8_t* data, size_t size);
+    void uhid_destroy(uint16_t id);
+
+    // Opens the phone's physical-keyboard settings, where the German layout is
+    // assigned to the virtual keyboard.
+    void open_hard_keyboard_settings();
 
 private:
     bool setup_tunnel();
@@ -126,6 +152,7 @@ private:
     FrameCallback frame_cb_;
     DisconnectCallback disconnect_cb_;
     ClipboardCallback clipboard_cb_;
+    ControlLostCallback control_lost_cb_;
 
     // Device Info
     std::string device_name_;

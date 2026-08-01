@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <string>
 #include <memory>
 #include <functional>
@@ -51,7 +52,9 @@ enum class MenuAction {
     TOGGLE_RECORDING,
     TOGGLE_SEND_CAPTURES_TO_PHONE,
     TOGGLE_AUDIO,
-    TOGGLE_AUTO_ROTATE
+    TOGGLE_AUTO_ROTATE,
+    TOGGLE_UHID_KEYBOARD,
+    OPEN_KEYBOARD_SETTINGS
 };
 
 class IWindow {
@@ -97,6 +100,16 @@ public:
     // Set text callback. Cave man write words. Params: text.
     virtual void set_text_callback(std::function<void(const std::string&)> cb) = 0;
 
+    // Set raw key callback. Reports the PHYSICAL key position (PC set-1 scancode)
+    // instead of the letter the PC layout painted on it, so the phone can put its
+    // own German layout on top. Params: action (0 = down, 1 = up), scancode,
+    // extended flag. Only fires while the virtual USB keyboard is switched on.
+    virtual void set_raw_key_callback(std::function<void(int, uint32_t, bool)> cb) = 0;
+
+    // Set focus-lost callback. Cave man leaves window while still holding Shift —
+    // somebody has to tell the phone to let go.
+    virtual void set_focus_lost_callback(std::function<void()> cb) = 0;
+
     // Set scroll callback. Cave man scroll screen. Params: x, y, w, h, hscroll, vscroll.
     virtual void set_scroll_callback(std::function<void(int, int, int, int, float, float)> cb) = 0;
     
@@ -129,6 +142,10 @@ public:
     // device on connect, never a fixed app default. Toggling it in the menu is
     // the only thing that ever changes it.
     virtual void set_auto_rotate_enabled(bool enabled) = 0;
+    // Doubles as the menu checkmark AND as the switch that decides where key
+    // presses go: while this is on they travel as real USB keyboard reports, and
+    // the text/keycode path stays silent so nothing is typed twice.
+    virtual void set_uhid_keyboard(bool enabled) = 0;
     virtual void set_recording(bool recording) = 0;
     virtual void trigger_screenshot_flash() = 0;
 

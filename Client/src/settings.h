@@ -31,6 +31,10 @@ struct Settings {
     bool m_screen_off = false;
     bool m_send_captures_to_phone = true; // CAVE MAN PUSH FINISHED CAPTURE BACK TO PHONE
     bool m_audio_enabled = true;       // CAVE MAN HEAR PHONE SOUND ON PC SPEAKER
+    // CAVE MAN HANG REAL USB KEYBOARD ON PHONE INSTEAD OF SHOUTING LETTERS.
+    // Off by default: not every phone opens /dev/uhid, and the layout has to be
+    // set on the phone once before it is useful.
+    bool m_uhid_keyboard = false;
 };
 
 Settings load_settings();
