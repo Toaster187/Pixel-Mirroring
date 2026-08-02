@@ -39,7 +39,8 @@ void log_stream_event(const std::string& message) {
     std::filesystem::path log_dir;
 #ifndef PM_PORTABLE_BUILD
 #ifdef _WIN32
-    // CAVE MAN NO WRITE APPDATA FOR PORTABLE. ONLY EXE DIR.
+    // A portable build keeps everything next to the EXE and never writes to
+    // %LOCALAPPDATA%.
     const char* local_app_data = std::getenv("LOCALAPPDATA");
     if (local_app_data && local_app_data[0] != '\0') {
         log_dir = std::filesystem::path(local_app_data) / "PixelMirroring";
@@ -68,23 +69,23 @@ constexpr uint8_t MSG_UHID_INPUT = 13;
 constexpr uint8_t MSG_UHID_DESTROY = 14;
 constexpr uint8_t MSG_OPEN_HARD_KEYBOARD_SETTINGS = 15;
 
-// The name travels with ONE length stone, so it can never be longer than this.
+// The name is length-prefixed with a single byte, so it cannot be longer than this.
 constexpr size_t UHID_MAX_NAME_LENGTH = 127;
 
-// Cave man knocks on the hole where fake keyboards are born and listens whether
-// anybody opens. He knocks EXACTLY the way the server knocks: read AND write in one
-// hand (3<>). The server reads the phone's answers (caps-lock light and such) back
-// out of the very same hole, so a hole that only takes and never gives would sail
-// through a write-only knock and then tear the control thread anyway.
+// Probes whether the device will let anything open /dev/uhid. It opens the node
+// EXACTLY the way the server does: read AND write in one descriptor (3<>). The server
+// reads the phone's UHID output reports (caps-lock LED and the like) back out of the
+// same descriptor, so a write-only probe would pass on a device that refuses reads and
+// then take down the very thread it exists to protect.
 //
-// The knock happens inside its own little cave (...) because a failed "exec" kills
-// the shell it sits in — inside the brackets only the small shell dies and the big
-// one still gets to shout FAIL. Nothing is born from opening alone; the fake
-// keyboard only exists once UHID_CREATE is sent.
+// The exec runs inside a subshell (...) because a failing exec kills the shell it sits
+// in — inside the parentheses only the subshell dies and the outer one can still print
+// FAIL. Opening the node creates nothing; the keyboard only exists once UHID_CREATE is
+// sent.
 constexpr const char* UHID_PROBE_COMMAND =
     "(exec 3<>/dev/uhid) 2>/dev/null && echo PM_UHID_OK || echo PM_UHID_FAIL";
 
-// Big-endian stone writers. Cave man used to carve these four times in four holes.
+// Big-endian writers, in one place instead of open-coded at every call site.
 void write16(uint8_t* out, uint16_t value) {
     out[0] = static_cast<uint8_t>((value >> 8) & 0xff);
     out[1] = static_cast<uint8_t>(value & 0xff);
@@ -103,10 +104,9 @@ void write64(uint8_t* out, uint64_t value) {
     }
 }
 
-// How big the pile of untouched stones in the socket is right now. Both tribes have
-// the same question and a different word for it — the fork lives HERE and not in the
-// middle of an if-head, where a later change to one branch quietly breaks the other's
-// brackets.
+// How many bytes are currently sitting unread in the socket buffer. Windows and POSIX
+// spell the same query differently; the branch lives HERE rather than inline in a
+// condition, where editing one side quietly breaks the other's parentheses.
 unsigned long socket_backlog(SOCKET socket_handle) {
 #ifdef _WIN32
     unsigned long pending = 0;
@@ -118,7 +118,7 @@ unsigned long socket_backlog(SOCKET socket_handle) {
 #endif
 }
 
-// Cave man taps socket on shoulder so a thread sleeping in recv() wakes up.
+// Wakes up a thread that is blocked in recv() on this socket.
 void wake_socket(SOCKET socket_handle) {
     if (socket_handle == INVALID_SOCKET) return;
 #ifdef _WIN32
@@ -128,7 +128,7 @@ void wake_socket(SOCKET socket_handle) {
 #endif
 }
 
-// Cave man tells socket: do not wait forever for words that never come.
+// Gives the socket a receive timeout so a dead peer cannot block a thread forever.
 void set_recv_timeout(SOCKET socket_handle, int seconds) {
     if (socket_handle == INVALID_SOCKET) return;
 #ifdef _WIN32
@@ -172,7 +172,7 @@ void ScrcpyClient::set_control_lost_callback(ControlLostCallback cb) {
 bool ScrcpyClient::start(const Config& config) {
     config_ = config;
     
-    // Generate random SCID (31-bit)
+    // Random 31-bit SCID, the session id the server uses to name its sockets.
     std::random_device rd;
     std::mt19937 gen(rd());
     std::uniform_int_distribution<uint32_t> dis(0, 0x7FFFFFFF);
@@ -184,8 +184,9 @@ bool ScrcpyClient::start(const Config& config) {
 
     if (!setup_tunnel()) return false;
 
-    // Ugg! If anything below trips, tear down what was already built. Old cave man
-    // walked away and left the server breathing on the phone plus an open adb tunnel.
+    // If anything below fails, tear down whatever was already built. Returning early
+    // without this left the server process running on the device plus an open adb
+    // tunnel behind.
     if (!start_server_process() || !connect_sockets() || !read_metadata()) {
         abort_start();
         return false;
@@ -205,9 +206,9 @@ bool ScrcpyClient::start(const Config& config) {
 }
 
 void ScrcpyClient::stop() {
-    // Ugg! Give the phone its light back BEFORE the talking-hole gets filled in.
-    // Afterwards nobody can reach the phone any more and the human is left holding a
-    // black stone. Runs while running_ is still true, or send_control refuses.
+    // Turn the panel back on BEFORE the control socket is closed — afterwards there is
+    // no way left to reach the phone and the user is holding a device with a dark
+    // screen. Has to run while running_ is still true, or send_control() refuses.
     if (screen_forced_off_.load()) {
         inject_screen_power_mode(true);
     }
@@ -217,10 +218,10 @@ void ScrcpyClient::stop() {
         return;
     }
 
-    // Ugg! Old cave man closed the socket hole while another hunter still had his
-    // arm inside it. Then the tribe handed the same hole number to a new hunter and
-    // arms got swapped. Now: first shout so everyone pulls their arm out (shutdown),
-    // then wait for them (join), and only then fill in the hole (closesocket).
+    // Order matters: shutdown() first so every blocked reader returns, then join() to
+    // wait for those threads, and only then closesocket(). Closing first would leave a
+    // reading thread sitting on a socket number the OS has already handed to somebody
+    // else.
     wake_socket(video_socket_);
     wake_socket(audio_socket_);
     {
@@ -240,8 +241,8 @@ void ScrcpyClient::stop() {
     audio_player_.stop();
     audio_available_ = false;
 
-    // Cave man kills the adb shell carrying the server. Old cave man let it run
-    // forever, so every reconnect left another one breathing on the phone.
+    // Kill the adb shell that hosts the server. Leaving it running meant every
+    // reconnect left another server process alive on the device.
     server_process_.stop();
 
     if (video_socket_ != INVALID_SOCKET) {
@@ -264,7 +265,7 @@ void ScrcpyClient::stop() {
 }
 
 void ScrcpyClient::abort_start() {
-    // No threads are alive yet at this point, so plain closing is enough.
+    // No reader threads exist yet at this point, so closing directly is safe.
     server_process_.stop();
     audio_player_.stop();
     audio_available_ = false;
@@ -306,7 +307,7 @@ bool ScrcpyClient::setup_tunnel() {
     
     std::cout << "[Scrcpy] Setting up adb tunnel..." << std::endl;
 
-    // Cleanup any lingering reverse tunnel from previous runs
+    // Remove any reverse tunnel left over from a previous run.
     adb.remove_reverse(config_.device_id, remote);
 
     bool tunnel_success = false;
@@ -328,7 +329,7 @@ bool ScrcpyClient::setup_tunnel() {
             break;
         }
         
-        // Cleanup lingering ports if forward/reverse on this port failed
+        // Release the port again if setting up forward/reverse on it failed.
         adb.remove_forward(config_.device_id, local);
         adb.remove_reverse(config_.device_id, remote);
     }
@@ -344,9 +345,10 @@ bool ScrcpyClient::setup_tunnel() {
 bool ScrcpyClient::start_server_process() {
     pm::adb::AdbClient adb;
     
-    // 1. Push server (Cave man check file size on device first to skip slow push over Wi-Fi)
-    // get_executable_dir() hands out UTF-8, so the road into a path goes through
-    // path_from_utf8 — a plain path(exe_dir) would read it with the old table.
+    // 1. Push the server. The size on the device is checked first, so an unchanged jar
+    // does not get pushed over Wi-Fi again.
+    // get_executable_dir() returns UTF-8, so it has to go through path_from_utf8 —
+    // path(exe_dir) would read it in the ANSI code page.
     const std::filesystem::path exe_dir =
         pm::util::path_from_utf8(pm::adb::get_executable_dir());
     std::filesystem::path server_path = exe_dir / "scrcpy-server.jar";
@@ -401,7 +403,8 @@ bool ScrcpyClient::start_server_process() {
     cmd += "log_level=info ";
     cmd += "audio=" + std::string(config_.audio ? "true" : "false") + " ";
     if (config_.audio) {
-        // Raw PCM: no decoder needed on this side, no codec config to get wrong.
+        // Raw PCM: no decoder needed on this side and no codec config packet to
+        // mishandle. See the audio notes in CLAUDE.md before changing this.
         cmd += "audio_codec=raw ";
         cmd += "audio_source=output ";
     }
@@ -419,8 +422,8 @@ bool ScrcpyClient::start_server_process() {
     
     log_stream_event("[Scrcpy] Executing server: " + cmd);
 
-    // app_process blocks as long as the server lives, so it runs in its own process
-    // that we keep a rope on (server_process_) instead of a detached thread.
+    // app_process blocks for as long as the server lives, so it runs in a child process
+    // we keep a handle on (server_process_) instead of on a detached thread.
     auto ready_promise = std::make_shared<std::promise<bool>>();
     auto ready_flag = std::make_shared<std::atomic<bool>>(false);
     auto future = ready_promise->get_future();
@@ -432,10 +435,9 @@ bool ScrcpyClient::start_server_process() {
                 ready_promise->set_value(true);
             }
 
-            // Ugg! When the server's control thread falls over, the picture keeps
-            // flowing as if nothing happened while every poke into the phone
-            // vanishes. Cave man must not let the human stab a dead phone in
-            // silence — say it out loud instead.
+            // When the server's control thread dies, video keeps flowing as if nothing
+            // happened while every input event silently goes nowhere. Report it instead
+            // of letting the user poke at an unresponsive phone.
             if (line.find("Controller error") != std::string::npos) {
                 log_stream_event("[Scrcpy] Phone control thread died: " + line);
                 if (control_lost_cb_) {
@@ -471,7 +473,7 @@ bool ScrcpyClient::connect_sockets() {
         addr.sin_port = htons(port);
         addr.sin_addr.s_addr = inet_addr("127.0.0.1");
 
-        // Retry connecting for up to 5 seconds
+        // Retry connecting for up to 5 seconds while the server comes up.
         for (int i = 0; i < 50; ++i) {
             if (connect(sock, (sockaddr*)&addr, sizeof(addr)) != SOCKET_ERROR) {
                 return true;
@@ -502,16 +504,16 @@ bool ScrcpyClient::connect_sockets() {
             return false;
         }
 
-        // Wait up to 5 seconds for connection
+        // Wait up to 5 seconds for the server to connect back.
         fd_set set;
         FD_ZERO(&set);
         FD_SET(server_fd, &set);
         timeval timeout = {5, 0};
 
 #ifdef _WIN32
-        int nfds = 0; // Windows ignores this parameter
+        int nfds = 0; // ignored on Windows
 #else
-        int nfds = server_fd + 1; // POSIX requires highest fd + 1
+        int nfds = server_fd + 1; // POSIX wants highest fd + 1
 #endif
 
         if (select(nfds, &set, nullptr, nullptr, &timeout) > 0) {
@@ -524,8 +526,8 @@ bool ScrcpyClient::connect_sockets() {
         return false;
     };
 
-    // Ugg! The order is fixed by the server and must not be shuffled: video first,
-    // then audio, then control. Get it wrong and every stream reads the wrong hole.
+    // The order is fixed by the server and must not be changed: video, then audio, then
+    // control. Getting it wrong makes every stream read from the wrong socket.
     if (config_.tunnel_forward) {
         if (!connect_to_port(video_socket_, local_port_)) {
             std::cerr << "[Scrcpy] Failed to connect video socket" << std::endl;
@@ -562,8 +564,8 @@ bool ScrcpyClient::connect_sockets() {
         }
     }
 
-    // Cave man set recv timeout NOW, before reading metadata. Without it a phone
-    // that dies mid-handshake leaves the whole app hanging in recv() forever.
+    // Set the receive timeout NOW, before reading metadata: without it a device that
+    // dies mid-handshake leaves the app blocked in recv() forever.
     set_recv_timeout(video_socket_, 10);
     set_recv_timeout(audio_socket_, 10);
     set_recv_timeout(control_socket_, 10);
@@ -573,7 +575,7 @@ bool ScrcpyClient::connect_sockets() {
 }
 
 bool ScrcpyClient::read_metadata() {
-    // Read codec info (12 bytes: id, width, height)
+    // Codec info: 12 bytes — codec id, width, height.
     uint8_t codec_meta[12];
     int total_bytes_read = 0;
     while (total_bytes_read < 12) {
@@ -608,9 +610,9 @@ bool ScrcpyClient::read_metadata() {
         return false;
     }
 
-    // The audio socket answers with 4 bytes of codec id. The phone may also say
-    // "I could not capture sound" here (0 = disabled, -1 = error). Either way the
-    // picture keeps running — sound is a nice-to-have, never a reason to fail.
+    // The audio socket answers with a 4-byte codec id. The device may also report that
+    // it could not capture audio at all (0 = disabled, -1 = error). Either way video
+    // keeps running — audio is never a reason to fail the whole stream.
     if (config_.audio && audio_socket_ != INVALID_SOCKET) {
         uint8_t audio_meta[4];
         int read_total = 0;
@@ -654,10 +656,10 @@ bool ScrcpyClient::recv_all(SOCKET socket_handle, char* buffer, int length) {
         if (received > 0) {
             total += received;
         } else if (received == 0) {
-            // Clean close — phone hung up
+            // Clean close — the device hung up.
             return false;
         } else {
-            // Cave man check if just timeout or real death
+            // Distinguish a plain recv timeout from a real socket error.
 #ifdef _WIN32
             const int err = WSAGetLastError();
             if (err == WSAETIMEDOUT) {
@@ -665,11 +667,11 @@ bool ScrcpyClient::recv_all(SOCKET socket_handle, char* buffer, int length) {
             const int err = errno;
             if (err == EAGAIN || err == EWOULDBLOCK) {
 #endif
-                // Timeout — phone just not sending right now, retry if still running
+                // Timeout — the device is simply not sending right now; retry.
                 if (running_) continue;
                 return false;
             }
-            // Real socket error — connection dead
+            // Real socket error — the connection is gone.
             return false;
         }
     }
@@ -688,9 +690,9 @@ void ScrcpyClient::video_thread_loop() {
     const uint32_t MAX_PACKET_SIZE = 10 * 1024 * 1024; // 10 MB max packet size
     bool logged_first_frame = false;
 
-    // Ugg! Cave man must SEE when the picture falls behind instead of guessing. He
-    // counts what he carved, how long carving took, and how big the pile of untouched
-    // stones in the socket grew. A pile that keeps growing IS the latency.
+    // Latency has to be measurable, not guessed: count decoded frames, how long
+    // decoding took, and how many bytes are still queued unread in the socket. A queue
+    // that keeps growing IS the latency.
     auto stats_since = std::chrono::steady_clock::now();
     int stats_packets = 0;
     long long stats_decode_us = 0;
@@ -705,7 +707,7 @@ void ScrcpyClient::video_thread_loop() {
         for (int i = 0; i < 8; ++i) pts = (pts << 8) | header[i];
         uint32_t size = (header[8] << 24) | (header[9] << 16) | (header[10] << 8) | header[11];
 
-        // Validate packet size
+        // Reject implausible packet sizes before allocating for them.
         if (size == 0 || size > MAX_PACKET_SIZE) {
             std::cerr << "[Scrcpy] Invalid packet size: " << size << " bytes" << std::endl;
             break;
@@ -717,7 +719,7 @@ void ScrcpyClient::video_thread_loop() {
         packet_data.resize(size);
         if (!recv_all((char*)packet_data.data(), size)) break;
         
-        // What is already waiting in the socket while we still chew on this packet.
+        // How much has piled up in the socket while this packet was being decoded.
         stats_backlog_peak = (std::max)(stats_backlog_peak, socket_backlog(video_socket_));
 
         const auto decode_begin = std::chrono::steady_clock::now();
@@ -768,8 +770,8 @@ void ScrcpyClient::video_thread_loop() {
 }
 
 void ScrcpyClient::audio_thread_loop() {
-    // Same frame shape as video: 8 bytes pts, 4 bytes length, then the payload.
-    // For raw PCM the payload goes straight to the speaker, nothing to decode.
+    // Same frame layout as video: 8 bytes pts, 4 bytes length, then the payload. For
+    // raw PCM the payload goes straight to the audio device, with nothing to decode.
     std::vector<uint8_t> packet_data;
     constexpr uint32_t MAX_AUDIO_PACKET = 1 * 1024 * 1024;
 
@@ -789,7 +791,7 @@ void ScrcpyClient::audio_thread_loop() {
         audio_player_.feed(packet_data.data(), size);
     }
 
-    // Ugg! Sound stopping must never take the picture down with it.
+    // Audio failing must never take video down with it.
     audio_player_.stop();
 }
 
@@ -836,8 +838,8 @@ bool ScrcpyClient::send_control(const uint8_t* data, size_t length) {
         return false;
     }
 
-    // Ugg! send() may swallow only part of the message. Keep pushing the rest,
-    // otherwise the phone reads half a message and the whole control talk breaks.
+    // send() may accept only part of the buffer. Keep writing the rest, or the device
+    // reads a truncated message and the control protocol desynchronises for good.
     size_t sent = 0;
     while (sent < length) {
         const int written = send(control_socket_, reinterpret_cast<const char*>(data) + sent,
@@ -854,8 +856,8 @@ void ScrcpyClient::inject_touch(int action, float x, float y, int w, int h) {
     constexpr uint32_t AMOTION_EVENT_BUTTON_PRIMARY = 1;
     constexpr uint64_t POINTER_ID_MOUSE = 0xffffffffffffffffULL;
 
-    // Cave man keeps finger inside the screen. Negative stone turns into a giant
-    // number when squeezed into an unsigned hole, and the phone jumps to nowhere.
+    // Clamp to the screen: a negative coordinate becomes a huge value once written
+    // into the unsigned wire field, and the touch lands far off-screen.
     const uint32_t safe_x = static_cast<uint32_t>((std::max)(0.0f, x));
     const uint32_t safe_y = static_cast<uint32_t>((std::max)(0.0f, y));
 
@@ -876,7 +878,6 @@ void ScrcpyClient::inject_touch(int action, float x, float y, int w, int h) {
 }
 
 void ScrcpyClient::inject_keycode(int action, int keycode) {
-    // keycode send. cave man type keys.
     uint8_t buf[14] = {0};
     buf[0] = 0; // SC_CONTROL_MSG_TYPE_INJECT_KEYCODE
     buf[1] = static_cast<uint8_t>(action); // 0=DOWN, 1=UP
@@ -887,7 +888,6 @@ void ScrcpyClient::inject_keycode(int action, int keycode) {
 }
 
 void ScrcpyClient::inject_scroll(float x, float y, int w, int h, float hscroll, float vscroll) {
-    // scroll screen. cave man spin wheel.
     uint8_t buf[21] = {0};
     buf[0] = 3; // SC_CONTROL_MSG_TYPE_INJECT_SCROLL_EVENT
 
@@ -911,7 +911,7 @@ void ScrcpyClient::inject_scroll(float x, float y, int w, int h, float hscroll, 
 void ScrcpyClient::inject_text(const std::string& text) {
     if (text.empty()) return;
 
-    // text send. cave man write words.
+    // Injects a UTF-8 string as text, used when the UHID keyboard is off.
     const uint32_t len = static_cast<uint32_t>(text.size());
     std::vector<uint8_t> buf(5 + len);
     buf[0] = 1; // SC_CONTROL_MSG_TYPE_INJECT_TEXT
@@ -953,8 +953,8 @@ void ScrcpyClient::inject_screen_power_mode(bool on) {
     uint8_t buf[2];
     buf[0] = 10;             // SC_CONTROL_MSG_TYPE_SET_SCREEN_POWER_MODE
     buf[1] = on ? 2 : 0;     // 2 = POWER_MODE_NORMAL, 0 = POWER_MODE_OFF
-    // Ugg! Only remember the phone as dark once the word really left the cave.
-    // A word that never arrived changed nothing on the other side.
+    // Only record the panel as forced off once the message really went out — a message
+    // that never arrived changed nothing on the device.
     if (send_control(buf, sizeof(buf))) {
         screen_forced_off_.store(!on);
         log_stream_event(on ? "[Scrcpy] Device screen power back to normal"
@@ -965,7 +965,7 @@ void ScrcpyClient::inject_screen_power_mode(bool on) {
 }
 
 void ScrcpyClient::inject_get_clipboard(uint8_t copy_key) {
-    // get device clip. cave man request clip text from phone.
+    // Asks the device to send its current clipboard contents back.
     uint8_t buf[2];
     buf[0] = 8; // SC_CONTROL_MSG_TYPE_GET_CLIPBOARD
     buf[1] = copy_key; // 0 = NONE, 1 = COPY, 2 = CUT
@@ -979,9 +979,9 @@ bool ScrcpyClient::device_supports_uhid() {
         return false;
     }
 
-    // Ugg! The same phone gives the same answer every time, and asking costs a whole
-    // adb child — once per connect, once more after every quality restart. Cave man
-    // writes the answer on the wall next to the phone's name and reads it from there.
+    // The same device always gives the same answer, and asking costs a whole adb child
+    // process — once per connect, and again after every quality restart. Cache the
+    // result per device id instead.
     {
         std::lock_guard<std::mutex> guard(uhid_probe_mutex_);
         const auto known = uhid_probe_cache_.find(device_id);
@@ -1011,9 +1011,9 @@ bool ScrcpyClient::uhid_create(uint16_t id, const std::string& name,
         return false;
     }
 
-    // The name gets one length stone only. A longer one would have to be cut, and
-    // cutting UTF-8 in the middle breaks umlauts — so cave man rather sends none
-    // and lets the phone fall back to plain "scrcpy".
+    // The name is length-prefixed with a single byte. A longer one would have to be
+    // truncated, and cutting UTF-8 mid-sequence corrupts umlauts — so send no name at
+    // all instead and let the device fall back to plain "scrcpy".
     const size_t name_length = name.size() <= UHID_MAX_NAME_LENGTH ? name.size() : 0;
 
     std::vector<uint8_t> buf(4 + name_length + 2 + desc_size);
@@ -1043,7 +1043,7 @@ void ScrcpyClient::uhid_input(uint16_t id, const uint8_t* data, size_t size) {
         return;
     }
 
-    // Every key press and release lands here, so no heap digging on this path.
+    // Every key press and release goes through here, so this path must not allocate.
     uint8_t buf[5 + UHID_MAX_REPORT_SIZE];
     buf[0] = MSG_UHID_INPUT;
     write16(buf + 1, id);

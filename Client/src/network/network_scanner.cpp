@@ -24,9 +24,9 @@ namespace pm::network {
 
 NetworkScanner::NetworkScanner() {
 #ifdef _WIN32
-    // Ugg! Every scanner used to wake and kill the socket spirits on its own. When a
-    // short-lived scanner died it could pull the rug out from under the live video
-    // sockets. Now the spirits are woken exactly once and stay for the whole hunt.
+    // WSAStartup/WSACleanup run exactly once for the whole process. Every scanner used
+    // to do its own pair, so a short-lived scanner's cleanup could tear the Winsock
+    // state out from under the live video sockets.
     static const bool winsock_ready = []() {
         WSADATA wsa_data;
         return WSAStartup(MAKEWORD(2, 2), &wsa_data) == 0;
@@ -53,7 +53,8 @@ std::vector<std::string> NetworkScanner::get_local_ipv4_bases() {
                 std::string mask(pAdapter->IpAddressList.IpMask.String);
                 if (ip != "0.0.0.0" && ip != "127.0.0.1") {
                     if (mask == "255.255.0.0" || mask == "255.240.0.0" || mask == "255.0.0.0") {
-                        // For large subnets, try to scan the /24 of the PC and some nearby /24s
+                        // For subnets larger than /24, scan the PC's own /24 plus a few
+                        // neighbouring ones instead of the entire range.
                         size_t first_dot = ip.find('.');
                         size_t second_dot = ip.find('.', first_dot + 1);
                         size_t third_dot = ip.find('.', second_dot + 1);
@@ -62,27 +63,27 @@ std::vector<std::string> NetworkScanner::get_local_ipv4_bases() {
                             const std::string octet_text =
                                 ip.substr(second_dot + 1, third_dot - second_dot - 1);
 
-                            // Ugg! std::stoi throws when the stone is not a number, and
-                            // nobody catches it — the whole cave used to fall over.
+                            // std::stoi throws on non-numeric input and nothing above
+                            // catches it, which used to take the whole process down.
                             int third_octet = 0;
                             const auto parsed = std::from_chars(
                                 octet_text.data(), octet_text.data() + octet_text.size(), third_octet);
                             if (parsed.ec == std::errc()) {
-                                // Scan a slightly larger window around the PC's third octet
+                                // Scan a small window around the PC's own third octet.
                                 int start = std::max(0, third_octet - 10);
                                 int end = std::min(255, third_octet + 10);
                                 for (int i = start; i <= end; ++i) {
                                     bases.push_back(base16 + std::to_string(i) + ".");
                                 }
 
-                                // Also always include common third octets
+                                // Always include the third octets home routers use most.
                                 for (int octet : {0, 1, 2, 10, 20, 50, 100, 150, 200}) {
                                     bases.push_back(base16 + std::to_string(octet) + ".");
                                 }
                             }
                         }
                     } else {
-                        // Standard /24
+                        // Plain /24: one base is enough.
                         size_t last_dot = ip.find_last_of('.');
                         if (last_dot != std::string::npos) {
                             bases.push_back(ip.substr(0, last_dot + 1));
@@ -110,7 +111,7 @@ std::vector<std::string> NetworkScanner::get_local_ipv4_bases() {
                 
                 size_t last_dot = ip.find_last_of('.');
                 if (last_dot != std::string::npos) {
-                    bases.push_back(ip.substr(0, last_dot + 1)); // e.g., "192.168.1."
+                    bases.push_back(ip.substr(0, last_dot + 1)); // e.g. "192.168.1."
                 }
             }
             freeaddrinfo(res);
@@ -118,14 +119,14 @@ std::vector<std::string> NetworkScanner::get_local_ipv4_bases() {
     }
 #endif
     
-    // Add common fallback bases if empty
+    // No usable interface found — fall back to the common home-router ranges.
     if (bases.empty()) {
         bases.push_back("192.168.0.");
         bases.push_back("192.168.1.");
-        bases.push_back("192.168.178."); // FritzBox default
+        bases.push_back("192.168.178."); // FRITZ!Box default
     }
     
-    // Remove duplicates
+    // Drop duplicate bases so no range is scanned twice.
     std::sort(bases.begin(), bases.end());
     bases.erase(std::unique(bases.begin(), bases.end()), bases.end());
     
@@ -165,7 +166,7 @@ std::optional<DiscoveredDevice> NetworkScanner::post_connect(const std::string& 
         }
         return device;
     } catch (...) {
-        // JSON parsing error or invalid response
+        // Malformed JSON or a response that is not from our companion app.
         return std::nullopt;
     }
 }
@@ -175,7 +176,8 @@ std::optional<DiscoveredDevice> NetworkScanner::request_connect(const std::strin
         {"clientId", client_id},
         {"clientName", client_name}
     };
-    // Ugg! Phone side sleeps 500ms+500ms toggling adbd, plus up to 3s mDNS wait, before it answers.
+    // Generous timeout: the phone toggles adbd off and on (500ms + 500ms) and then
+    // waits up to 3s for the mDNS port before it answers.
     auto discovered = post_connect(ip, req_body.dump(), 1500, 8000);
     if (discovered) {
         std::cout << "[NetworkScanner] Woke ADB on known device " << ip << std::endl;
@@ -220,8 +222,8 @@ std::optional<DiscoveredDevice> NetworkScanner::discover_and_connect(const std::
         if (found) break;
         std::cout << "[NetworkScanner] Scanning subnet: " << base << "x" << std::endl;
         
-        // Use a fixed pool of threads to prevent thread exhaustion
-        // and eliminate the overhead of creating/destroying threads for every batch.
+        // A fixed thread pool: scanning a /24 one thread per host would exhaust the
+        // system, and creating/destroying threads per batch is pure overhead.
         const int num_workers = 50;
         std::atomic<int> current_ip_ending{1};
         std::vector<std::thread> threads;

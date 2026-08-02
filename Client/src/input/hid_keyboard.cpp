@@ -17,14 +17,14 @@ constexpr uint8_t MOD_RIGHT_SHIFT = 1 << 5;
 constexpr uint8_t MOD_RIGHT_ALT   = 1 << 6;
 constexpr uint8_t MOD_RIGHT_GUI   = 1 << 7;
 
-// Too many fingers on the board at once: the spec says shout "rollover" in every
-// key slot instead of picking six at random.
+// More keys held than the report has slots: the spec says to fill every key slot
+// with the rollover code rather than picking six arbitrarily.
 constexpr uint8_t ERROR_ROLL_OVER = 0x01;
 constexpr size_t MAX_KEYS = 6;
 
-// The same report descriptor scrcpy uses. Cave man does NOT get creative here —
-// the phone builds its keyboard from these bytes, and anything else is a device
-// Android has never seen before.
+// The same report descriptor scrcpy uses. Do NOT get creative here — the device
+// builds its keyboard from exactly these bytes, and anything else is a device Android
+// has never seen.
 const uint8_t KEYBOARD_REPORT_DESC[] = {
     0x05, 0x01,       // Usage Page (Generic Desktop)
     0x09, 0x06,       // Usage (Keyboard)
@@ -41,14 +41,14 @@ const uint8_t KEYBOARD_REPORT_DESC[] = {
 
     0x75, 0x08,       //   Report Size (8 bits)
     0x95, 0x01,       //   Report Count (1)
-    0x81, 0x01,       //   Input (Constant) — byte 1, the empty one
+    0x81, 0x01,       //   Input (Constant) — byte 1, reserved
 
     0x05, 0x08,       //   Usage Page (LEDs)
     0x19, 0x01,       //   Usage Minimum (1 = NumLock)
     0x29, 0x05,       //   Usage Maximum (5 = Kana)
     0x75, 0x01,       //   Report Size (1 bit)
     0x95, 0x05,       //   Report Count (5)
-    0x91, 0x02,       //   Output (Data, Variable, Absolute) — lamps, phone talks back
+    0x91, 0x02,       //   Output (Data, Variable, Absolute) — LEDs, reported back by the device
     0x75, 0x03,       //   Report Size (3 bits)
     0x95, 0x01,       //   Report Count (1)
     0x91, 0x01,       //   Output (Constant) — padding to a full byte
@@ -66,8 +66,8 @@ const uint8_t KEYBOARD_REPORT_DESC[] = {
 };
 
 // PC set-1 scancode -> HID usage, for keys that arrive WITHOUT the extended flag.
-// 0 means "no such key on a boot keyboard" or "this one is a modifier" (those go
-// through scancode_to_modifier instead).
+// 0 means either "no such key on a boot keyboard" or "this is a modifier" — modifiers
+// go through scancode_to_modifier instead.
 const uint8_t SCANCODE_TO_USAGE[] = {
     0x00,       // 0x00 unused
     0x29,       // 0x01 Esc
@@ -81,7 +81,7 @@ const uint8_t SCANCODE_TO_USAGE[] = {
     0x25,       // 0x09 8
     0x26,       // 0x0A 9
     0x27,       // 0x0B 0
-    0x2D,       // 0x0C key right of 0 (ß on German boards)
+    0x2D,       // 0x0C key right of 0 (ß on German layouts)
     0x2E,       // 0x0D key right of that (´)
     0x2A,       // 0x0E Backspace
     0x2B,       // 0x0F Tab
@@ -90,7 +90,7 @@ const uint8_t SCANCODE_TO_USAGE[] = {
     0x08,       // 0x12 E
     0x15,       // 0x13 R
     0x17,       // 0x14 T
-    0x1C,       // 0x15 Y (Z on German boards — the phone decides, not us)
+    0x1C,       // 0x15 Y (Z on German layouts — the device's layout decides, not us)
     0x18,       // 0x16 U
     0x0C,       // 0x17 I
     0x12,       // 0x18 O
@@ -113,7 +113,7 @@ const uint8_t SCANCODE_TO_USAGE[] = {
     0x35,       // 0x29 ` (^)
     0x00,       // 0x2A left Shift (modifier)
     0x31,       // 0x2B backslash (#)
-    0x1D,       // 0x2C Z (Y on German boards)
+    0x1D,       // 0x2C Z (Y on German layouts)
     0x1B,       // 0x2D X
     0x06,       // 0x2E C
     0x19,       // 0x2F V
@@ -155,7 +155,7 @@ const uint8_t SCANCODE_TO_USAGE[] = {
     0x63,       // 0x53 Keypad .
     0x00,       // 0x54 SysRq
     0x00,       // 0x55 unused
-    0x64,       // 0x56 the extra key next to left Shift (< > | on German boards)
+    0x64,       // 0x56 the extra key next to left Shift (< > | on German layouts)
     0x44,       // 0x57 F11
     0x45        // 0x58 F12
 };
@@ -181,8 +181,8 @@ uint8_t scancode_to_modifier(uint32_t scancode, bool extended) {
 
 uint8_t scancode_to_usage(uint32_t scancode, bool extended) {
     if (extended) {
-        // Ugg! Same numbers as above, but the keyboard shouted "E0" first. These
-        // are the keys the old small keyboards did not have.
+        // Same scancode numbers as above, but prefixed with E0 by the keyboard. These
+        // are the keys the original AT keyboard did not have.
         switch (scancode) {
         case 0x1C: return 0x58; // Keypad Enter
         case 0x35: return 0x54; // Keypad /
@@ -221,10 +221,10 @@ const uint8_t* HidKeyboard::report_descriptor(size_t* out_size) {
 void HidKeyboard::build_report(uint8_t* report) const {
     uint8_t modifiers = m_modifiers;
 
-    // Ugg! Windows fakes a left-Ctrl press every single time AltGr goes down, so
-    // AltGr+Q would reach the phone as Strg+AltGr+Q and the @ never appears. While
-    // right Alt is held, cave man throws that fake stone away. Nothing is lost:
-    // Windows cannot tell a real Strg+AltGr apart from a plain AltGr either.
+    // Windows synthesises a left-Ctrl press every time AltGr goes down, so AltGr+Q
+    // would reach the device as Ctrl+AltGr+Q and the "@" would never appear. Mask that
+    // phantom Ctrl out while right Alt is held. Nothing is lost: Windows cannot tell a
+    // real Ctrl+AltGr from a plain AltGr either.
     if (modifiers & MOD_RIGHT_ALT) {
         modifiers &= static_cast<uint8_t>(~MOD_LEFT_CTRL);
     }
@@ -248,9 +248,9 @@ void HidKeyboard::build_report(uint8_t* report) const {
 bool HidKeyboard::process_key(bool pressed, uint32_t scancode, bool extended, uint8_t* report) {
     if (!report) return false;
 
-    // A modifier never takes a key slot, it only flips a bit in byte 0. And it
-    // must always be sent: press 'a', then press Shift — if cave man swallows the
-    // Shift the phone never learns the hand moved.
+    // A modifier never occupies a key slot, it only sets a bit in byte 0 — and it must
+    // always be sent: press 'a', then press Shift, and swallowing the Shift would leave
+    // the device unaware that the modifier state changed.
     const uint8_t modifier = scancode_to_modifier(scancode, extended);
     if (modifier != 0) {
         if (pressed) {

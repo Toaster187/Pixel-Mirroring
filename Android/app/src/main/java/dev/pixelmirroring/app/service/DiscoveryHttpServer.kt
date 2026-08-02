@@ -53,7 +53,7 @@ class DiscoveryHttpServer(
         running = true
 
         acceptThread = Thread({
-            // Ugg wait for tiny HTTP knocks.
+            // Block here until a client connects.
             while (running) {
                 try {
                     val client = socket.accept()
@@ -115,10 +115,10 @@ class DiscoveryHttpServer(
     private fun parseRequest(input: InputStream): HttpRequest? {
         val headerBytes = ByteArrayOutputStream(512)
 
-        // Ugg! Old cave man kept every single byte in a box of its own (ArrayList<Byte>
-        // boxes each one) and then compared the WHOLE pile after every byte. Now he
-        // just remembers the last four stones — same result, far less digging. This
-        // path runs on every heartbeat and every network scan, so it must stay cheap.
+        // Only the last four bytes are tracked, instead of collecting every byte into
+        // an ArrayList<Byte> (which boxes each one) and re-scanning the whole buffer
+        // after every read. Same result, far less work — and this runs on every
+        // heartbeat and every network scan, so it has to stay cheap.
         var b1 = -1
         var b2 = -1
         var b3 = -1

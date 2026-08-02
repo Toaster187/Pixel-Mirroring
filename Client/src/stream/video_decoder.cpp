@@ -56,16 +56,17 @@ bool VideoDecoder::init(uint32_t codec_id) {
         return false;
     }
 
-    // Cave man want fast stream, no wait for frames!
+    // Low latency matters more than throughput here.
     codec_ctx_->flags |= AV_CODEC_FLAG_LOW_DELAY;
     codec_ctx_->flags2 |= AV_CODEC_FLAG2_FAST;
-    // Cave man use slice threading to avoid frame delay
+    // Slice threading instead of frame threading: frame threading buffers several
+    // frames before emitting the first one, which is exactly the delay to avoid.
     codec_ctx_->thread_type = FF_THREAD_SLICE;
-    codec_ctx_->thread_count = 2; // Limit threads to reduce scheduling latency
+    codec_ctx_->thread_count = 2; // more threads add scheduling latency, not speed
 
-    // Ugg! "preset" and "tune" are options for a CARVING stone (encoder), not for a
-    // READING one. A decoder silently drops them, so they only ever looked useful.
-    // The real low-latency switch is AV_CODEC_FLAG_LOW_DELAY, set above.
+    // "preset" and "tune" are ENCODER options. A decoder silently ignores them, so
+    // setting them here only ever looked like it did something. The actual low-latency
+    // switch is AV_CODEC_FLAG_LOW_DELAY, set above.
     int ret = avcodec_open2(codec_ctx_, codec, nullptr);
 
     if (ret < 0) {
@@ -82,9 +83,9 @@ bool VideoDecoder::decode(const uint8_t* data, size_t size, bool) {
         return false;
     }
 
-    // Cave man reuses one bag instead of sewing a new one sixty times a heartbeat.
-    // avcodec_send_packet copies whatever it needs to keep, so the bag is free again
-    // right after. FFmpeg wants some slack bytes at the end, hence the padding.
+    // One reused buffer instead of a fresh allocation 60 times a second.
+    // avcodec_send_packet copies whatever it needs to retain, so the buffer is free to
+    // reuse immediately after. FFmpeg requires the trailing padding bytes.
     av_packet_unref(packet_);
     packet_buffer_.resize(size + AV_INPUT_BUFFER_PADDING_SIZE);
     std::memcpy(packet_buffer_.data(), data, size);
@@ -103,7 +104,8 @@ bool VideoDecoder::decode(const uint8_t* data, size_t size, bool) {
     while (true) {
         ret = avcodec_receive_frame(codec_ctx_, frame_);
         if (ret == 0) {
-            // Cave man got frame! Break loop, keep frame in frame_ so next receive not kill it!
+            // Got a frame. Stop here and keep it in frame_ — another receive call would
+            // overwrite it.
             if (frame_->width != last_width_ || frame_->height != last_height_) {
                 last_width_ = frame_->width;
                 last_height_ = frame_->height;

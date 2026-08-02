@@ -13,11 +13,12 @@
 
 namespace pm {
 
-// MEOW. LOCAL CONFIG DIR FOR SETTINGS.
+// Where the settings file lives.
 static std::filesystem::path get_config_dir() {
 #ifndef PM_PORTABLE_BUILD
 #ifdef _WIN32
-    // CAVE MAN NO WRITE APPDATA FOR PORTABLE. ONLY EXE DIR.
+    // A portable build keeps everything next to the EXE and never writes to
+    // %LOCALAPPDATA%.
     const char* local_app_data = std::getenv("LOCALAPPDATA");
     if (local_app_data && local_app_data[0] != '\0') {
         std::filesystem::path path = std::filesystem::path(local_app_data) / "PixelMirroring";
@@ -35,7 +36,7 @@ static std::filesystem::path get_config_dir() {
     return fallback;
 }
 
-// MEOW. PATH FOR SETTINGS FILE.
+// Full path of the settings file.
 std::filesystem::path get_settings_path() {
     return get_config_dir() / "settings.txt";
 }
@@ -86,7 +87,8 @@ static std::string encrypt_pin(const std::string& pin) { return pin; }
 static std::string decrypt_pin(const std::string& hex) { return hex; }
 #endif
 
-// MEOW. WHAT EACH STONE WEIGHS. BITRATE ONLY MATTERS UP TO WHAT PHONE CAN SEND.
+// Concrete values behind each preset. The bitrate is only an upper bound — the phone
+// sends less when the picture does not need it.
 QualitySpec quality_spec(QualityPreset preset) {
     switch (preset) {
         case QualityPreset::BATTERY: return {30, 720, 4'000'000};
@@ -111,7 +113,7 @@ static const char* quality_name(QualityPreset preset) {
     }
 }
 
-// MEOW. LOAD SETTINGS FROM FILE.
+// Reads the settings file, falling back to defaults for anything missing.
 Settings load_settings() {
     Settings s;
     std::ifstream file(get_settings_path());
@@ -119,8 +121,9 @@ Settings load_settings() {
         return s;
     }
 
-    // Ugg! Old settings stone only knew two switches. Remember what it said so the
-    // nearest preset can be handed to cave men who upgrade.
+    // Older settings files only had two separate switches instead of a preset.
+    // Remember what they said so an upgrading install can be mapped to the closest
+    // preset below.
     bool has_quality = false;
     int legacy_fps = 60;
     int legacy_size = 0;
@@ -161,14 +164,14 @@ Settings load_settings() {
         }
     }
 
-    // Whoever limited FPS or resolution before wanted the cheap stone.
+    // Anyone who had capped FPS or resolution before wanted the battery-saving preset.
     if (!has_quality && (legacy_fps == 30 || legacy_size == 720)) {
         s.m_quality = QualityPreset::BATTERY;
     }
     return s;
 }
 
-// MEOW. SAVE SETTINGS TO FILE.
+// Writes the settings file.
 void save_settings(const Settings& s) {
     std::ofstream file(get_settings_path(), std::ios::trunc);
     if (!file) {

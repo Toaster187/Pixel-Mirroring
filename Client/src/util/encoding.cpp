@@ -33,8 +33,8 @@ std::string wide_to_utf8(const std::wstring& wide) {
 }
 
 std::filesystem::path path_from_utf8(const std::string& utf8) {
-    // A failed turn would leave cave man with nothing at all — better the crooked
-    // name than no name, so the old road is the fallback.
+    // A failed conversion would leave nothing at all. A possibly mangled name is still
+    // better than an empty one, so fall back to the narrow conversion.
     const std::wstring wide = utf8_to_wide(utf8);
     if (wide.empty() && !utf8.empty()) return std::filesystem::path(utf8);
     return std::filesystem::path(wide);
@@ -50,7 +50,7 @@ std::string path_to_utf8(const std::filesystem::path& path) {
 
 #else
 
-// One table for everybody outside the Windows cave. Nothing to turn.
+// Outside Windows everything is UTF-8 already, so there is nothing to convert.
 std::filesystem::path path_from_utf8(const std::string& utf8) {
     return std::filesystem::path(utf8);
 }

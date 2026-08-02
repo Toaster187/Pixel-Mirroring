@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Cave man draw: dark PC slab on left, Pixel back side with camera bar on right.
-     Everything sit inside 72dp safe zone so launcher mask no bite off corners. -->
+<!-- A dark PC on the left, the back of a Pixel with its camera bar on the right.
+     Everything stays inside the 72dp safe zone so no launcher mask clips it. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp"

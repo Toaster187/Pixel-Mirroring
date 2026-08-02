@@ -7,9 +7,9 @@
 namespace pm::stream {
 
 namespace {
-// Ugg! If the PC hiccups, sound piles up in the queue and then plays late forever.
-// Cave man throws away the backlog once it grows past this, so picture and sound
-// walk together again. A quarter heartbeat of sound is plenty of cushion.
+// If the PC stalls briefly, audio piles up in the queue and stays permanently behind
+// the picture. Once the backlog grows past this, it is dropped so the two line up
+// again. A quarter of a second of audio is plenty of buffer.
 constexpr uint32_t MAX_QUEUE_MS = 250;
 }
 
@@ -37,7 +37,7 @@ bool AudioPlayer::start(int sample_rate, int channels) {
     want.format = AUDIO_S16LSB; // scrcpy raw audio is signed 16-bit little endian
     want.channels = static_cast<Uint8>(channels);
     want.samples = 1024;
-    want.callback = nullptr; // cave man pushes sound himself via SDL_QueueAudio
+    want.callback = nullptr; // we push samples ourselves via SDL_QueueAudio
 
     SDL_AudioSpec have = {};
     const SDL_AudioDeviceID device = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);

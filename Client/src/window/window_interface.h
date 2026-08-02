@@ -9,7 +9,7 @@ struct SDL_Window;
 
 namespace pm::window {
 
-// Cave man state machine — each state = different cave painting on phone screen
+// Client state machine — each state draws a different screen in the phone area.
 enum class AppState {
     SETUP,      // Show first-time setup instructions
     SCANNING,   // Scanning network for Android device
@@ -23,17 +23,17 @@ enum class PointerAction {
     UP
 };
 
-// Cave man drags rock onto window. Bubble shows how much of it is already on the phone.
+// State of the bubble that shows the progress of a dropped file's transfer.
 enum class TransferState {
     IDLE,   // No bubble
-    ACTIVE, // Ring fills up while the rock travels
+    ACTIVE, // ring fills up while the file is being transferred
     DONE,   // Green tick, fades away on its own
     FAILED  // Red mark, fades away on its own
 };
 
 enum class MenuAction {
     FACTORY_RESET,
-    // One stone per quality level — FPS, resolution and bitrate travel together.
+    // One action per quality level — FPS, resolution and bitrate change together.
     SET_QUALITY_BATTERY,
     SET_QUALITY_BALANCED,
     SET_QUALITY_MAXIMUM,
@@ -43,8 +43,8 @@ enum class MenuAction {
     TOGGLE_COMPATIBILITY_MODE,
     TOGGLE_LOWEST_BRIGHTNESS,
     TOGGLE_SCREEN_OFF,
-    // Top curtains of the phone. Alt+Down pulls them, Alt+Shift+Down the switches
-    // behind them, Alt+Up shoves everything back up.
+    // The phone's pull-down panels. Alt+Down opens notifications, Alt+Shift+Down the
+    // quick settings behind them, Alt+Up closes both again.
     EXPAND_NOTIFICATION_PANEL,
     EXPAND_SETTINGS_PANEL,
     COLLAPSE_PANELS,
@@ -95,10 +95,11 @@ public:
     // Set pointer callback. Handle click and drag in video.
     virtual void set_pointer_callback(std::function<void(PointerAction, int, int, int, int)> cb) = 0;
     
-    // Set key callback. Cave man tap physical keys. Params: action (0 = down, 1 = up), keycode.
+    // Set key callback, for keys sent as Android keycodes.
+    // Params: action (0 = down, 1 = up), keycode.
     virtual void set_key_callback(std::function<void(int, int)> cb) = 0;
 
-    // Set text callback. Cave man write words. Params: text.
+    // Set text callback, for typed characters. Params: text (UTF-8).
     virtual void set_text_callback(std::function<void(const std::string&)> cb) = 0;
 
     // Set raw key callback. Reports the PHYSICAL key position (PC set-1 scancode)
@@ -106,16 +107,16 @@ public:
     // own German layout on top. Params: action (0 = down, 1 = up), scancode,
     // extended flag. Only fires while the virtual USB keyboard is switched on.
     //
-    // Returns false for a hole the fake keyboard does not have (a boot keyboard has
-    // no volume or media buttons). Then the window must send the key the old way,
-    // through the Android keycode path — otherwise it vanishes without a sound.
+    // Returns false for a key the virtual keyboard does not have (a boot keyboard has
+    // no volume or media buttons). The window must then send the key the other way,
+    // through the Android keycode path, or it disappears silently.
     virtual void set_raw_key_callback(std::function<bool(int, uint32_t, bool)> cb) = 0;
 
-    // Set focus-lost callback. Cave man leaves window while still holding Shift —
-    // somebody has to tell the phone to let go.
+    // Set focus-lost callback. If the window loses focus while Shift is still held,
+    // something has to tell the phone to release it.
     virtual void set_focus_lost_callback(std::function<void()> cb) = 0;
 
-    // Set scroll callback. Cave man scroll screen. Params: x, y, w, h, hscroll, vscroll.
+    // Set scroll callback. Params: x, y, w, h, hscroll, vscroll.
     virtual void set_scroll_callback(std::function<void(int, int, int, int, float, float)> cb) = 0;
     
     

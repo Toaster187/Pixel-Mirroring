@@ -27,9 +27,9 @@ constexpr AVRational CAPTURE_FPS = {60, 1};
 
 std::filesystem::path capture_directory() {
 #ifdef _WIN32
-    // Wide, not narrow: a picture cave under a home cave the tribe's old letter-table
-    // cannot spell came back full of "?", and then the recording was neither saved
-    // nor thrown to the phone. See the letter-table rules in CLAUDE.md.
+    // Wide, not narrow: a Pictures folder under a user profile the ANSI code page
+    // cannot represent came back full of "?", and the recording was then neither saved
+    // locally nor pushed to the phone. See the encoding rules in CLAUDE.md.
     wchar_t path[MAX_PATH];
     if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_MYPICTURES, NULL, 0, path))) {
         std::filesystem::path full_path = std::filesystem::path(path) / "PixelMirroring";
@@ -52,11 +52,10 @@ std::filesystem::path capture_directory() {
     return ec ? std::filesystem::current_path() : fallback;
 }
 
-// Ugg! Cave man used to grind every recorded picture by hand on the CPU (libx264).
-// Modern fire-boxes have a carving stone built into the graphics card; Media
-// Foundation on Windows hands us that one. If the machine has none, or the driver
-// refuses, we quietly fall back to the old hand-grinding — a recording must never
-// fail just because the fancy path is missing.
+// Prefer a hardware encoder over libx264. Media Foundation exposes whatever the GPU
+// offers on Windows. If the machine has none, or the driver refuses, fall back to
+// software encoding — a recording must never fail just because the fast path is
+// unavailable.
 const AVCodec* find_h264_encoder(bool* out_is_hardware) {
     const char* hardware_names[] = {
         "h264_mf",    // Windows Media Foundation (Intel QSV / NVENC / AMD VCE under the hood)
@@ -76,9 +75,9 @@ const AVCodec* find_h264_encoder(bool* out_is_hardware) {
     return avcodec_find_encoder(AV_CODEC_ID_H264);
 }
 
-// Picks a pixel shape the encoder actually understands. Hardware encoders usually
-// want NV12, the software one wants YUV420P — asking for the wrong one makes
-// avcodec_open2 refuse.
+// Picks a pixel format the chosen encoder actually supports. Hardware encoders
+// usually want NV12, the software one YUV420P — the wrong one makes avcodec_open2
+// fail.
 AVPixelFormat pick_encoder_pixel_format(const AVCodec* codec) {
     const AVPixelFormat* formats = nullptr;
 #if LIBAVCODEC_VERSION_MAJOR >= 61
@@ -250,8 +249,8 @@ bool CaptureController::is_recording() const {
 
 bool CaptureController::open_video_locked(const AVFrame* frame) {
     m_video_path = make_capture_path("Aufnahme", ".mp4");
-    // FFmpeg's own file-opener turns the name back into wide stones with CP_UTF8, so
-    // it wants UTF-8 — path::string() would hand it the tribe's old table instead.
+    // FFmpeg's file opener converts the name back to wide characters with CP_UTF8, so
+    // it expects UTF-8. path::string() would hand it the ANSI code page instead.
     const std::string video_path_utf8 = pm::util::path_to_utf8(m_video_path);
     if (avformat_alloc_output_context2(&m_format_context, nullptr, "mp4", video_path_utf8.c_str()) < 0 ||
         !m_format_context) {
@@ -263,11 +262,12 @@ bool CaptureController::open_video_locked(const AVFrame* frame) {
     const AVCodec* encoder = find_h264_encoder(&is_hardware);
     const AVCodec* fallback = is_hardware ? avcodec_find_encoder(AV_CODEC_ID_H264) : nullptr;
 
-    // Try the hardware carving stone first, then the software one.
+    // Try the hardware encoders first, then fall back to software.
     for (int attempt = 0; attempt < 2; ++attempt) {
         if (attempt == 1) {
             if (!fallback || fallback == encoder) break;
-            // Hardware said no — throw away the half-built state and grind by hand.
+            // The hardware encoder refused — discard the half-built state and retry
+            // with the next candidate.
             if (m_video_codec) avcodec_free_context(&m_video_codec);
             encoder = fallback;
             is_hardware = false;
@@ -295,7 +295,7 @@ bool CaptureController::open_video_locked(const AVFrame* frame) {
         if (m_format_context->oformat->flags & AVFMT_GLOBALHEADER) {
             m_video_codec->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
         }
-        // Only the software encoder knows these; hardware encoders ignore them.
+        // Only libx264 understands these; hardware encoders ignore them.
         if (!is_hardware) {
             av_opt_set(m_video_codec->priv_data, "preset", "ultrafast", 0);
             av_opt_set(m_video_codec->priv_data, "tune", "zerolatency", 0);
@@ -303,7 +303,7 @@ bool CaptureController::open_video_locked(const AVFrame* frame) {
 
         if (avcodec_open2(m_video_codec, encoder, nullptr) >= 0 &&
             avcodec_parameters_from_context(m_video_stream->codecpar, m_video_codec) >= 0) {
-            break; // this one works
+            break; // this encoder opened successfully
         }
 
         if (attempt == 1 || !fallback || fallback == encoder) {
@@ -327,7 +327,7 @@ bool CaptureController::open_video_locked(const AVFrame* frame) {
         return false;
     }
 
-    // One reusable frame + packet for the whole recording.
+    // One reused frame and packet for the whole recording.
     m_encode_frame = av_frame_alloc();
     m_encode_packet = av_packet_alloc();
     if (!m_encode_frame || !m_encode_packet) {
@@ -352,7 +352,7 @@ bool CaptureController::encode_video_frame_locked(const AVFrame* frame) {
     if (!m_video_codec || !m_format_context || !m_video_stream || !m_encode_frame || !m_encode_packet ||
         frame->width != m_video_codec->width || frame->height != m_video_codec->height) return false;
 
-    // Cave man makes the tablet writable again instead of carving a new one.
+    // Make the existing frame writable again instead of allocating a new one.
     if (av_frame_make_writable(m_encode_frame) < 0) return false;
 
     m_video_scaler = sws_getCachedContext(m_video_scaler,

@@ -1,4 +1,4 @@
 #pragma once
 
-// Ugg! Number for app icon rock. Same number in app.rc and in code.
+// Resource id of the app icon. Must match the id used in app.rc.
 #define IDI_APP_ICON 101
