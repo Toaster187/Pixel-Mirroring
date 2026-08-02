@@ -1286,6 +1286,11 @@ static int app_main() {
     std::atomic<bool> pause_wanted{false};   // newest wish from the window
     std::atomic<bool> auto_paused{false};    // true only while WE hold the stream down
     std::atomic<bool> pause_worker_busy{false};
+    // Ugg! Somebody knocked while the one hand was already walking. The knock is
+    // written down instead of being thrown away, or a wish that lands in the blink
+    // between "world matches" and "stone put down" is lost for good — and a lost
+    // wish on the way UP leaves the picture down while the window is already back.
+    std::atomic<bool> pause_work_pending{false};
     // The phone this session belongs to, remembered so the way back needs no search.
     std::string paused_device_id;
     std::mutex paused_device_mutex;
@@ -1798,6 +1803,15 @@ static int app_main() {
                 run_on_device([w = window.get()](const std::string& id) {
                     unlock_device_if_needed(id, w);
                 });
+            } else if (auto_paused.load()) {
+                // Ugg! The picture only lies down, the tunnel to the phone is still
+                // open. The pause hand owns the way back — walking the cold road here
+                // as well would build a SECOND stream on top of the one that hand is
+                // already building. The wake-poke above may have started it already;
+                // saying the wish out loud again costs nothing, because the pause hand
+                // only ever looks at the NEWEST wish.
+                pause_wanted.store(false);
+                reconcile_pause_state();
             } else {
                 window->set_app_state(pm::window::AppState::SCANNING);
                 window->set_status_text("Starte neue Verbindung...");
@@ -1874,6 +1888,10 @@ static int app_main() {
         }
     });
     std::thread connection_thread;
+    // The road to a new connection is walked by the drawing hand AND by the pause
+    // hand. Two hands reaching for the same thread-stone is how a cave falls over,
+    // so the stone gets a guard.
+    std::mutex connection_thread_mutex;
     std::atomic<bool> connection_running{false};
     std::thread screen_poll_thread;
     std::atomic<bool> stop_screen_poll{false};
@@ -1968,73 +1986,111 @@ static int app_main() {
     // above, where the menu can reach it). What matters is the WISH, not how often
     // the human hit the stone.
     reconcile_pause_state = [&]() {
+        // The wish goes on the wall BEFORE the busy stone is touched, so a hand that
+        // is just putting the stone down still reads it and turns around.
+        pause_work_pending.store(true);
         if (pause_worker_busy.exchange(true)) return; // one hand is enough
         background_tasks.run([&]() {
-            ScopeExit mark_done([&]() { pause_worker_busy = false; });
+            // ONE walk over the world. Comes back when the world matches the wish —
+            // or when somebody else's work must not be cut into, and then it leaves
+            // the world mismatched on purpose.
+            const auto walk_once = [&]() {
+                // Cave man walks back and forth as long as the wish keeps changing
+                // under him. The bound is only there so a human hammering the minimize
+                // stone cannot keep one hand walking forever.
+                for (int rounds = 0; rounds < 8 && !should_stop; ++rounds) {
+                    const bool want_paused = pause_wanted.load();
+                    if (want_paused == auto_paused.load()) return;
 
-            // Cave man walks back and forth as long as the wish keeps changing under
-            // him. The bound is only there so a human hammering the minimize stone
-            // cannot keep one hand walking forever.
-            for (int rounds = 0; rounds < 8 && !should_stop; ++rounds) {
-                const bool want_paused = pause_wanted.load();
-                if (want_paused == auto_paused.load()) return;
-
-                if (want_paused) {
-                    // Never cut into somebody else's work: a recording would end up a
-                    // broken file, and a quality restart is already holding the stream
-                    // in both hands. In those cases cave man simply does nothing, and
-                    // because auto_paused stays down, coming back does nothing either.
-                    //
-                    // A connect that is still walking is NOT in this list on purpose:
-                    // it only ever raises is_running() once the stream really stands,
-                    // and it asks again at the end of its road (see start_connection).
-                    if (!scrcpy.is_running() || renderer.is_recording() ||
-                        quality_restart_running.load()) {
-                        return;
+                    if (want_paused) {
+                        // Never cut into somebody else's work: a recording would end up
+                        // a broken file, and a quality restart is already holding the
+                        // stream in both hands. In those cases cave man simply does
+                        // nothing, and because auto_paused stays down, coming back does
+                        // nothing either.
+                        //
+                        // A connect that is still walking is NOT in this list on
+                        // purpose: it only ever raises is_running() once the stream
+                        // really stands, and it asks again at the end of its own road
+                        // (see start_connection).
+                        if (!scrcpy.is_running() || renderer.is_recording() ||
+                            quality_restart_running.load()) {
+                            return;
+                        }
+                        {
+                            std::lock_guard<std::mutex> guard(paused_device_mutex);
+                            paused_device_id = scrcpy.get_device_id();
+                        }
+                        // Raise the flag FIRST — see the heartbeat loop.
+                        auto_paused.store(true);
+                        scrcpy.stop();
+                        window->post_task([w = window.get()]() {
+                            w->set_app_state(pm::window::AppState::CONNECTED);
+                            w->set_status_text("Pausiert — Fenster ist minimiert.");
+                        });
+                        continue;
                     }
+
+                    std::string device_id;
                     {
                         std::lock_guard<std::mutex> guard(paused_device_mutex);
-                        paused_device_id = scrcpy.get_device_id();
+                        device_id = paused_device_id;
                     }
-                    // Raise the flag FIRST — see the heartbeat loop.
-                    auto_paused.store(true);
-                    scrcpy.stop();
                     window->post_task([w = window.get()]() {
                         w->set_app_state(pm::window::AppState::CONNECTED);
-                        w->set_status_text("Pausiert — Fenster ist minimiert.");
+                        w->set_status_text("Stream wird fortgesetzt...");
                     });
-                    continue;
+
+                    // The warm road: ADB is still awake because the poke never stopped,
+                    // so there is nothing to look for and nothing to ask for.
+                    const bool resumed = !device_id.empty() &&
+                        start_stream(*window, scrcpy, renderer, input, device_id,
+                                     &saved_brightness, background_tasks,
+                                     &phone_auto_rotate);
+
+                    if (!resumed && !should_stop && pause_wanted.load()) {
+                        // Ugg! The human folded the window down AGAIN while cave man
+                        // was building, and the building failed. There is no picture,
+                        // so the world really IS paused — and the flag has to stay up
+                        // and say so. Letting it drop here left the flag down, the
+                        // stream gone and the poke dead: the phone shut its ADB hole,
+                        // and folding the window back up found "wish == world" and did
+                        // nothing at all. A dead window no hand ever comes back for.
+                        window->post_task([w = window.get()]() {
+                            w->set_app_state(pm::window::AppState::CONNECTED);
+                            w->set_status_text("Pausiert — Fenster ist minimiert.");
+                        });
+                        continue;
+                    }
+
+                    // Lower the flag only now: while the stream was being built the
+                    // poke still had to count as wanted.
+                    auto_paused.store(false);
+
+                    if (!resumed && !should_stop) {
+                        // Phone went to sleep, WLAN moved, ADB shut after all —
+                        // whatever it was, the warm road is gone. Walk the cold one.
+                        window->post_task([w = window.get()]() {
+                            w->set_status_text("Verbindung neu aufbauen...");
+                        });
+                        start_connection(true);
+                        return;
+                    }
                 }
+            };
 
-                std::string device_id;
-                {
-                    std::lock_guard<std::mutex> guard(paused_device_mutex);
-                    device_id = paused_device_id;
-                }
-                window->post_task([w = window.get()]() {
-                    w->set_app_state(pm::window::AppState::CONNECTED);
-                    w->set_status_text("Stream wird fortgesetzt...");
-                });
-
-                // The warm road: ADB is still awake because the poke never stopped,
-                // so there is nothing to look for and nothing to ask permission for.
-                const bool resumed = !device_id.empty() &&
-                    start_stream(*window, scrcpy, renderer, input, device_id,
-                                 &saved_brightness, background_tasks, &phone_auto_rotate);
-
-                // Lower the flag only now: while the stream was being built the poke
-                // still had to count as wanted.
-                auto_paused.store(false);
-
-                if (!resumed && !should_stop && !pause_wanted.load()) {
-                    // Phone went to sleep, WLAN moved, ADB shut after all — whatever
-                    // it was, the warm road is gone. Walk the cold one.
-                    window->post_task([w = window.get()]() {
-                        w->set_status_text("Verbindung neu aufbauen...");
-                    });
-                    start_connection(true);
-                    return;
-                }
+            // Ugg! Putting the busy stone down and walking away is not the end of the
+            // job: a wish that arrived while cave man was putting it down would lie
+            // there forever. So he looks at the wall one more time, and only then goes.
+            for (;;) {
+                pause_work_pending.store(false);
+                walk_once();
+                pause_worker_busy.store(false);
+                // Nobody knocked while the stone went down — the walk was the last one.
+                if (!pause_work_pending.load()) return;
+                // Somebody knocked. Pick the stone back up, unless another hand was
+                // faster: then THAT hand carries the wish now and cave man may leave.
+                if (pause_worker_busy.exchange(true)) return;
             }
         });
     };
@@ -2142,17 +2198,26 @@ static int app_main() {
     };
 
     start_connection = [&](bool automatic) {
-        if (connection_running) return;
+        // Ugg! Cave man is already packing up. Building a new road now would leave a
+        // walker behind that nobody waits for any more.
+        if (should_stop) return;
+
+        // The road is claimed HERE, not inside the new walker. The old place set the
+        // stone only once the walker had started, and in that blink a SECOND hand
+        // read "nobody walking", walked in as well, and both reached for the same
+        // thread-stone. Since the pause hand also walks this road, that second hand
+        // is no longer a made-up story.
+        if (connection_running.exchange(true)) return;
 
         stop_screen_poll_thread();
         stop_heartbeat_thread();
 
+        std::lock_guard<std::mutex> guard(connection_thread_mutex);
         if (connection_thread.joinable()) {
             connection_thread.join();
         }
 
         connection_thread = std::thread([&, automatic]() {
-            connection_running = true;
             ScopeExit mark_done([&]() { connection_running = false; });
             // A fresh connection replaces whatever the pause was holding on to.
             auto_paused.store(false);
@@ -2318,7 +2383,12 @@ static int app_main() {
         }
     }
 
-    if (connection_thread.joinable()) connection_thread.join();
+    {
+        // Same guard as in start_connection: the pause hand may still be holding this
+        // stone while cave man is already walking out.
+        std::lock_guard<std::mutex> guard(connection_thread_mutex);
+        if (connection_thread.joinable()) connection_thread.join();
+    }
     if (screen_poll_thread.joinable()) screen_poll_thread.join();
     if (heartbeat_thread.joinable()) heartbeat_thread.join();
     // Cave man waits for every helper hunter before the cave stones disappear.
