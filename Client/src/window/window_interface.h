@@ -54,7 +54,8 @@ enum class MenuAction {
     TOGGLE_AUDIO,
     TOGGLE_AUTO_ROTATE,
     TOGGLE_UHID_KEYBOARD,
-    OPEN_KEYBOARD_SETTINGS
+    OPEN_KEYBOARD_SETTINGS,
+    TOGGLE_AUTO_PAUSE_MINIMIZED
 };
 
 class IWindow {
@@ -134,6 +135,12 @@ public:
     // Set a callback for when the window is restored from another instance
     virtual void set_restore_callback(std::function<void()> cb) = 0;
 
+    // Fires when the window folds down to the taskbar (true) and when it comes back
+    // up (false). NOT for the tray: hiding to the tray goes its own way and already
+    // takes the stream with it. Fires on the UI thread, so whoever listens must not
+    // do anything slow in here — tearing a stream down belongs on another thread.
+    virtual void set_minimize_callback(std::function<void(bool)> cb) = 0;
+
     // Set checkbox states on the menu options from outside
     // Selected quality level: 0 = Akku, 1 = Ausgewogen, 2 = Maximal
     virtual void set_quality_preset(int preset) = 0;
@@ -150,6 +157,8 @@ public:
     // presses go: while this is on they travel as real USB keyboard reports, and
     // the text/keycode path stays silent so nothing is typed twice.
     virtual void set_uhid_keyboard(bool enabled) = 0;
+    // Menu checkmark for "stream dries up while the window is down".
+    virtual void set_auto_pause_minimized(bool enabled) = 0;
     virtual void set_recording(bool recording) = 0;
     virtual void trigger_screenshot_flash() = 0;
 

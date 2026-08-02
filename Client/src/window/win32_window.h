@@ -48,6 +48,7 @@ public:
     
     void set_menu_callback(std::function<void(MenuAction)> cb) override { menu_cb_ = std::move(cb); }
     void set_restore_callback(std::function<void()> cb) override { m_restore_cb_ = std::move(cb); }
+    void set_minimize_callback(std::function<void(bool)> cb) override { m_minimize_cb_ = std::move(cb); }
     void set_quality_preset(int preset) override { quality_preset_ = preset; }
     void set_compatibility_mode(bool enabled) override { compatibility_mode_ = enabled; }
     void set_lowest_brightness(bool enabled) override { lowest_brightness_ = enabled; }
@@ -56,6 +57,7 @@ public:
     void set_audio_enabled(bool enabled) override { audio_enabled_ = enabled; }
     void set_auto_rotate_enabled(bool enabled) override { auto_rotate_enabled_ = enabled; }
     void set_uhid_keyboard(bool enabled) override { uhid_keyboard_ = enabled; hid_held_keys_.clear(); }
+    void set_auto_pause_minimized(bool enabled) override { auto_pause_minimized_ = enabled; }
     void set_recording(bool recording) override;
     void trigger_screenshot_flash() override;
     void set_file_drop_callback(std::function<void(const std::vector<std::string>&)> cb) override { m_file_drop_cb_ = std::move(cb); }
@@ -167,6 +169,11 @@ private:
     std::function<void()> start_cb_;
     std::function<void(MenuAction)> menu_cb_;
     std::function<void()> m_restore_cb_;
+    std::function<void(bool)> m_minimize_cb_;
+
+    // Ugg! WM_SIZE shouts SIZE_RESTORED for every drag of the window edge too. Only
+    // a real fold-down or fold-up is worth telling anybody about.
+    bool minimized_{false};
     int quality_preset_{1};        // 0 = Akku, 1 = Ausgewogen, 2 = Maximal
     bool quality_expanded_{false}; // Cave man folded the quality stones open?
     bool compatibility_mode_{false};
@@ -176,6 +183,7 @@ private:
     bool audio_enabled_{true};
     bool auto_rotate_enabled_{true};
     bool uhid_keyboard_{false};
+    bool auto_pause_minimized_{true};
     bool recording_{false};
     std::chrono::steady_clock::time_point recording_start_time_;
     bool screenshot_flash_{false};

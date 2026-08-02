@@ -292,6 +292,32 @@ jedem Textfeld korrekt dargestellt werden. Damit das dauerhaft hält, gilt:
   weggeräumt: das Aufräumen am Ende von `push_file_paced` läuft nur, wenn die
   Übertragung *endet* - ein hart beendeter Client lässt sie sonst für immer im
   Dateimanager des Handys liegen.
+- **Auto-Pause bei minimiertem Fenster** (`Settings::m_auto_pause_minimized`,
+  standardmäßig **an**): ein zur Taskleiste gefaltetes Fenster zeigt nichts, das Handy
+  kodiert aber weiter und das WLAN trägt weiter ~20 Mbit/s. `Win32Window` meldet über
+  `set_minimize_callback` nur die Flanke `SIZE_MINIMIZED`/`SIZE_RESTORED` (`WM_SIZE`
+  feuert auch bei jedem Ziehen am Fensterrand), `main.cpp` gleicht daraufhin ab:
+  - **Der Heartbeat muss den Stream überleben.** `POST /heartbeat` verhindert, dass der
+    Watchdog am Handy ADB nach 60 s abschaltet - genau deshalb ist der Rückweg warm:
+    Fortsetzen ist nur noch ein weiteres `start_stream()`, ohne Suche, ohne `/connect`,
+    ohne Pairing. Die Heartbeat-Schleife läuft daher, solange
+    `scrcpy.is_running() || auto_paused` gilt, und `auto_paused` wird **vor**
+    `scrcpy.stop()` gesetzt; in der anderen Reihenfolge gibt es einen Moment, in dem
+    beides falsch ist und der Heartbeat-Thread endgültig aussteigt.
+  - **Der Fensterthread schreibt nur einen Wunsch auf.** `pause_wanted` ist ein Atomic,
+    ein einzelner Hintergrund-Task (`reconcile_pause_state`) gleicht die Welt daran an.
+    Einen Stream im Fensterthread abzubauen oder aufzubauen würde die Oberfläche
+    einfrieren.
+  - **Pausiert wird übersprungen, nie erzwungen.** Nicht während einer Aufnahme (ein
+    abgerissener Stream hinterlässt eine kaputte Datei) und nicht während
+    `apply_quality_now` (das hält den Stream bereits in beiden Händen). Wird das
+    Pausieren übersprungen, bleibt `auto_paused` unten - dann tut auch das
+    Wiederherstellen nichts. Ein noch laufender Verbindungsaufbau steht bewusst nicht in
+    dieser Liste: er meldet `is_running()` erst, wenn der Stream wirklich steht, und
+    stößt den Abgleich am Ende seines eigenen Weges noch einmal an.
+  - **Beim Fortsetzen gibt es den kalten Weg als Rückfall.** Scheitert `start_stream()`
+    beim Wiederherstellen - Handy eingeschlafen, WLAN gewechselt, ADB doch abgeschaltet -
+    ruft der Task `start_connection(true)` auf, statt ein totes Fenster stehen zu lassen.
 - **Optionale UHID-Tastatur** (`Settings::m_uhid_keyboard`, standardmäßig aus): statt
   `inject_text` hängt eine virtuelle USB-HID-Tastatur am Handy (scrcpy-Control-Messages
   12 `UHID_CREATE`, 13 `UHID_INPUT`, 14 `UHID_DESTROY` sowie 15

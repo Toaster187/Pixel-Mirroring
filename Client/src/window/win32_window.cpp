@@ -1019,14 +1019,24 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         return 0;
-    case WM_SIZE:
-        if (wp != SIZE_MINIMIZED) {
+    case WM_SIZE: {
+        // Ugg! This shouts on every drag of the window edge as well, so cave man
+        // only passes the word on when the window really went down or came back up.
+        const bool now_minimized = (wp == SIZE_MINIMIZED);
+        if (now_minimized != minimized_) {
+            minimized_ = now_minimized;
+            if (m_minimize_cb_) {
+                m_minimize_cb_(now_minimized);
+            }
+        }
+        if (!now_minimized) {
             recalc_layout();
             update_region();
             // Cave man trigger render now so live resize look smooth
             PostMessage(hwnd_, WM_VIDEO_RENDER, 0, 0);
         }
         return 0;
+    }
     case WM_SIZING:
         handle_sizing(wp, lp); return TRUE;
     case WM_NCHITTEST:
@@ -1392,6 +1402,7 @@ namespace {
     constexpr UINT ID_TOGGLE_AUTO_ROTATE = 1016;
     constexpr UINT ID_TOGGLE_UHID_KEYBOARD = 1014;
     constexpr UINT ID_OPEN_KEYBOARD_SETTINGS = 1015;
+    constexpr UINT ID_TOGGLE_AUTO_PAUSE = 1017;
 
     constexpr UINT ID_SCREENSHOT = 1101;
     constexpr UINT ID_TOGGLE_RECORDING = 1102;
@@ -1695,6 +1706,8 @@ void Win32Window::build_settings_menu_items() {
     g_menu_items.push_back({ID_TOGGLE_LOWEST_BRIGHTNESS, L"Bildschirm auf niedrigste Helligkeit", true, lowest_brightness_, false});
     g_menu_items.push_back({ID_TOGGLE_SCREEN_OFF, L"Handy-Display komplett aus", true, screen_off_, false});
     g_menu_items.push_back({ID_TOGGLE_AUDIO, L"Ton vom Handy übertragen", true, audio_enabled_, false});
+    g_menu_items.push_back({ID_TOGGLE_AUTO_PAUSE, L"Stream pausieren, wenn Fenster minimiert",
+                            true, auto_pause_minimized_, false});
     g_menu_items.push_back({ID_TOGGLE_UHID_KEYBOARD, L"Echte USB-Tastatur am Handy", true, uhid_keyboard_, false});
     if (uhid_keyboard_) {
         if (app_state_ == AppState::STREAMING) {
@@ -1781,6 +1794,7 @@ void Win32Window::show_context_menu(POINT pt) {
                 case ID_TOGGLE_LOWEST_BRIGHTNESS: action = MenuAction::TOGGLE_LOWEST_BRIGHTNESS; break;
                 case ID_TOGGLE_SCREEN_OFF: action = MenuAction::TOGGLE_SCREEN_OFF; break;
                 case ID_TOGGLE_AUDIO:  action = MenuAction::TOGGLE_AUDIO; break;
+                case ID_TOGGLE_AUTO_PAUSE: action = MenuAction::TOGGLE_AUTO_PAUSE_MINIMIZED; break;
                 case ID_TOGGLE_AUTO_ROTATE: action = MenuAction::TOGGLE_AUTO_ROTATE; break;
                 case ID_TOGGLE_UHID_KEYBOARD: action = MenuAction::TOGGLE_UHID_KEYBOARD; break;
                 case ID_OPEN_KEYBOARD_SETTINGS: action = MenuAction::OPEN_KEYBOARD_SETTINGS; break;
@@ -1812,6 +1826,7 @@ void Win32Window::show_context_menu(POINT pt) {
         case ID_TOGGLE_LOWEST_BRIGHTNESS: action = MenuAction::TOGGLE_LOWEST_BRIGHTNESS; break;
         case ID_TOGGLE_SCREEN_OFF: action = MenuAction::TOGGLE_SCREEN_OFF; break;
         case ID_TOGGLE_AUDIO:  action = MenuAction::TOGGLE_AUDIO; break;
+        case ID_TOGGLE_AUTO_PAUSE: action = MenuAction::TOGGLE_AUTO_PAUSE_MINIMIZED; break;
         case ID_TOGGLE_AUTO_ROTATE: action = MenuAction::TOGGLE_AUTO_ROTATE; break;
         case ID_TOGGLE_UHID_KEYBOARD: action = MenuAction::TOGGLE_UHID_KEYBOARD; break;
         case ID_OPEN_KEYBOARD_SETTINGS: action = MenuAction::OPEN_KEYBOARD_SETTINGS; break;

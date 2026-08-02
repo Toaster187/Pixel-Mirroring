@@ -1238,6 +1238,7 @@ static int app_main() {
     window->set_capture_send_to_phone(initial_settings.m_send_captures_to_phone);
     window->set_audio_enabled(initial_settings.m_audio_enabled);
     window->set_uhid_keyboard(initial_settings.m_uhid_keyboard);
+    window->set_auto_pause_minimized(initial_settings.m_auto_pause_minimized);
 
     SavedBrightness saved_brightness; // Cave man remember phone sun level
     std::atomic<bool> phone_auto_rotate{true}; // Mirrors the phone's OWN rotation switch, never sets a default
@@ -1268,6 +1269,30 @@ static int app_main() {
     // Stands ABOVE background_tasks on purpose: the task pile joins its workers when
     // it dies, so everything a task holds by reference has to outlive the pile.
     std::atomic<bool> uhid_wanted{initial_settings.m_uhid_keyboard};
+
+    // --- Auto-pause while the window is folded down ---------------------------
+    //
+    // Ugg! A window folded down to the taskbar shows the human NOTHING, and the phone
+    // still paints sixty pictures a heartbeat and throws them all over the WLAN. So
+    // the picture-river is taken down while the window is down — but the poke that
+    // keeps the phone's ADB hole open stays alive. That is the whole trick: the way
+    // back is then just "build the stream again", with no searching, no /connect and
+    // no pairing dance. Without the poke the phone's watchdog shuts ADB after 60s and
+    // coming back would cost the full cold road.
+    //
+    // Same idea as the USB-keyboard switch one block up: the minimize shout arrives on
+    // the drawing hand, so it may only write down a wish — never take a stream apart.
+    std::atomic<bool> auto_pause_enabled{initial_settings.m_auto_pause_minimized};
+    std::atomic<bool> pause_wanted{false};   // newest wish from the window
+    std::atomic<bool> auto_paused{false};    // true only while WE hold the stream down
+    std::atomic<bool> pause_worker_busy{false};
+    // The phone this session belongs to, remembered so the way back needs no search.
+    std::string paused_device_id;
+    std::mutex paused_device_mutex;
+
+    // Filled in further down, next to apply_quality_now, where the stream and the
+    // heartbeat live. The menu only needs to know it exists.
+    std::function<void()> reconcile_pause_state;
 
     BackgroundTasks background_tasks;
 
@@ -1680,6 +1705,24 @@ static int app_main() {
                 window->set_status_text("Tastatur-Einstellungen am Handy geöffnet.");
                 break;
             }
+            case pm::window::MenuAction::TOGGLE_AUTO_PAUSE_MINIMIZED: {
+                const bool wanted = !current_settings.m_auto_pause_minimized;
+                current_settings.m_auto_pause_minimized = wanted;
+                pm::save_settings(current_settings);
+                auto_pause_enabled.store(wanted);
+                window->set_auto_pause_minimized(wanted);
+
+                // Switched off while the stream is lying down: give the picture back
+                // right away instead of leaving it paused until the next fold-up.
+                if (!wanted && auto_paused.load()) {
+                    pause_wanted.store(false);
+                    reconcile_pause_state();
+                }
+                window->set_status_text(wanted
+                    ? "Stream pausiert künftig, wenn das Fenster minimiert wird."
+                    : "Stream läuft künftig auch bei minimiertem Fenster weiter.");
+                break;
+            }
             case pm::window::MenuAction::TOGGLE_SEND_CAPTURES_TO_PHONE: {
                 current_settings.m_send_captures_to_phone = !current_settings.m_send_captures_to_phone;
                 pm::save_settings(current_settings);
@@ -1872,10 +1915,17 @@ static int app_main() {
             // Heartbeat only keeps phone ADB awake — disconnect detection is
             // handled by scrcpy video stream recv() failing
             pm::network::NetworkScanner hb_scanner;
-            while (!should_stop && !stop_heartbeat && scrcpy.is_running()) {
+            // A paused stream counts as alive. The picture is gone but the phone must
+            // keep its ADB hole open, or the way back stops being warm. auto_paused is
+            // raised BEFORE the stream is taken down for exactly this reason — the
+            // other order leaves a blink in which both are false and the poke dies.
+            const auto still_wanted = [&]() {
+                return scrcpy.is_running() || auto_paused.load();
+            };
+            while (!should_stop && !stop_heartbeat && still_wanted()) {
                 hb_scanner.send_heartbeat(ip, client_id, client_name);
                 for (int i = 0; i < HEARTBEAT_INTERVAL_MS / 100
-                     && !should_stop && !stop_heartbeat && scrcpy.is_running(); ++i) {
+                     && !should_stop && !stop_heartbeat && still_wanted(); ++i) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 }
             }
@@ -1910,6 +1960,81 @@ static int app_main() {
             if (start_stream(*window, scrcpy, renderer, input, device_id,
                              &saved_brightness, background_tasks, &phone_auto_rotate)) {
                 start_heartbeat(device_id.substr(0, device_id.rfind(':')));
+            }
+        });
+    };
+
+    // One worker walks over and makes the world match the newest wish (declared far
+    // above, where the menu can reach it). What matters is the WISH, not how often
+    // the human hit the stone.
+    reconcile_pause_state = [&]() {
+        if (pause_worker_busy.exchange(true)) return; // one hand is enough
+        background_tasks.run([&]() {
+            ScopeExit mark_done([&]() { pause_worker_busy = false; });
+
+            // Cave man walks back and forth as long as the wish keeps changing under
+            // him. The bound is only there so a human hammering the minimize stone
+            // cannot keep one hand walking forever.
+            for (int rounds = 0; rounds < 8 && !should_stop; ++rounds) {
+                const bool want_paused = pause_wanted.load();
+                if (want_paused == auto_paused.load()) return;
+
+                if (want_paused) {
+                    // Never cut into somebody else's work: a recording would end up a
+                    // broken file, and a quality restart is already holding the stream
+                    // in both hands. In those cases cave man simply does nothing, and
+                    // because auto_paused stays down, coming back does nothing either.
+                    //
+                    // A connect that is still walking is NOT in this list on purpose:
+                    // it only ever raises is_running() once the stream really stands,
+                    // and it asks again at the end of its road (see start_connection).
+                    if (!scrcpy.is_running() || renderer.is_recording() ||
+                        quality_restart_running.load()) {
+                        return;
+                    }
+                    {
+                        std::lock_guard<std::mutex> guard(paused_device_mutex);
+                        paused_device_id = scrcpy.get_device_id();
+                    }
+                    // Raise the flag FIRST — see the heartbeat loop.
+                    auto_paused.store(true);
+                    scrcpy.stop();
+                    window->post_task([w = window.get()]() {
+                        w->set_app_state(pm::window::AppState::CONNECTED);
+                        w->set_status_text("Pausiert — Fenster ist minimiert.");
+                    });
+                    continue;
+                }
+
+                std::string device_id;
+                {
+                    std::lock_guard<std::mutex> guard(paused_device_mutex);
+                    device_id = paused_device_id;
+                }
+                window->post_task([w = window.get()]() {
+                    w->set_app_state(pm::window::AppState::CONNECTED);
+                    w->set_status_text("Stream wird fortgesetzt...");
+                });
+
+                // The warm road: ADB is still awake because the poke never stopped,
+                // so there is nothing to look for and nothing to ask permission for.
+                const bool resumed = !device_id.empty() &&
+                    start_stream(*window, scrcpy, renderer, input, device_id,
+                                 &saved_brightness, background_tasks, &phone_auto_rotate);
+
+                // Lower the flag only now: while the stream was being built the poke
+                // still had to count as wanted.
+                auto_paused.store(false);
+
+                if (!resumed && !should_stop && !pause_wanted.load()) {
+                    // Phone went to sleep, WLAN moved, ADB shut after all — whatever
+                    // it was, the warm road is gone. Walk the cold one.
+                    window->post_task([w = window.get()]() {
+                        w->set_status_text("Verbindung neu aufbauen...");
+                    });
+                    start_connection(true);
+                    return;
+                }
             }
         });
     };
@@ -2029,6 +2154,8 @@ static int app_main() {
         connection_thread = std::thread([&, automatic]() {
             connection_running = true;
             ScopeExit mark_done([&]() { connection_running = false; });
+            // A fresh connection replaces whatever the pause was holding on to.
+            auto_paused.store(false);
             pm::adb::AdbClient adb;
 
             // Ugg wake ADB first. No pretend network magic.
@@ -2119,6 +2246,12 @@ static int app_main() {
                 std::string hb_ip = tcp_device->id.substr(0, tcp_device->id.rfind(':'));
                 start_heartbeat(hb_ip);
                 start_screen_poll(hb_ip, tcp_device->id);
+                // Ugg! The human folded the window down while cave man was still on
+                // the road. The stream is up now and nobody is looking at it — ask
+                // the pause hand to walk once more.
+                if (pause_wanted.load()) {
+                    reconcile_pause_state();
+                }
             } else if (!should_stop) {
                 window->post_task([w = window.get()]() {
                     w->set_app_state(pm::window::AppState::SETUP);
@@ -2130,6 +2263,21 @@ static int app_main() {
 
     window->set_start_callback([&]() {
         start_connection(false);
+    });
+
+    // Fires on the drawing hand, so it may only write down the wish and wave.
+    window->set_minimize_callback([&](bool minimized) {
+        if (!auto_pause_enabled.load()) {
+            // Switched off mid-session while the stream was already down: let the
+            // picture come back anyway instead of leaving a paused stream forever.
+            if (!minimized && auto_paused.load()) {
+                pause_wanted.store(false);
+                reconcile_pause_state();
+            }
+            return;
+        }
+        pause_wanted.store(minimized);
+        reconcile_pause_state();
     });
 
     window->show();

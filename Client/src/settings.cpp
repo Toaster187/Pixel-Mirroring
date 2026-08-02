@@ -154,6 +154,8 @@ Settings load_settings() {
             s.m_audio_enabled = (value == "1");
         } else if (key == "uhid_keyboard") {
             s.m_uhid_keyboard = (value == "1");
+        } else if (key == "auto_pause_minimized") {
+            s.m_auto_pause_minimized = (value == "1");
         } else if (key == "pin") {
             s.m_pin = decrypt_pin(value);
         }
@@ -179,6 +181,7 @@ void save_settings(const Settings& s) {
     file << "send_captures_to_phone=" << (s.m_send_captures_to_phone ? "1" : "0") << "\n";
     file << "audio_enabled=" << (s.m_audio_enabled ? "1" : "0") << "\n";
     file << "uhid_keyboard=" << (s.m_uhid_keyboard ? "1" : "0") << "\n";
+    file << "auto_pause_minimized=" << (s.m_auto_pause_minimized ? "1" : "0") << "\n";
     file << "pin=" << encrypt_pin(s.m_pin) << "\n";
 }
 
