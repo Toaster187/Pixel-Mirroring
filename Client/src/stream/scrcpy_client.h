@@ -30,10 +30,18 @@ public:
         int max_size = 0;
         int video_bit_rate = 20000000;
         int max_fps = 60;
-        bool audio = false; 
+        bool audio = false;
         bool control = true;
         bool tunnel_forward = false;
         bool lowest_brightness = true;
+
+        // EXPERIMENT (needs server 3.x): the phone does not hand over ITS picture but
+        // grows a SECOND display that exists only for this PC. The phone's own panel
+        // stays dark and locked and a second human can keep using it meanwhile.
+        bool new_display = false;
+        int new_display_width = 0;   // 0 x 0 = same shape as the phone's own display
+        int new_display_height = 0;
+        int new_display_dpi = 0;     // 0 = scaled from the phone's own density
     };
 
     // Biggest HID report this client will carry to the phone. A keyboard report
@@ -51,6 +59,11 @@ public:
     int video_width() const { return static_cast<int>(initial_width_); }
     int video_height() const { return static_cast<int>(initial_height_); }
     const std::string& get_device_id() const { return config_.device_id; }
+
+    // True while this session paints into a display of its own instead of into the
+    // phone's. Everything that pokes the phone's OWN panel — brightness, unlocking,
+    // the screen watchdog — has to keep its hands still while this is true.
+    bool uses_new_display() const { return config_.new_display; }
 
     // Callbacks
     using FrameCallback = std::function<void(AVFrame* frame)>;
@@ -74,14 +87,21 @@ public:
     void inject_get_clipboard(uint8_t copy_key = 0);
 
     // Cave man pulls the phone's top curtains down or shoves them back up.
-    // Server 2.7 message types 5, 6 and 7 — one bare byte each.
+    // Message types 5, 6 and 7 — one bare byte each.
     void inject_expand_notification_panel();
     void inject_expand_settings_panel();
     void inject_collapse_panels();
 
-    // Type 10: the phone's light itself, not just its brightness. false = panel dark,
-    // true = panel back to normal. The phone stays awake and steerable either way.
+    // Type 10 (SET_DISPLAY_POWER since server 3.0): the phone's light itself, not just
+    // its brightness. false = panel dark, true = panel back to normal. The phone stays
+    // awake and steerable either way. Always aims at the phone's OWN panel, also while
+    // the picture comes from a display of our own.
     void inject_screen_power_mode(bool on);
+
+    // Type 16, server 3.x only: puts an app onto the display. Cave man only needs this
+    // when the phone hangs no launcher into a second display — then the new display
+    // would stay black forever and nothing could ever be started on it.
+    void start_app(const std::string& package_name);
 
     // True while WE hold the phone's light down. Stays true across stop() when the
     // "light back on" word never reached the phone — then somebody else must fix it.

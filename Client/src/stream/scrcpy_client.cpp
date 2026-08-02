@@ -62,11 +62,22 @@ void log_stream_event(const std::string& message) {
 constexpr int AUDIO_SAMPLE_RATE = 48000;
 constexpr int AUDIO_CHANNELS = 2;
 
+// Which server jar lies next to the exe. The server compares this word against its own
+// and refuses to start on any mismatch, so it may only ever be changed together with
+// Client/scrcpy-server.jar — and with every wire format that moved in between.
+constexpr const char* SERVER_VERSION = "3.3.4";
+
 // Control message types of the scrcpy protocol we speak beyond the old handful.
 constexpr uint8_t MSG_UHID_CREATE = 12;
 constexpr uint8_t MSG_UHID_INPUT = 13;
 constexpr uint8_t MSG_UHID_DESTROY = 14;
 constexpr uint8_t MSG_OPEN_HARD_KEYBOARD_SETTINGS = 15;
+constexpr uint8_t MSG_START_APP = 16;
+
+// Ugg! Since server 3.0 the phone multiplies every scroll stone by 16 before it uses
+// it (the old carving read the range as [-1,1] while it really was [-16,16]). Cave man
+// hands over a sixteenth so one wheel notch stays one wheel notch.
+constexpr float SCROLL_FIXED_POINT_SCALE = 8192.0f / 16.0f;
 
 // The name travels with ONE length stone, so it can never be longer than this.
 constexpr size_t UHID_MAX_NAME_LENGTH = 127;
@@ -396,7 +407,8 @@ bool ScrcpyClient::start_server_process() {
     }
     
     // 2. Start server
-    std::string cmd = "CLASSPATH=/data/local/tmp/scrcpy-server.jar app_process / com.genymobile.scrcpy.Server 2.7 ";
+    std::string cmd = "CLASSPATH=/data/local/tmp/scrcpy-server.jar app_process / com.genymobile.scrcpy.Server ";
+    cmd += std::string(SERVER_VERSION) + " ";
     cmd += "scid=" + scid_ + " ";
     cmd += "log_level=info ";
     cmd += "audio=" + std::string(config_.audio ? "true" : "false") + " ";
@@ -416,7 +428,27 @@ bool ScrcpyClient::start_server_process() {
     cmd += "send_codec_meta=true ";
     cmd += "send_frame_meta=true ";
     cmd += "tunnel_forward=" + std::string(config_.tunnel_forward ? "true" : "false") + " ";
-    
+
+    if (config_.new_display) {
+        // An empty value means "same size and same density as the phone's own display",
+        // which is the only shape whose picture the rest of this cave already knows how
+        // to hold. Numbers are only carved in when somebody really asked for them.
+        std::string display_arg;
+        if (config_.new_display_width > 0 && config_.new_display_height > 0) {
+            display_arg = std::to_string(config_.new_display_width) + "x" +
+                          std::to_string(config_.new_display_height);
+        }
+        if (config_.new_display_dpi > 0) {
+            display_arg += "/" + std::to_string(config_.new_display_dpi);
+        }
+        cmd += "new_display=" + display_arg + " ";
+
+        // Ugg! Without this the letter-board pops up on the PHONE while the human types
+        // into the PC — on a phone that is supposed to stay dark and locked, nobody ever
+        // finds it again. "local" nails the board onto OUR display.
+        cmd += "display_ime_policy=local ";
+    }
+
     log_stream_event("[Scrcpy] Executing server: " + cmd);
 
     // app_process blocks as long as the server lives, so it runs in its own process
@@ -896,9 +928,11 @@ void ScrcpyClient::inject_scroll(float x, float y, int w, int h, float hscroll, 
     write16(buf + 9, static_cast<uint16_t>(w));
     write16(buf + 11, static_cast<uint16_t>(h));
 
-    // fixed-point: float * 8192, clamped to int16 range
-    const float hs_scaled = (std::max)(-32768.0f, (std::min)(hscroll * 8192.0f, 32767.0f));
-    const float vs_scaled = (std::max)(-32768.0f, (std::min)(vscroll * 8192.0f, 32767.0f));
+    // fixed-point, clamped to int16 range (see SCROLL_FIXED_POINT_SCALE)
+    const float hs_scaled =
+        (std::max)(-32768.0f, (std::min)(hscroll * SCROLL_FIXED_POINT_SCALE, 32767.0f));
+    const float vs_scaled =
+        (std::max)(-32768.0f, (std::min)(vscroll * SCROLL_FIXED_POINT_SCALE, 32767.0f));
     write16(buf + 13, static_cast<uint16_t>(static_cast<int16_t>(hs_scaled)));
     write16(buf + 15, static_cast<uint16_t>(static_cast<int16_t>(vs_scaled)));
 
@@ -951,8 +985,10 @@ void ScrcpyClient::inject_collapse_panels() {
 
 void ScrcpyClient::inject_screen_power_mode(bool on) {
     uint8_t buf[2];
-    buf[0] = 10;             // SC_CONTROL_MSG_TYPE_SET_SCREEN_POWER_MODE
-    buf[1] = on ? 2 : 0;     // 2 = POWER_MODE_NORMAL, 0 = POWER_MODE_OFF
+    buf[0] = 10;             // SC_CONTROL_MSG_TYPE_SET_DISPLAY_POWER
+    // Since server 3.0 this is a plain yes/no stone, not the old power mode number.
+    // The old 2 would still read as "yes" over there, but only by luck.
+    buf[1] = on ? 1 : 0;
     // Ugg! Only remember the phone as dark once the word really left the cave.
     // A word that never arrived changed nothing on the other side.
     if (send_control(buf, sizeof(buf))) {
@@ -1016,15 +1052,26 @@ bool ScrcpyClient::uhid_create(uint16_t id, const std::string& name,
     // and lets the phone fall back to plain "scrcpy".
     const size_t name_length = name.size() <= UHID_MAX_NAME_LENGTH ? name.size() : 0;
 
-    std::vector<uint8_t> buf(4 + name_length + 2 + desc_size);
+    // Ugg! Server 3.x wants two more pairs of stones between the id and the name:
+    //   type(1) id(2) vendor(2) product(2) name_len(1) name rd_size(2) rd_data
+    // The 2.7 shape had no vendor/product at all. Send them wrong and the phone reads
+    // the name length out of the middle of the report description — and the control
+    // thread it tears down takes mouse, touch and clipboard with it. scrcpy itself
+    // sends zeroes for keyboards and mice; only gamepads carry real ids.
+    constexpr uint16_t UHID_VENDOR_ID = 0;
+    constexpr uint16_t UHID_PRODUCT_ID = 0;
+
+    std::vector<uint8_t> buf(8 + name_length + 2 + desc_size);
     buf[0] = MSG_UHID_CREATE;
     write16(buf.data() + 1, id);
-    buf[3] = static_cast<uint8_t>(name_length);
+    write16(buf.data() + 3, UHID_VENDOR_ID);
+    write16(buf.data() + 5, UHID_PRODUCT_ID);
+    buf[7] = static_cast<uint8_t>(name_length);
     if (name_length > 0) {
-        std::memcpy(buf.data() + 4, name.data(), name_length);
+        std::memcpy(buf.data() + 8, name.data(), name_length);
     }
-    write16(buf.data() + 4 + name_length, static_cast<uint16_t>(desc_size));
-    std::memcpy(buf.data() + 6 + name_length, report_desc, desc_size);
+    write16(buf.data() + 8 + name_length, static_cast<uint16_t>(desc_size));
+    std::memcpy(buf.data() + 10 + name_length, report_desc, desc_size);
 
     if (!send_control(buf.data(), buf.size())) {
         log_stream_event("[Scrcpy] Could not send UHID_CREATE, keyboard stays virtual-less");
@@ -1066,6 +1113,22 @@ void ScrcpyClient::open_hard_keyboard_settings() {
     buf[0] = MSG_OPEN_HARD_KEYBOARD_SETTINGS;
 
     send_control(buf, sizeof(buf));
+}
+
+void ScrcpyClient::start_app(const std::string& package_name) {
+    // Same one length stone as the UHID name, so the same cut-off rule applies.
+    if (package_name.empty() || package_name.size() > UHID_MAX_NAME_LENGTH) {
+        return;
+    }
+
+    std::vector<uint8_t> buf(2 + package_name.size());
+    buf[0] = MSG_START_APP;
+    buf[1] = static_cast<uint8_t>(package_name.size());
+    std::memcpy(buf.data() + 2, package_name.data(), package_name.size());
+
+    if (send_control(buf.data(), buf.size())) {
+        log_stream_event("[Scrcpy] Asked phone to start app " + package_name);
+    }
 }
 
 } // namespace pm::stream

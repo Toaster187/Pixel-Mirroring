@@ -55,7 +55,9 @@ enum class MenuAction {
     TOGGLE_AUTO_ROTATE,
     TOGGLE_UHID_KEYBOARD,
     OPEN_KEYBOARD_SETTINGS,
-    TOGGLE_AUTO_PAUSE_MINIMIZED
+    TOGGLE_AUTO_PAUSE_MINIMIZED,
+    // EXPERIMENT: own display for the PC instead of the phone's own picture.
+    TOGGLE_VIRTUAL_DISPLAY
 };
 
 class IWindow {
@@ -159,6 +161,10 @@ public:
     virtual void set_uhid_keyboard(bool enabled) = 0;
     // Menu checkmark for "stream dries up while the window is down".
     virtual void set_auto_pause_minimized(bool enabled) = 0;
+    // Menu checkmark for the experiment: the PC gets a display of its own instead of
+    // the phone's picture. Everything the phone's own panel needs (unlocking, dimming,
+    // the screen watchdog) stays untouched while this is on.
+    virtual void set_virtual_display(bool enabled) = 0;
     virtual void set_recording(bool recording) = 0;
     virtual void trigger_screenshot_flash() = 0;
 

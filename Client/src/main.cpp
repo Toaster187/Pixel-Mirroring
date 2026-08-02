@@ -914,8 +914,15 @@ bool start_stream(
     config.video_bit_rate = quality.video_bit_rate;
     config.lowest_brightness = settings.m_lowest_brightness;
     config.audio = settings.m_audio_enabled;
+    config.new_display = settings.m_virtual_display;
 
-    if (settings.m_lowest_brightness) {
+    // EXPERIMENT. With a display of our own the phone's OWN panel is none of our
+    // business any more: it stays dark and locked, and a second human may be holding
+    // it. So every hand that reaches for that panel — dimming it, waking it, watching
+    // whether it went dark — has to stay down while this is on.
+    const bool own_display = config.new_display;
+
+    if (settings.m_lowest_brightness && !own_display) {
         // CAVE MAN DECREASE SUN SHINE SO SMARTPHONE SCREEN IS DARKEST SHADE OF GREY
         std::string dev_id = device_id;
         tasks.run([dev_id, out_saved_brightness]() {
@@ -978,8 +985,10 @@ bool start_stream(
 
     // The control socket only exists once the stream is up, so the phone's light is
     // dealt with here and not next to the brightness dance above. The "else" is not
-    // dead weight: it catches a session whose light-back-on word never arrived.
-    if (settings.m_screen_off) {
+    // dead weight: it catches a session whose light-back-on word never arrived — and
+    // it must run even with a display of our own, or a panel that an earlier mirroring
+    // session left dark stays dark forever.
+    if (settings.m_screen_off && !own_display) {
         scrcpy.inject_screen_power_mode(false);
     } else if (scrcpy.screen_forced_off()) {
         scrcpy.inject_screen_power_mode(true);
@@ -1004,11 +1013,14 @@ bool start_stream(
         }
     }
 
-    window.post_task([&window, w, h, uhid_keyboard]() {
+    window.post_task([&window, w, h, uhid_keyboard, own_display]() {
         window.set_uhid_keyboard(uhid_keyboard);
         window.set_aspect_ratio((double)w / (double)h);
         window.set_orientation(w > h);
         window.set_app_state(pm::window::AppState::STREAMING);
+        if (own_display) {
+            window.set_status_text("Eigener PC-Bildschirm aktiv — Handy bleibt gesperrt.");
+        }
     });
     return true;
 }
@@ -1121,6 +1133,12 @@ DeviceLockState read_lock_state(pm::adb::AdbClient& adb, const std::string& devi
 bool unlock_device_if_needed(const std::string& device_id, pm::window::IWindow* window, bool user_requested) {
     pm::Settings settings = pm::load_settings();
     if (settings.m_pin.empty()) return true;
+
+    // EXPERIMENT. With a display of our own the phone's own panel is not the picture
+    // any more. Waking it and hammering a PIN into it would undo the one thing the
+    // human switched this on for: a phone that stays locked. A human who clicks
+    // "Handy entsperren" by hand still gets exactly that.
+    if (settings.m_virtual_display && !user_requested) return true;
 
     pm::adb::AdbClient adb;
 
@@ -1238,6 +1256,7 @@ static int app_main() {
     window->set_capture_send_to_phone(initial_settings.m_send_captures_to_phone);
     window->set_audio_enabled(initial_settings.m_audio_enabled);
     window->set_uhid_keyboard(initial_settings.m_uhid_keyboard);
+    window->set_virtual_display(initial_settings.m_virtual_display);
     window->set_auto_pause_minimized(initial_settings.m_auto_pause_minimized);
 
     SavedBrightness saved_brightness; // Cave man remember phone sun level
@@ -1540,6 +1559,18 @@ static int app_main() {
                 window->set_status_text(current_settings.m_screen_off
                     ? "Handy-Display wird während der Spiegelung ausgeschaltet."
                     : "Handy-Display bleibt an.");
+                break;
+            }
+            case pm::window::MenuAction::TOGGLE_VIRTUAL_DISPLAY: {
+                // EXPERIMENT. The server only ever reads this when it is born, so the
+                // stream has to die and come back — same road the quality stones walk.
+                current_settings.m_virtual_display = !current_settings.m_virtual_display;
+                pm::save_settings(current_settings);
+                window->set_virtual_display(current_settings.m_virtual_display);
+                window->set_status_text(current_settings.m_virtual_display
+                    ? "Eigener PC-Bildschirm wird aufgebaut..."
+                    : "Zurück zur Spiegelung des Handy-Bildschirms...");
+                if (apply_quality_now) apply_quality_now();
                 break;
             }
             case pm::window::MenuAction::EXPAND_NOTIFICATION_PANEL:
@@ -2065,6 +2096,13 @@ static int app_main() {
                 bool screen_on = true; // assume on unless check confirms off
                 bool phone_answered = false;
 
+                // EXPERIMENT. A dark phone panel means "human put the phone away" only
+                // as long as the phone's panel IS the picture. With a display of our
+                // own it means nothing at all — the panel is supposed to be dark, and
+                // the watchdog below would tear down a perfectly healthy stream and
+                // fold the window into the tray. Only the clipboard question survives.
+                const bool watch_phone_screen = !scrcpy.uses_new_display();
+
                 if (scrcpy.is_running()) {
                     clip_poll_counter++;
                     if (clip_poll_counter >= 3) { // every ~1.5s
@@ -2075,7 +2113,7 @@ static int app_main() {
                 }
 
                 // 1. Try HTTP /screen endpoint (fastest & most accurate)
-                if (!poll_ip.empty()) {
+                if (watch_phone_screen && !poll_ip.empty()) {
                     if (auto res = screen_client.Get("/screen")) {
                         if (res->status == 200) {
                             phone_answered = true;
@@ -2093,7 +2131,8 @@ static int app_main() {
                 // per second eats fire on both sides for nothing. Now it only runs
                 // every ~2s when the phone stays silent, ~5s as a cross-check.
                 const int adb_check_interval = phone_answered ? 10 : 4;
-                if (screen_on && !device_id.empty() && ++adb_poll_counter >= adb_check_interval) {
+                if (watch_phone_screen && screen_on && !device_id.empty() &&
+                    ++adb_poll_counter >= adb_check_interval) {
                     adb_poll_counter = 0;
                     // Cave man ask PowerManager instead. dumpsys display gives history log of past OFF events!
                     std::string power_state = poll_adb.execute_shell_command(

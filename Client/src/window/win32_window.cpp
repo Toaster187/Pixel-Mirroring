@@ -1403,6 +1403,7 @@ namespace {
     constexpr UINT ID_TOGGLE_UHID_KEYBOARD = 1014;
     constexpr UINT ID_OPEN_KEYBOARD_SETTINGS = 1015;
     constexpr UINT ID_TOGGLE_AUTO_PAUSE = 1017;
+    constexpr UINT ID_TOGGLE_VIRTUAL_DISPLAY = 1018;
 
     constexpr UINT ID_SCREENSHOT = 1101;
     constexpr UINT ID_TOGGLE_RECORDING = 1102;
@@ -1708,6 +1709,13 @@ void Win32Window::build_settings_menu_items() {
     g_menu_items.push_back({ID_TOGGLE_AUDIO, L"Ton vom Handy übertragen", true, audio_enabled_, false});
     g_menu_items.push_back({ID_TOGGLE_AUTO_PAUSE, L"Stream pausieren, wenn Fenster minimiert",
                             true, auto_pause_minimized_, false});
+    g_menu_items.push_back({ID_TOGGLE_VIRTUAL_DISPLAY, L"Eigener PC-Bildschirm (experimentell)",
+                            true, virtual_display_, false});
+    if (virtual_display_) {
+        // The whole point in one row, because the switch looks harmless and changes
+        // everything: the phone is no longer being watched, it keeps living its own life.
+        g_menu_items.push_back({0, L"Handy bleibt gesperrt und parallel benutzbar", false, false, false, true});
+    }
     g_menu_items.push_back({ID_TOGGLE_UHID_KEYBOARD, L"Echte USB-Tastatur am Handy", true, uhid_keyboard_, false});
     if (uhid_keyboard_) {
         if (app_state_ == AppState::STREAMING) {
@@ -1795,6 +1803,7 @@ void Win32Window::show_context_menu(POINT pt) {
                 case ID_TOGGLE_SCREEN_OFF: action = MenuAction::TOGGLE_SCREEN_OFF; break;
                 case ID_TOGGLE_AUDIO:  action = MenuAction::TOGGLE_AUDIO; break;
                 case ID_TOGGLE_AUTO_PAUSE: action = MenuAction::TOGGLE_AUTO_PAUSE_MINIMIZED; break;
+                case ID_TOGGLE_VIRTUAL_DISPLAY: action = MenuAction::TOGGLE_VIRTUAL_DISPLAY; break;
                 case ID_TOGGLE_AUTO_ROTATE: action = MenuAction::TOGGLE_AUTO_ROTATE; break;
                 case ID_TOGGLE_UHID_KEYBOARD: action = MenuAction::TOGGLE_UHID_KEYBOARD; break;
                 case ID_OPEN_KEYBOARD_SETTINGS: action = MenuAction::OPEN_KEYBOARD_SETTINGS; break;
@@ -1827,6 +1836,7 @@ void Win32Window::show_context_menu(POINT pt) {
         case ID_TOGGLE_SCREEN_OFF: action = MenuAction::TOGGLE_SCREEN_OFF; break;
         case ID_TOGGLE_AUDIO:  action = MenuAction::TOGGLE_AUDIO; break;
         case ID_TOGGLE_AUTO_PAUSE: action = MenuAction::TOGGLE_AUTO_PAUSE_MINIMIZED; break;
+        case ID_TOGGLE_VIRTUAL_DISPLAY: action = MenuAction::TOGGLE_VIRTUAL_DISPLAY; break;
         case ID_TOGGLE_AUTO_ROTATE: action = MenuAction::TOGGLE_AUTO_ROTATE; break;
         case ID_TOGGLE_UHID_KEYBOARD: action = MenuAction::TOGGLE_UHID_KEYBOARD; break;
         case ID_OPEN_KEYBOARD_SETTINGS: action = MenuAction::OPEN_KEYBOARD_SETTINGS; break;

@@ -40,6 +40,11 @@ struct Settings {
     // dries up while the window is down and starts again when it comes back.
     // On by default: nobody wants to pay for a stream they cannot see.
     bool m_auto_pause_minimized = true;
+    // EXPERIMENT. Instead of taking the phone's picture away from it, the phone builds
+    // a second display that only this PC can see. Phone stays locked and usable by a
+    // human at the same time. Needs server 3.x and Android 14+ to be worth anything.
+    // Off by default — it is the loud, new road, not the proven one.
+    bool m_virtual_display = false;
 };
 
 Settings load_settings();

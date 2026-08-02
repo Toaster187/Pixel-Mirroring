@@ -333,10 +333,12 @@ jedem Textfeld korrekt dargestellt werden. Damit das dauerhaft hält, gilt:
     Subshell ist nötig, weil ein fehlgeschlagenes `exec` die Shell beendet, in der es
     steht. Das Ergebnis wird pro `device_id` gemerkt, damit Neuverbindungen und
     Qualitäts-Neustarts keinen weiteren `adb`-Prozess kosten.
-  - **Das Wire-Format hängt an der Server-Version.** Der gebündelte Server 2.7 erwartet
-    `type(1) id(2 BE) name_len(1) name rd_size(2 BE) rd_data`; das `name`-Feld gibt es vor
-    2.7 nicht und spätere scrcpy-Versionen ergänzen Vendor-/Product-IDs. Vor Änderungen
-    gegen die mitgelieferte JAR prüfen.
+  - **Das Wire-Format hängt an der Server-Version.** Der gebündelte Server 3.3.4 erwartet
+    `type(1) id(2 BE) vendor(2 BE) product(2 BE) name_len(1) name rd_size(2 BE) rd_data`;
+    Vendor und Product sind bei Tastatur und Maus 0, echte IDs tragen nur Gamepads.
+    Server 2.7 hatte die beiden Felder noch nicht, das `name`-Feld gibt es vor 2.7 gar
+    nicht. Vor Änderungen gegen die mitgelieferte JAR prüfen — der vollständige Vergleich
+    2.7 → 3.3.4 steht in `VIRTUAL-DISPLAY.md`.
   - **Pro Taste darf genau ein Pfad feuern.** `Win32Window::uhid_keyboard_` schaltet um:
     ist er an, gehen `WM_KEYDOWN`/`WM_KEYUP`/`WM_SYSKEYDOWN`/`WM_SYSKEYUP` an
     `send_raw_key()` und `WM_CHAR` wird verworfen; ist er aus, bleibt alles wie vorher.
