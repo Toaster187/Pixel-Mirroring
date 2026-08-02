@@ -1,6 +1,7 @@
 #include "capture_controller.h"
 
 #include "../settings.h"
+#include "../util/encoding.h"
 
 #include <chrono>
 #include <fstream>
@@ -26,8 +27,11 @@ constexpr AVRational CAPTURE_FPS = {60, 1};
 
 std::filesystem::path capture_directory() {
 #ifdef _WIN32
-    char path[MAX_PATH];
-    if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_MYPICTURES, NULL, 0, path))) {
+    // Wide, not narrow: a picture cave under a home cave the tribe's old letter-table
+    // cannot spell came back full of "?", and then the recording was neither saved
+    // nor thrown to the phone. See the letter-table rules in CLAUDE.md.
+    wchar_t path[MAX_PATH];
+    if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_MYPICTURES, NULL, 0, path))) {
         std::filesystem::path full_path = std::filesystem::path(path) / "PixelMirroring";
         std::error_code ec;
         std::filesystem::create_directories(full_path, ec);
@@ -246,7 +250,10 @@ bool CaptureController::is_recording() const {
 
 bool CaptureController::open_video_locked(const AVFrame* frame) {
     m_video_path = make_capture_path("Aufnahme", ".mp4");
-    if (avformat_alloc_output_context2(&m_format_context, nullptr, "mp4", m_video_path.string().c_str()) < 0 ||
+    // FFmpeg's own file-opener turns the name back into wide stones with CP_UTF8, so
+    // it wants UTF-8 — path::string() would hand it the tribe's old table instead.
+    const std::string video_path_utf8 = pm::util::path_to_utf8(m_video_path);
+    if (avformat_alloc_output_context2(&m_format_context, nullptr, "mp4", video_path_utf8.c_str()) < 0 ||
         !m_format_context) {
         close_video_locked();
         return false;
@@ -311,7 +318,7 @@ bool CaptureController::open_video_locked(const AVFrame* frame) {
     }
     m_video_stream->time_base = m_video_codec->time_base;
     if (!(m_format_context->oformat->flags & AVFMT_NOFILE) &&
-        avio_open(&m_format_context->pb, m_video_path.string().c_str(), AVIO_FLAG_WRITE) < 0) {
+        avio_open(&m_format_context->pb, video_path_utf8.c_str(), AVIO_FLAG_WRITE) < 0) {
         close_video_locked();
         return false;
     }

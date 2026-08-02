@@ -1,5 +1,6 @@
 #include "settings.h"
 #include "adb/adb_client.h"
+#include "util/encoding.h"
 #include <fstream>
 #include <cstdlib>
 #include <vector>
@@ -28,7 +29,7 @@ static std::filesystem::path get_config_dir() {
     }
 #endif
 #endif
-    std::filesystem::path fallback = pm::adb::get_executable_dir();
+    std::filesystem::path fallback = pm::util::path_from_utf8(pm::adb::get_executable_dir());
     std::error_code ec;
     std::filesystem::create_directories(fallback, ec);
     return fallback;

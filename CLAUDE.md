@@ -40,6 +40,9 @@ Client/                        C++20 desktop client
         network/                pm::network — LAN subnet scan + discovery via cpp-httplib
         window/                 pm::window — window_interface.h + win32_window.{h,cpp} / cocoa_window.{h,mm}
         tray/                   pm::tray — tray_interface.h + win32_tray.{h,cpp}
+        util/                   pm::util — encoding.{h,cpp}: the ONLY conversions between UTF-8
+                                 std::string, std::wstring and std::filesystem::path
+    tests/                      standalone self-checks (plain main() + check(), no test framework)
     vcpkg/                      git submodule (full vcpkg checkout) — huge; exclude from broad searches
 scrcpy_download/scrcpy-server.jar   source copy of the scrcpy server jar
 ```
@@ -80,9 +83,31 @@ which is otherwise unusual. Without it the APK is ~60 MB instead of ~4 MB. Conse
   `gradle assembleDebug -PcomposeTooling`.
 - R8 runs shrink-only on debuggable builds (no obfuscation), which is the low-risk mode.
 
-**Testing:** there is no automated test suite (no C++ test framework wired into CMake; Android has only default JUnit/Espresso boilerplate). Verification is manual, with a physical/connected Android device, on both sides.
+**Testing:** verification is essentially manual, with a physical/connected Android
+device, on both sides. The one exception is `Client/tests/hid_keyboard_test.cpp` — a
+standalone `main()` with a hand-rolled `check()` (deliberately **not** `assert`: the
+shipped build defines `NDEBUG` and would compile every assertion away). It pins the
+PC-scancode → HID-usage table, the AltGr phantom-Ctrl mask, extended-vs-keypad pairs
+and 6-key rollover. It builds as target `pm_hid_keyboard_test` (option
+`PM_BUILD_TESTS`, default ON), links nothing but `hid_keyboard.cpp`, and is neither
+installed nor packaged:
 
-**CI** (`.github/workflows/release.yml`): triggered on `v*` tags or manual dispatch. Builds the Android APK first (`gradle assembleDebug`), then builds the Windows client with that APK bundled in, packages installers with `cpack`, and creates a GitHub Release on tag pushes.
+```
+ctest --test-dir build --output-on-failure
+```
+
+Android has only default JUnit/Espresso boilerplate. Do not add a test framework —
+extend the same pattern if something else needs pinning.
+
+**CI**: two workflows.
+- `.github/workflows/build.yml` — on every pull request, on pushes to `main`, and on
+  manual dispatch. Builds Android and the Windows client with MSVC (same compiler and
+  same `/utf-8` as the release) and runs `ctest`. No packaging, no artifacts, no
+  release. This exists because a release that builds only on tags means large PRs get
+  merged having never been compiled by the toolchain that actually ships them.
+- `.github/workflows/release.yml` — on `v*` tags or manual dispatch. Builds the Android
+  APK first (`gradle assembleDebug`), then the Windows client with that APK bundled in,
+  packages installers with `cpack`, and creates a GitHub Release on tag pushes.
 
 ## Architecture notes
 
@@ -100,13 +125,14 @@ which is otherwise unusual. Without it the APK is ~60 MB instead of ~4 MB. Conse
 - **The server process is owned**: the `adb shell app_process ...` that carries the scrcpy server runs in a `pm::adb::ShellProcess` and is killed in `stop()`. Do not go back to a detached thread — that leaked a thread and an `adb.exe` per session.
 - **Renderer holds a frame reference, not a copy**: `VideoRenderer` keeps an `av_frame_ref` of the decoded frame and lets SDL upload from it directly. Do not reintroduce per-frame `memcpy` of the YUV planes (~180 MB/s at 1080p60).
 - **Recording prefers a hardware encoder**: `CaptureController` tries `h264_mf` (and NVENC/QSV/AMF if present) before falling back to `libx264`, and picks the pixel format the chosen encoder advertises (hardware usually wants NV12).
-- **Dropped files are transferred deliberately slowly**: files dragged onto the window go out through `AdbClient::push_file_paced` in 1 MiB pieces, and after each piece the transfer sleeps for exactly as long as that piece took. The stream therefore keeps at least half the airtime no matter how fast the WiFi is today. Do not "optimise" this back into a single `adb push` — the picture stutters for the whole transfer. Pieces grow under `<target>.pmpart` and only get the real name via `mv` at the end, so an aborted transfer cannot destroy an existing file. A dropped APK the user wants installed goes to `/data/local/tmp` and is unpacked there with `pm install`: `adb install` would send it a second time at full speed, and the package installer cannot read out of `/sdcard`. `install_pushed_app()` deliberately omits the `-g` that `install_app()` uses — pre-granting every runtime permission is defensible for our own APK, which the user installed on purpose, but a file dragged into the window is a stranger and must ask the phone for camera/mic/location like any other app. Two dropped-file strings are also encoding-critical: the file name reaches the window (UTF-8, via `path_to_utf8()`) and adb (`CreateProcessA`, i.e. the ANSI code page, via `path::string()`) on two different roads — mixing them up paints `Größe.pdf` as `Gr��e.pdf` in the transfer bubble.
+- **Dropped files are transferred deliberately slowly**: files dragged onto the window go out through `AdbClient::push_file_paced` in 1 MiB pieces, and after each piece the transfer sleeps for exactly as long as that piece took. The stream therefore keeps at least half the airtime no matter how fast the WiFi is today. Do not "optimise" this back into a single `adb push` — the picture stutters for the whole transfer. Pieces grow under `<target>.pmpart` and only get the real name via `mv` at the end, so an aborted transfer cannot destroy an existing file. A dropped APK the user wants installed goes to `/data/local/tmp` and is unpacked there with `pm install`: `adb install` would send it a second time at full speed, and the package installer cannot read out of `/sdcard`. `install_pushed_app()` deliberately omits the `-g` that `install_app()` uses — pre-granting every runtime permission is defensible for our own APK, which the user installed on purpose, but a file dragged into the window is a stranger and must ask the phone for camera/mic/location like any other app. Leftover `.pmpart`/`.pmglue` are swept with `rm -f` before the first piece: the tidy-up at the end of `push_file_paced` only runs when the transfer *ends*, so a hard-killed client leaves them visible in the phone's file manager forever.
 - **Keyboard shortcuts**: navigation uses **Alt** (`Alt+B` back, `Alt+H` home, `Alt+S` app switch, `Alt+Down` notification panel, `Alt+Shift+Down` quick settings, `Alt+Up` collapse) because Ctrl+C/V carry the clipboard and Ctrl+U/L unlock/lock. Alt keys arrive as `WM_SYSKEYDOWN`/`WM_SYSKEYUP`, not `WM_KEYDOWN`; only B/H/S and the up/down arrows are claimed so `Alt+F4` still reaches `DefWindowProc`. B/H/S are Android keycodes and go through `set_key_callback`; the arrows are scrcpy control messages 5/6/7 and therefore ride the `MenuAction` path instead, like Ctrl+U/L do. Both the press and every auto-repeat of `Alt+Up`/`Alt+Down` must be swallowed — a lone Alt reaching `DefWindowProc` makes Windows beep at a menu bar that does not exist.
 - **Turning the phone's panel off is opt-in and must always be undone.** `Settings::m_screen_off` (default false) makes the client send scrcpy control message 10 `SET_SCREEN_POWER_MODE(OFF)` once the stream is up — the honest version of `m_lowest_brightness`, which only dims via ADB. The phone stays awake and steerable; only the panel is dark, so `PowerManager.isInteractive` stays true and the screen-poll watchdog does not misfire. Restoring it has three layers and none of them are redundant: (1) `ScrcpyClient::stop()` sends `NORMAL` *before* the sockets are torn down, (2) the scrcpy server's own device-side CleanUp restores normal power mode when the server dies, (3) if `screen_forced_off()` is still true at app teardown, `main.cpp` sends `input keyevent 223; sleep 0.5; input keyevent 224` over ADB. Layer 3 needs the sleep/wake pair — a bare wakeup does nothing because Android only re-issues a display power mode when its *own* screen state changes, and it already thinks the screen is on. `screen_forced_off_` is deliberately **not** reset in `start()`: a panel left dark by a session whose socket died must still be fixable by the next one.
 - **Optional UHID keyboard** (`Settings::m_uhid_keyboard`, off by default): instead of `inject_text`, a virtual USB HID keyboard is attached to the device (scrcpy control messages 12 `UHID_CREATE` / 13 `UHID_INPUT` / 14 `UHID_DESTROY`, plus 15 `OPEN_HARD_KEYBOARD_SETTINGS`). Rules that keep it working:
-  - **Probe before creating.** `ScrcpyClient::device_supports_uhid()` checks `/dev/uhid` over ADB first. If the server's `UhidManager.open()` throws, the exception escapes `handleEvent()` and kills the server's *entire* control thread — mouse, touch, keys and clipboard all die silently while video keeps running. Never send `UHID_CREATE` unprobed.
+  - **Probe before creating.** `ScrcpyClient::device_supports_uhid()` checks `/dev/uhid` over ADB first. If the server's `UhidManager.open()` throws, the exception escapes `handleEvent()` and kills the server's *entire* control thread — mouse, touch, keys and clipboard all die silently while video keeps running. Never send `UHID_CREATE` unprobed. The probe opens **read-write** (`(exec 3<>/dev/uhid)`), because the server reads the phone's UHID output reports back out of the same descriptor — a write-only probe would pass on a device that refuses reads and then tear the very thread it exists to protect. It runs inside a subshell because a failing `exec` kills the shell it sits in. The result is cached per `device_id`, so reconnects and quality restarts do not pay for another `adb` child.
   - **Wire format is version-specific.** The bundled server 2.7 expects `type(1) id(2 BE) name_len(1) name rd_size(2 BE) rd_data`; the `name` field does not exist before 2.7 and gained vendor/product ids in later scrcpy releases. Verify against the vendored jar before changing it.
   - **Exactly one path may fire per key.** `Win32Window::uhid_keyboard_` routes: while it is on, `WM_KEYDOWN`/`WM_KEYUP`/`WM_SYSKEYDOWN`/`WM_SYSKEYUP` go to `send_raw_key()` and `WM_CHAR` is dropped; while it is off, nothing changes. Volume keys and the Alt/Ctrl shortcuts are the deliberate exceptions.
+  - **A refused key must fall back, not vanish.** The raw-key callback returns `bool` all the way from `HidKeyboard::process_key()` through `InputHandler::handle_raw_key()` to `Win32Window::send_raw_key()`; `false` means "a boot keyboard has no such key" and the window then walks the Android-keycode path. `send_raw_key()` remembers which scancodes the HID keyboard took (`hid_held_keys_`) purely so auto-repeats of a *refused* key keep falling through as well. A key whose press was eaten by a shortcut (Ctrl+U/L) has its release eaten too (`swallowed_shortcuts_`), otherwise the phone gets a release for a key it never saw pressed.
   - **Scancodes, not virtual keys.** The point of the feature is that the *phone's* layout decides the character, so the window sends the physical key position from `lParam`, never `wParam`.
   - **AltGr** on Windows always comes with a phantom left Ctrl; `HidKeyboard::build_report()` masks it out while right Alt is held. Removing that makes `AltGr+Q` arrive as `Ctrl+AltGr+Q`.
   - Key repeat is the device's job (that is how a real keyboard works) — the client sends each press once.
@@ -135,7 +161,16 @@ The UI is German — every text field must render `ä ö ü Ä Ö Ü ß` correct
   Unicode; everything outside Latin-1 turns into `?`. `UNICODE` is deliberately **not** defined
   in `Client/CMakeLists.txt`, so every suffix-less Win32 call is the ANSI one — always be explicit.
 - Convert between `std::string` (always UTF-8) and `std::wstring` only via `MultiByteToWideChar` /
-  `WideCharToMultiByte` with `CP_UTF8` — never `CP_ACP`.
+  `WideCharToMultiByte` with `CP_UTF8` — never `CP_ACP`. The four conversions live in
+  `Client/src/util/encoding.{h,cpp}` (`pm::util::path_from_utf8` / `path_to_utf8` /
+  `utf8_to_wide` / `wide_to_utf8`) — use those, do not hand-roll a fifth copy.
+- **Never call `std::filesystem::path::string()` on Windows.** It hands out the ANSI code page,
+  where Cyrillic/CJK/emoji become `?`. Use `pm::util::path_to_utf8()`; the road back is
+  `path_from_utf8()`, never `std::filesystem::path(narrow_string)`.
+- **Every `std::string` crossing a module boundary is UTF-8**, including all paths going into
+  `pm::adb`. `AdbClient` spawns adb with `CreateProcessW` and `get_executable_dir()` uses
+  `GetModuleFileNameW`, so the whole chain PC → adb → phone is one encoding. FFmpeg's file
+  opener (`avio_open`, `avformat_alloc_output_context2`) also expects UTF-8 on Windows.
 - GDI+ draws `wchar_t` only; convert narrow strings to UTF-16 before `DrawString`.
 - **Android:** `-Dfile.encoding=UTF-8` in `gradle.properties`, `compileOptions.encoding = "UTF-8"`,
   and `options.encoding = "UTF-8"` for all `JavaCompile` tasks.

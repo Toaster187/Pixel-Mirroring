@@ -10,6 +10,7 @@
 #include <mutex>
 #include <chrono>
 #include <vector>
+#include <unordered_set>
 #include "window_interface.h"
 
 struct SDL_Renderer;
@@ -37,7 +38,7 @@ public:
     void set_pointer_callback(std::function<void(PointerAction, int, int, int, int)> cb) override { m_pointer_cb_ = std::move(cb); }
     void set_key_callback(std::function<void(int, int)> cb) override { m_key_cb_ = std::move(cb); }
     void set_text_callback(std::function<void(const std::string&)> cb) override { m_text_cb_ = std::move(cb); }
-    void set_raw_key_callback(std::function<void(int, uint32_t, bool)> cb) override { m_raw_key_cb_ = std::move(cb); }
+    void set_raw_key_callback(std::function<bool(int, uint32_t, bool)> cb) override { m_raw_key_cb_ = std::move(cb); }
     void set_focus_lost_callback(std::function<void()> cb) override { m_focus_lost_cb_ = std::move(cb); }
     void set_scroll_callback(std::function<void(int, int, int, int, float, float)> cb) override { m_scroll_cb_ = std::move(cb); }
     void set_app_state(AppState state) override;
@@ -54,7 +55,7 @@ public:
     void set_capture_send_to_phone(bool enabled) override { capture_send_to_phone_ = enabled; }
     void set_audio_enabled(bool enabled) override { audio_enabled_ = enabled; }
     void set_auto_rotate_enabled(bool enabled) override { auto_rotate_enabled_ = enabled; }
-    void set_uhid_keyboard(bool enabled) override { uhid_keyboard_ = enabled; }
+    void set_uhid_keyboard(bool enabled) override { uhid_keyboard_ = enabled; hid_held_keys_.clear(); }
     void set_recording(bool recording) override;
     void trigger_screenshot_flash() override;
     void set_file_drop_callback(std::function<void(const std::vector<std::string>&)> cb) override { m_file_drop_cb_ = std::move(cb); }
@@ -96,6 +97,17 @@ private:
     // Hands the physical key position to the raw-key callback. Returns true when
     // the key was dealt with and must not walk down the Android-keycode path too.
     bool send_raw_key(bool pressed, LPARAM lparam);
+
+    // Holes the fake keyboard actually took, as scancode plus the extended bit.
+    // Only needed for auto-repeat: a repeat carves no new stone, so nobody asks
+    // the fake keyboard again — and without this shelf we would not know whether
+    // to swallow the repeat or let it walk the Android-keycode path.
+    std::unordered_set<uint32_t> hid_held_keys_;
+
+    // Virtual keys whose PRESS was eaten by a cave shortcut (Strg+U, Strg+L).
+    // Their release has to be eaten as well, or the fake keyboard tells the phone
+    // to let go of a key the phone never saw being pressed.
+    std::unordered_set<UINT> swallowed_shortcuts_;
 
     HWND hwnd_{nullptr};
     HWND hwnd_child_{nullptr};
@@ -149,7 +161,7 @@ private:
     std::function<void(PointerAction, int, int, int, int)> m_pointer_cb_;
     std::function<void(int, int)> m_key_cb_;
     std::function<void(const std::string&)> m_text_cb_;
-    std::function<void(int, uint32_t, bool)> m_raw_key_cb_;
+    std::function<bool(int, uint32_t, bool)> m_raw_key_cb_;
     std::function<void()> m_focus_lost_cb_;
     std::function<void(int, int, int, int, float, float)> m_scroll_cb_;
     std::function<void()> start_cb_;

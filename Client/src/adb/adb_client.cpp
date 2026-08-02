@@ -1,4 +1,5 @@
 #include "adb_client.h"
+#include "../util/encoding.h"
 
 #include <iostream>
 #include <fstream>
@@ -39,7 +40,7 @@ void log_adb_event(const std::string& message) {
 #endif
 #endif
     if (log_dir.empty()) {
-        log_dir = get_executable_dir();
+        log_dir = pm::util::path_from_utf8(get_executable_dir());
     }
 
     std::error_code ec;
@@ -108,9 +109,26 @@ std::string shell_quote(const std::string& text) {
 
 std::string get_executable_dir() {
 #ifdef _WIN32
-    char path[MAX_PATH];
-    GetModuleFileNameA(NULL, path, MAX_PATH);
-    return std::filesystem::path(path).parent_path().string();
+    // Ugg! The A-flavour used to ask for the cave's own path in the tribe's OLD
+    // letter-table. A home cave whose name that table cannot spell (Cyrillic, CJK,
+    // an emoji in the folder name) came back full of "?", and then the app found
+    // none of its own tools. Wide stones in, UTF-8 out — the shape every other
+    // string in this cave has.
+    std::vector<wchar_t> path(MAX_PATH);
+    for (;;) {
+        const DWORD len = GetModuleFileNameW(NULL, path.data(),
+                                             static_cast<DWORD>(path.size()));
+        if (len == 0) return ".";
+        // Full bucket means the name was cut off. Fetch a bigger bucket.
+        if (len < path.size()) {
+            path.resize(len);
+            break;
+        }
+        if (path.size() >= 32768) return ".";
+        path.resize(path.size() * 2);
+    }
+    return pm::util::path_to_utf8(
+        std::filesystem::path(std::wstring(path.begin(), path.end())).parent_path());
 #else
     char result[PATH_MAX];
     ssize_t count = readlink("/proc/self/exe", result, PATH_MAX);
@@ -122,40 +140,38 @@ std::string get_executable_dir() {
 }
 
 std::string get_adb_path() {
-    std::string exe_dir = get_executable_dir();
+    // Comes back UTF-8 and leaves UTF-8 — path::string() is the old letter-table and
+    // would break every cave whose name it cannot spell.
+    const std::filesystem::path exe_dir = pm::util::path_from_utf8(get_executable_dir());
 #ifdef _WIN32
-    std::filesystem::path local_adb = std::filesystem::path(exe_dir) / "adb.exe";
+    const std::string adb_filename = "adb.exe";
 #else
-    std::filesystem::path local_adb = std::filesystem::path(exe_dir) / "adb";
+    const std::string adb_filename = "adb";
 #endif
+    std::filesystem::path local_adb = exe_dir / adb_filename;
     if (std::filesystem::exists(local_adb)) {
-        return local_adb.string();
+        return pm::util::path_to_utf8(local_adb);
     }
     // Check scrcpy_download folder relative to exe
-#ifdef _WIN32
-    std::string adb_filename = "adb.exe";
-#else
-    std::string adb_filename = "adb";
-#endif
-    std::filesystem::path sibling_adb = std::filesystem::path(exe_dir) / ".." / "scrcpy_download" / adb_filename;
+    std::filesystem::path sibling_adb = exe_dir / ".." / "scrcpy_download" / adb_filename;
     if (std::filesystem::exists(sibling_adb)) {
-        return sibling_adb.string();
+        return pm::util::path_to_utf8(sibling_adb);
     }
 
-    std::filesystem::path current = std::filesystem::path(exe_dir);
+    std::filesystem::path current = exe_dir;
     for (int i = 0; i < 6; ++i) {
         current = current.parent_path();
         if (current.empty()) break;
         std::filesystem::path check_adb = current / "scrcpy_download" / adb_filename;
         if (std::filesystem::exists(check_adb)) {
-            return check_adb.string();
+            return pm::util::path_to_utf8(check_adb);
         }
         std::filesystem::path bundled_adb = current / "platform-tools" / adb_filename;
         if (std::filesystem::exists(bundled_adb)) {
-            return bundled_adb.string();
+            return pm::util::path_to_utf8(bundled_adb);
         }
     }
-    
+
     return "adb"; // developer fallback only
 }
 
@@ -175,18 +191,23 @@ bool AdbClient::run_command_windows(const std::string& cmdline, const std::funct
     }
     SetHandleInformation(hChildStdoutRd, HANDLE_FLAG_INHERIT, 0);
 
-    STARTUPINFOA si = {0};
-    si.cb = sizeof(STARTUPINFOA);
+    STARTUPINFOW si = {0};
+    si.cb = sizeof(STARTUPINFOW);
     si.hStdOutput = hChildStdoutWr;
     si.hStdError = hChildStdoutWr;
     si.dwFlags |= STARTF_USESTDHANDLES;
 
     PROCESS_INFORMATION pi = {0};
 
-    std::vector<char> cmdline_buf(cmdline.begin(), cmdline.end());
-    cmdline_buf.push_back('\0');
+    // Ugg! The A-flavour reads this line with the tribe's old letter-table, so every
+    // rock-name outside it turned into "?" on the way to adb — the phone then got a
+    // file called "??????.pdf" or none at all. The line is UTF-8 all the way in and
+    // gets turned into wide stones HERE, the one place the tribe understands.
+    const std::wstring wide_cmdline = pm::util::utf8_to_wide(cmdline);
+    std::vector<wchar_t> cmdline_buf(wide_cmdline.begin(), wide_cmdline.end());
+    cmdline_buf.push_back(L'\0');
 
-    if (!CreateProcessA(NULL, cmdline_buf.data(), NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+    if (!CreateProcessW(NULL, cmdline_buf.data(), NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
         CloseHandle(hChildStdoutRd);
         CloseHandle(hChildStdoutWr);
         if (log_errors) {
@@ -236,7 +257,7 @@ bool ShellProcess::start(const std::string& device_id, const std::string& comman
     }
     SetHandleInformation(read_end, HANDLE_FLAG_INHERIT, 0);
 
-    STARTUPINFOA si = {};
+    STARTUPINFOW si = {};
     si.cb = sizeof(si);
     si.hStdOutput = write_end;
     si.hStdError = write_end;
@@ -244,10 +265,12 @@ bool ShellProcess::start(const std::string& device_id, const std::string& comman
 
     PROCESS_INFORMATION pi = {};
     std::string cmdline = "\"" + adb_path + "\" -s " + device_id + " shell " + command;
-    std::vector<char> cmd_buf(cmdline.begin(), cmdline.end());
-    cmd_buf.push_back('\0');
+    // Same road as run_command_windows: UTF-8 in, wide stones handed to the tribe.
+    const std::wstring wide_cmdline = pm::util::utf8_to_wide(cmdline);
+    std::vector<wchar_t> cmd_buf(wide_cmdline.begin(), wide_cmdline.end());
+    cmd_buf.push_back(L'\0');
 
-    if (!CreateProcessA(nullptr, cmd_buf.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
+    if (!CreateProcessW(nullptr, cmd_buf.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
                         nullptr, nullptr, &si, &pi)) {
         CloseHandle(read_end);
         CloseHandle(write_end);
@@ -541,7 +564,9 @@ bool AdbClient::enable_tcpip(const std::string& device_id, int port) {
 bool AdbClient::install_app(const std::string& device_id, const std::string& apk_path) {
     m_last_install_error.clear();
 
-    if (!std::filesystem::exists(apk_path)) {
+    // apk_path is UTF-8 (see the note at the top of adb_client.h) — handing it to the
+    // file tools raw would make them read it with the tribe's old letter-table.
+    if (!std::filesystem::exists(pm::util::path_from_utf8(apk_path))) {
         m_last_install_error = "APK nicht gefunden: " + apk_path;
         log_adb_event("[ADB] APK not found: " + apk_path);
         return false;
@@ -687,8 +712,12 @@ bool AdbClient::push_file_paced(const std::string& device_id, const std::string&
     // whole trip, small enough that the stream only ever loses the air for a blink.
     constexpr uint64_t CHUNK_BYTES = 1024 * 1024;
 
+    // local_path is UTF-8. The file tools want a real path, not a narrow string they
+    // would read with the tribe's old letter-table — "Größe.pdf" would not be found.
+    const std::filesystem::path local_file = pm::util::path_from_utf8(local_path);
+
     std::error_code ec;
-    const uint64_t total = static_cast<uint64_t>(std::filesystem::file_size(local_path, ec));
+    const uint64_t total = static_cast<uint64_t>(std::filesystem::file_size(local_file, ec));
     if (ec) {
         log_adb_event("[ADB] Cannot measure file for paced push: " + local_path);
         return false;
@@ -701,18 +730,34 @@ bool AdbClient::push_file_paced(const std::string& device_id, const std::string&
         return ok;
     }
 
-    std::ifstream input(local_path, std::ios::binary);
+    std::ifstream input(local_file, std::ios::binary);
     if (!input) {
         log_adb_event("[ADB] Cannot open file for paced push: " + local_path);
         return false;
     }
 
-    const std::filesystem::path chunk_path = std::filesystem::temp_directory_path(ec) /
+    // Ugg! The old code handed this the error stone from file_size() and then never
+    // looked at it again. With no temp cave the path came out empty and the piece
+    // file grew in whatever hole the app happened to stand in. Ask, and fall back to
+    // the exe cave if the tribe has no temp cave at all.
+    std::filesystem::path temp_dir = std::filesystem::temp_directory_path(ec);
+    if (ec || temp_dir.empty()) {
+        log_adb_event("[ADB] No temp cave for paced push, using the exe cave instead");
+        temp_dir = pm::util::path_from_utf8(get_executable_dir());
+    }
+    const std::filesystem::path chunk_path = temp_dir /
         ("pixelmirroring-push-" + std::to_string(
             std::chrono::steady_clock::now().time_since_epoch().count()) + ".part");
     // The rock grows under a side name and only takes the real one once it is whole.
     const std::string remote_part = remote_path + ".pmpart";
     const std::string remote_glue = remote_path + ".pmglue";
+
+    // A client that was killed mid-throw leaves its half rocks lying in the phone's
+    // Download hole, where they show up in the file list forever — the tidy-up at the
+    // bottom only runs when the trip ENDS, not when the whole cave falls over. Nobody
+    // else ever sweeps them, so cave man sweeps before he starts.
+    execute_shell_command(device_id,
+        "rm -f " + shell_quote(remote_part) + " " + shell_quote(remote_glue));
 
     std::vector<char> buffer(static_cast<size_t>(CHUNK_BYTES));
     uint64_t sent = 0;
@@ -735,7 +780,7 @@ bool AdbClient::push_file_paced(const std::string& device_id, const std::string&
         {
             std::ofstream chunk(chunk_path, std::ios::binary | std::ios::trunc);
             if (!chunk.write(buffer.data(), static_cast<std::streamsize>(piece))) {
-                log_adb_event("[ADB] Cannot write push chunk: " + chunk_path.string());
+                log_adb_event("[ADB] Cannot write push chunk: " + pm::util::path_to_utf8(chunk_path));
                 ok = false;
                 break;
             }
@@ -746,7 +791,8 @@ bool AdbClient::push_file_paced(const std::string& device_id, const std::string&
         // Every piece grows a side-rock, never the real name. An older rock of the same
         // name stays whole until the very last moment — a broken trip must not eat it.
         const bool first_piece = (sent == 0);
-        if (!push_file(device_id, chunk_path.string(), first_piece ? remote_part : remote_glue)) {
+        if (!push_file(device_id, pm::util::path_to_utf8(chunk_path),
+                       first_piece ? remote_part : remote_glue)) {
             ok = false;
             break;
         }

@@ -92,14 +92,15 @@ void InputHandler::send_hid_report(const uint8_t* report) {
     client_->uhid_input(HidKeyboard::DEVICE_ID, report, HidKeyboard::REPORT_SIZE);
 }
 
-void InputHandler::handle_raw_key(int action, uint32_t scancode, bool extended) {
-    if (!m_uhid_active.load()) return;
+bool InputHandler::handle_raw_key(int action, uint32_t scancode, bool extended) {
+    if (!m_uhid_active.load()) return false;
 
     uint8_t report[HidKeyboard::REPORT_SIZE];
     if (!m_hid_keyboard.process_key(action == 0, scancode, extended, report)) {
-        return;
+        return false;
     }
     send_hid_report(report);
+    return true;
 }
 
 void InputHandler::release_all_keys() {

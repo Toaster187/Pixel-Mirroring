@@ -32,6 +32,7 @@
 #include "input/input_handler.h"
 #include "network/network_scanner.h"
 #include "tray/tray_interface.h"
+#include "util/encoding.h"
 #include "settings.h"
 #include <httplib.h>
 #include <nlohmann/json.hpp>
@@ -44,45 +45,15 @@ constexpr int HEARTBEAT_INTERVAL_MS = 5000;
 // Where dropped rocks land on the phone. Every file cave on Android knows this one.
 constexpr const char* DROP_TARGET_DIR = "/sdcard/Download";
 
-// Cave man turns UTF-8 rock-name into the name shape this cave's tools speak.
-std::filesystem::path path_from_utf8(const std::string& utf8) {
-#ifdef _WIN32
-    const int len = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), static_cast<int>(utf8.size()), nullptr, 0);
-    if (len <= 0) return std::filesystem::path(utf8);
-    std::wstring wide(len, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), static_cast<int>(utf8.size()), &wide[0], len);
-    return std::filesystem::path(wide);
-#else
-    return std::filesystem::path(utf8);
-#endif
-}
-
-// Ugg! And the same road back. A rock-name that goes onto the window must be UTF-8,
-// because the window chews every text with CP_UTF8. path::string() hands out the
-// tribe's OWN old letter-table instead (cp1252 here), where "ö" is a single stone —
-// the window then finds half a letter and paints a black diamond. So: never let
-// path::string() near the window, only this.
-//
-// The other road, the one to adb, deliberately keeps path::string(): adb is started
-// with CreateProcessA, which reads the same old letter-table, so both sides agree.
-std::string path_to_utf8(const std::filesystem::path& path) {
-#ifdef _WIN32
-    const std::wstring wide = path.wstring();
-    if (wide.empty()) return std::string();
-    const int len = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), static_cast<int>(wide.size()),
-                                        nullptr, 0, nullptr, nullptr);
-    if (len <= 0) return path.string();
-    std::string utf8(len, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), static_cast<int>(wide.size()),
-                        &utf8[0], len, nullptr, nullptr);
-    return utf8;
-#else
-    return path.string();
-#endif
-}
+// Ugg! Both roads between rock-names and UTF-8 used to be carved twice, once here
+// and once in the adb cave. Now there is ONE pair, and BOTH ends of every road use
+// it: the window paints with CP_UTF8, and adb is started with CreateProcessW, so
+// there is no longer a second letter-table anywhere for a name to fall into.
+using pm::util::path_from_utf8;
+using pm::util::path_to_utf8;
 
 bool has_extension(const std::filesystem::path& file, const char* wanted) {
-    std::string ext = file.extension().string();
+    std::string ext = path_to_utf8(file.extension());
     std::transform(ext.begin(), ext.end(), ext.begin(),
         [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return ext == wanted;
@@ -447,7 +418,7 @@ std::filesystem::path get_config_dir() {
     }
 #endif
 #endif
-    std::filesystem::path fallback = pm::adb::get_executable_dir();
+    std::filesystem::path fallback = path_from_utf8(pm::adb::get_executable_dir());
     std::error_code ec;
     std::filesystem::create_directories(fallback, ec);
     return fallback;
@@ -503,7 +474,7 @@ void clear_setup_state() {
 }
 
 std::optional<std::filesystem::path> find_android_apk() {
-    std::filesystem::path exe_dir = pm::adb::get_executable_dir();
+    std::filesystem::path exe_dir = path_from_utf8(pm::adb::get_executable_dir());
     std::vector<std::filesystem::path> roots;
     roots.push_back(exe_dir);
 
@@ -637,6 +608,11 @@ bool start_stream(
 // Ugg! A switch that is on but does nothing is worse than no switch at all. When
 // the phone refuses the virtual keyboard, cave man says so once, out loud — the
 // status line under the picture is invisible while the stream runs.
+//
+// ONLY for the hand that just flipped the switch in the menu. On an automatic
+// connect this stone stays on the ground: a modal wall in front of a cave man who
+// is waiting for the picture answers a question he did not ask, and the switch has
+// already turned itself off, so the menu tells the same story next time he looks.
 void show_uhid_unavailable_message(pm::window::IWindow& window) {
 #ifdef _WIN32
     MessageBoxW(
@@ -777,7 +753,7 @@ bool run_first_time_setup(
             return false;
         }
 
-        if (!adb.install_app(usb_device->id, apk_path->string())) {
+        if (!adb.install_app(usb_device->id, path_to_utf8(*apk_path))) {
             std::string message = build_install_error_message(adb, usb_device->id);
             window.post_task([&window, message]() {
                 window.set_app_state(pm::window::AppState::SETUP);
@@ -1017,12 +993,13 @@ bool start_stream(
         uhid_keyboard = input.enable_uhid_keyboard();
         if (!uhid_keyboard) {
             // Turn the wish off instead of leaving a switch on that does nothing.
+            // No modal wall here — see show_uhid_unavailable_message. The refusal is
+            // already in stream.log, and the menu shows the switch off from now on.
             pm::Settings stored = pm::load_settings();
             stored.m_uhid_keyboard = false;
             pm::save_settings(stored);
             window.post_task([&window]() {
                 window.set_status_text("Dieses Handy erlaubt keine USB-Tastatur. Texteingabe bleibt aktiv.");
-                show_uhid_unavailable_message(window);
             });
         }
     }
@@ -1278,6 +1255,20 @@ static int app_main() {
     pm::stream::VideoRenderer renderer;
     pm::input::InputHandler input(&scrcpy);
 
+    // Ugg! Building the fake keyboard means asking the phone first, and that takes
+    // long enough for cave man to hit the stone a second time. The builder cannot see
+    // the second hit, finishes anyway and switches the keyboard on — while the saved
+    // stone already says "off" and no uhid_destroy was ever sent.
+    //
+    // This holds the NEWEST wish, and the builder checks it before it declares
+    // victory. A counter of hits would also spot "somebody hit again", but it cannot
+    // tell on-off-on from on-off — and in the first case tearing the keyboard down
+    // would be exactly wrong. What matters is the wish, not how often it was hit.
+    //
+    // Stands ABOVE background_tasks on purpose: the task pile joins its workers when
+    // it dies, so everything a task holds by reference has to outlive the pile.
+    std::atomic<bool> uhid_wanted{initial_settings.m_uhid_keyboard};
+
     BackgroundTasks background_tasks;
 
     auto run_on_device = [&scrcpy, &background_tasks](auto action) {
@@ -1296,9 +1287,9 @@ static int app_main() {
         background_tasks.run([device_id, path, w]() {
             pm::adb::AdbClient adb;
             const std::string remote_dir = "/sdcard/Pictures/PixelMirroring";
-            const std::string remote_path = remote_dir + "/" + path.filename().string();
+            const std::string remote_path = remote_dir + "/" + path_to_utf8(path.filename());
             adb.execute_shell_command(device_id, "mkdir -p " + remote_dir);
-            const bool sent = adb.push_file(device_id, path.string(), remote_path);
+            const bool sent = adb.push_file(device_id, path_to_utf8(path), remote_path);
             if (sent) {
                 // Trigger our custom BroadcastReceiver in the companion app to scan the file via MediaScannerConnection (reliable on Android 11+)
                 adb.execute_shell_command(device_id,
@@ -1389,11 +1380,11 @@ static int app_main() {
 
             for (size_t i = 0; i < files.size() && !should_stop; ++i) {
                 const std::filesystem::path& file = files[i];
-                // TWO names for the same rock, and they must not be swapped: the first
-                // one walks to adb (old letter-table, see path_to_utf8), the second one
-                // onto the window (UTF-8). Same letters, different stones.
-                const std::string name = file.filename().string();
-                const std::string name_ui = path_to_utf8(file.filename());
+                // ONE name for the rock now. It used to be two — one in the tribe's old
+                // letter-table for adb, one in UTF-8 for the window — and mixing them up
+                // painted "Größe.pdf" as "Gr��e.pdf". adb is started with CreateProcessW
+                // these days, so both roads speak UTF-8 and there is nothing left to mix.
+                const std::string name = path_to_utf8(file.filename());
                 const bool as_app = install_apks && has_extension(file, ".apk");
                 // An APK the human wants installed rests in the shell's own corner —
                 // the package unpacker cannot read out of /sdcard on modern phones.
@@ -1402,13 +1393,13 @@ static int app_main() {
                     : (std::string(DROP_TARGET_DIR) + "/" + name);
                 // With several rocks the bubble counts trips, with one it shows the name.
                 const std::string label = files.size() == 1
-                    ? name_ui
-                    : (std::to_string(i + 1) + "/" + std::to_string(files.size()) + " " + name_ui);
+                    ? name
+                    : (std::to_string(i + 1) + "/" + std::to_string(files.size()) + " " + name);
 
                 const float base = static_cast<float>(i) / static_cast<float>(files.size());
                 const float span = 1.0f / static_cast<float>(files.size());
                 int last_percent = -1;
-                const bool sent = adb.push_file_paced(device_id, file.string(), remote_path,
+                const bool sent = adb.push_file_paced(device_id, path_to_utf8(file), remote_path,
                     [&](uint64_t done, uint64_t total) {
                         if (total == 0) return;
                         const int percent = static_cast<int>(done * 100 / total);
@@ -1420,7 +1411,7 @@ static int app_main() {
                     &should_stop);
 
                 if (!sent) {
-                    failure = should_stop ? "Übertragung abgebrochen." : ("Fehlgeschlagen: " + name_ui);
+                    failure = should_stop ? "Übertragung abgebrochen." : ("Fehlgeschlagen: " + name);
                     break;
                 }
 
@@ -1439,10 +1430,7 @@ static int app_main() {
                     adb.execute_shell_command(device_id,
                         "am broadcast -a dev.pixelmirroring.app.SCAN_FILE -e path " +
                         pm::adb::shell_quote(remote_path));
-                    // The memory-stone is NOT adb: the control hole speaks UTF-8, and
-                    // the rock on the phone already carries its real name. Hand over the
-                    // name the phone itself sees, not the one the tribe's table made.
-                    clipboard_path = std::string(DROP_TARGET_DIR) + "/" + name_ui;
+                    clipboard_path = remote_path;
                 }
                 ++carried;
             }
@@ -1572,7 +1560,7 @@ static int app_main() {
                 }
 #endif
                 window->trigger_screenshot_flash();
-                window->set_status_text("Bildschirmfoto gespeichert: " + screenshot->filename().string());
+                window->set_status_text("Bildschirmfoto gespeichert: " + path_to_utf8(screenshot->filename()));
                 if (current_settings.m_send_captures_to_phone) {
                     publish_capture_to_phone(*screenshot);
                 }
@@ -1586,7 +1574,7 @@ static int app_main() {
                         window->set_status_text("Videoaufnahme enthielt keine speicherbaren Frames.");
                         break;
                     }
-                    window->set_status_text("Videoaufnahme gespeichert: " + recording->filename().string());
+                    window->set_status_text("Videoaufnahme gespeichert: " + path_to_utf8(recording->filename()));
                     if (current_settings.m_send_captures_to_phone) {
                         publish_capture_to_phone(*recording);
                     }
@@ -1630,6 +1618,9 @@ static int app_main() {
                 current_settings.m_uhid_keyboard = wanted;
                 pm::save_settings(current_settings);
 
+                // The newest wish, for any builder that is still waiting on the phone.
+                uhid_wanted.store(wanted);
+
                 if (!scrcpy.is_running()) {
                     window->set_uhid_keyboard(wanted);
                     window->set_status_text(wanted
@@ -1648,8 +1639,21 @@ static int app_main() {
                 // question over ADB must never block the drawing hand. The switch
                 // that routes keys only flips once the phone really has it —
                 // flipping it early would drop every key hit in between.
-                background_tasks.run([&input, w = window.get()]() {
+                background_tasks.run([&input, &uhid_wanted, w = window.get()]() {
                     const bool created = input.enable_uhid_keyboard();
+
+                    // Cave man hit the stone again while the phone was still thinking,
+                    // and this time he wants it OFF. Take the keyboard back down and
+                    // leave without a word — the newer hit already told the window.
+                    // Without this the phone keeps a keyboard the saved stone says is
+                    // off, and uhid_destroy is never sent.
+                    if (!uhid_wanted.load()) {
+                        if (created) {
+                            input.disable_uhid_keyboard();
+                        }
+                        return;
+                    }
+
                     if (!created) {
                         pm::Settings failed = pm::load_settings();
                         failed.m_uhid_keyboard = false;
@@ -1789,8 +1793,9 @@ static int app_main() {
         input.handle_text(text);
     });
     window->set_raw_key_callback([&](int action, uint32_t scancode, bool extended) {
-        // key hole hit. cave man send the position, phone picks the letter.
-        input.handle_raw_key(action, scancode, extended);
+        // key hole hit. cave man send the position, phone picks the letter. A "no"
+        // travels back so the window can still send the key the old way.
+        return input.handle_raw_key(action, scancode, extended);
     });
     window->set_focus_lost_callback([&]() {
         // cave man leaves. nothing stays pressed on the phone.
@@ -1833,24 +1838,24 @@ static int app_main() {
     std::atomic<bool> stop_heartbeat{false};
     const std::string client_name = get_client_name();
 
+    // fopen used to get a path::string() here — the tribe's old letter-table, which
+    // cannot spell a home cave in Cyrillic. A stream takes the path itself and needs
+    // no letter-table at all.
     std::string client_id;
-    std::string client_id_path = get_client_id_path().string();
-    FILE* f = fopen(client_id_path.c_str(), "r");
-    if (f) {
-        char buf[256];
-        if (fgets(buf, sizeof(buf), f)) {
-            client_id = buf;
-            if (!client_id.empty() && client_id.back() == '\n') client_id.pop_back();
+    const std::filesystem::path client_id_path = get_client_id_path();
+    {
+        std::ifstream file(client_id_path);
+        if (file && std::getline(file, client_id)) {
+            if (!client_id.empty() && client_id.back() == '\r') client_id.pop_back();
         }
-        fclose(f);
     }
     if (client_id.empty()) {
         std::random_device rd;
         std::mt19937 gen(rd());
         std::uniform_int_distribution<> distrib(100000, 999999);
         client_id = "desktop-client-" + std::to_string(distrib(gen));
-        FILE* fw = fopen(client_id_path.c_str(), "w");
-        if (fw) { fputs(client_id.c_str(), fw); fclose(fw); }
+        std::ofstream file(client_id_path, std::ios::trunc);
+        if (file) file << client_id;
     }
 
     auto stop_heartbeat_thread = [&]() {

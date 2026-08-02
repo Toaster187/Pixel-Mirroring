@@ -104,7 +104,11 @@ public:
     // instead of the letter the PC layout painted on it, so the phone can put its
     // own German layout on top. Params: action (0 = down, 1 = up), scancode,
     // extended flag. Only fires while the virtual USB keyboard is switched on.
-    virtual void set_raw_key_callback(std::function<void(int, uint32_t, bool)> cb) = 0;
+    //
+    // Returns false for a hole the fake keyboard does not have (a boot keyboard has
+    // no volume or media buttons). Then the window must send the key the old way,
+    // through the Android keycode path — otherwise it vanishes without a sound.
+    virtual void set_raw_key_callback(std::function<bool(int, uint32_t, bool)> cb) = 0;
 
     // Set focus-lost callback. Cave man leaves window while still holding Shift —
     // somebody has to tell the phone to let go.

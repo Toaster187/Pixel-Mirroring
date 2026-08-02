@@ -25,7 +25,11 @@ public:
     // scancode), not by the letter the PC layout painted on it. Only travels
     // while the virtual USB keyboard is alive; otherwise it is dropped and the
     // old inject_text/inject_keycode path does the work.
-    void handle_raw_key(int action, uint32_t scancode, bool extended);
+    //
+    // Returns false when nothing was sent — no keyboard hanging on the phone, or a
+    // hole a boot keyboard simply does not have. The caller MUST then take the old
+    // road, otherwise the key disappears without a trace.
+    bool handle_raw_key(int action, uint32_t scancode, bool extended);
 
     // Ugg! Window loses focus with Shift still down. Let go of everything, or the
     // phone keeps shouting in capitals long after cave man walked away.
