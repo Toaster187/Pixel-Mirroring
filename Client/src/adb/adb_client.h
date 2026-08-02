@@ -95,6 +95,8 @@ public:
 
     // Cave man tells phone to unpack an APK that already lies on it. That way a
     // dropped APK travels ONCE — paced — instead of a second time at full speed.
+    // For STRANGE rocks only, so it deliberately does NOT pre-grant permissions the
+    // way install_app does — the phone asks the human itself, as for any other app.
     bool install_pushed_app(const std::string& device_id, const std::string& remote_apk_path);
 
     // What went wrong last time install_app said no? Raw adb words for human eyes.
