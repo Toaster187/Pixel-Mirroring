@@ -85,6 +85,31 @@ static std::string encrypt_pin(const std::string& pin) { return pin; }
 static std::string decrypt_pin(const std::string& hex) { return hex; }
 #endif
 
+// MEOW. WHAT EACH STONE WEIGHS. BITRATE ONLY MATTERS UP TO WHAT PHONE CAN SEND.
+QualitySpec quality_spec(QualityPreset preset) {
+    switch (preset) {
+        case QualityPreset::BATTERY: return {30, 720, 4'000'000};
+        case QualityPreset::MAXIMUM: return {120, 0, 40'000'000};
+        case QualityPreset::BALANCED:
+        default:                     return {60, 0, 15'000'000};
+    }
+}
+
+static QualityPreset parse_quality(const std::string& value) {
+    if (value == "battery") return QualityPreset::BATTERY;
+    if (value == "maximum") return QualityPreset::MAXIMUM;
+    return QualityPreset::BALANCED;
+}
+
+static const char* quality_name(QualityPreset preset) {
+    switch (preset) {
+        case QualityPreset::BATTERY: return "battery";
+        case QualityPreset::MAXIMUM: return "maximum";
+        case QualityPreset::BALANCED:
+        default:                     return "balanced";
+    }
+}
+
 // MEOW. LOAD SETTINGS FROM FILE.
 Settings load_settings() {
     Settings s;
@@ -93,31 +118,49 @@ Settings load_settings() {
         return s;
     }
 
+    // Ugg! Old settings stone only knew two switches. Remember what it said so the
+    // nearest preset can be handed to cave men who upgrade.
+    bool has_quality = false;
+    int legacy_fps = 60;
+    int legacy_size = 0;
+
     std::string line;
     while (std::getline(file, line)) {
         auto eq = line.find('=');
         if (eq == std::string::npos) continue;
         auto key = line.substr(0, eq);
         auto value = line.substr(eq + 1);
-        if (key == "max_fps") {
+        if (key == "quality") {
+            s.m_quality = parse_quality(value);
+            has_quality = true;
+        } else if (key == "max_fps") {
             try {
-                s.max_fps = std::stoi(value);
+                legacy_fps = std::stoi(value);
             } catch (...) {}
         } else if (key == "max_size") {
             try {
-                s.max_size = std::stoi(value);
+                legacy_size = std::stoi(value);
             } catch (...) {}
         } else if (key == "compatibility_mode") {
             s.m_compatibility_mode = (value == "1");
         } else if (key == "turn_screen_off" || key == "lowest_brightness") {
             s.m_lowest_brightness = (value == "1");
+        } else if (key == "screen_off") {
+            s.m_screen_off = (value == "1");
         } else if (key == "send_captures_to_phone") {
             s.m_send_captures_to_phone = (value == "1");
         } else if (key == "audio_enabled") {
             s.m_audio_enabled = (value == "1");
+        } else if (key == "uhid_keyboard") {
+            s.m_uhid_keyboard = (value == "1");
         } else if (key == "pin") {
             s.m_pin = decrypt_pin(value);
         }
+    }
+
+    // Whoever limited FPS or resolution before wanted the cheap stone.
+    if (!has_quality && (legacy_fps == 30 || legacy_size == 720)) {
+        s.m_quality = QualityPreset::BATTERY;
     }
     return s;
 }
@@ -128,12 +171,13 @@ void save_settings(const Settings& s) {
     if (!file) {
         return;
     }
-    file << "max_fps=" << s.max_fps << "\n";
-    file << "max_size=" << s.max_size << "\n";
+    file << "quality=" << quality_name(s.m_quality) << "\n";
     file << "compatibility_mode=" << (s.m_compatibility_mode ? "1" : "0") << "\n";
     file << "lowest_brightness=" << (s.m_lowest_brightness ? "1" : "0") << "\n";
+    file << "screen_off=" << (s.m_screen_off ? "1" : "0") << "\n";
     file << "send_captures_to_phone=" << (s.m_send_captures_to_phone ? "1" : "0") << "\n";
     file << "audio_enabled=" << (s.m_audio_enabled ? "1" : "0") << "\n";
+    file << "uhid_keyboard=" << (s.m_uhid_keyboard ? "1" : "0") << "\n";
     file << "pin=" << encrypt_pin(s.m_pin) << "\n";
 }
 

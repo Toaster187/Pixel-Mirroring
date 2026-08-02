@@ -19,6 +19,7 @@ extern "C" {
 #pragma comment(lib, "ws2_32.lib")
 #else
 #include <sys/socket.h>
+#include <sys/ioctl.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
@@ -59,6 +60,21 @@ void log_stream_event(const std::string& message) {
 // scrcpy raw audio is always this shape (AudioCapture on the phone side).
 constexpr int AUDIO_SAMPLE_RATE = 48000;
 constexpr int AUDIO_CHANNELS = 2;
+
+// Control message types of the scrcpy protocol we speak beyond the old handful.
+constexpr uint8_t MSG_UHID_CREATE = 12;
+constexpr uint8_t MSG_UHID_INPUT = 13;
+constexpr uint8_t MSG_UHID_DESTROY = 14;
+constexpr uint8_t MSG_OPEN_HARD_KEYBOARD_SETTINGS = 15;
+
+// The name travels with ONE length stone, so it can never be longer than this.
+constexpr size_t UHID_MAX_NAME_LENGTH = 127;
+
+// Cave man knocks on the hole where fake keyboards are born and listens whether
+// anybody opens. Two knocks: does it exist, and may the shell hand (which is the
+// hand the scrcpy server has) write to it. Anything else means "no".
+constexpr const char* UHID_PROBE_COMMAND =
+    "dd if=/dev/zero of=/dev/uhid count=0 2>/dev/null && echo PM_UHID_OK || echo PM_UHID_FAIL";
 
 // Big-endian stone writers. Cave man used to carve these four times in four holes.
 void write16(uint8_t* out, uint16_t value) {
@@ -126,6 +142,10 @@ void ScrcpyClient::set_device_clipboard_callback(ClipboardCallback cb) {
     clipboard_cb_ = std::move(cb);
 }
 
+void ScrcpyClient::set_control_lost_callback(ControlLostCallback cb) {
+    control_lost_cb_ = std::move(cb);
+}
+
 bool ScrcpyClient::start(const Config& config) {
     config_ = config;
     
@@ -162,6 +182,13 @@ bool ScrcpyClient::start(const Config& config) {
 }
 
 void ScrcpyClient::stop() {
+    // Ugg! Give the phone its light back BEFORE the talking-hole gets filled in.
+    // Afterwards nobody can reach the phone any more and the human is left holding a
+    // black stone. Runs while running_ is still true, or send_control refuses.
+    if (screen_forced_off_.load()) {
+        inject_screen_power_mode(true);
+    }
+
     bool expected = true;
     if (!running_.compare_exchange_strong(expected, false)) {
         return;
@@ -371,11 +398,22 @@ bool ScrcpyClient::start_server_process() {
     auto ready_flag = std::make_shared<std::atomic<bool>>(false);
     auto future = ready_promise->get_future();
 
-    if (!server_process_.start(config_.device_id, cmd, [ready_promise, ready_flag](const std::string& line) {
+    if (!server_process_.start(config_.device_id, cmd, [this, ready_promise, ready_flag](const std::string& line) {
             bool expected = false;
             if (line.find("[server]") != std::string::npos &&
                 ready_flag->compare_exchange_strong(expected, true)) {
                 ready_promise->set_value(true);
+            }
+
+            // Ugg! When the server's control thread falls over, the picture keeps
+            // flowing as if nothing happened while every poke into the phone
+            // vanishes. Cave man must not let the human stab a dead phone in
+            // silence — say it out loud instead.
+            if (line.find("Controller error") != std::string::npos) {
+                log_stream_event("[Scrcpy] Phone control thread died: " + line);
+                if (control_lost_cb_) {
+                    control_lost_cb_();
+                }
             }
         })) {
         std::cerr << "[Scrcpy] Could not start server process!" << std::endl;
@@ -623,6 +661,15 @@ void ScrcpyClient::video_thread_loop() {
     const uint32_t MAX_PACKET_SIZE = 10 * 1024 * 1024; // 10 MB max packet size
     bool logged_first_frame = false;
 
+    // Ugg! Cave man must SEE when the picture falls behind instead of guessing. He
+    // counts what he carved, how long carving took, and how big the pile of untouched
+    // stones in the socket grew. A pile that keeps growing IS the latency.
+    auto stats_since = std::chrono::steady_clock::now();
+    int stats_packets = 0;
+    long long stats_decode_us = 0;
+    unsigned long long stats_bytes = 0;
+    unsigned long stats_backlog_peak = 0;
+
     while (running_) {
         uint8_t header[12];
         if (!recv_all((char*)header, 12)) break;
@@ -643,7 +690,28 @@ void ScrcpyClient::video_thread_loop() {
         packet_data.resize(size);
         if (!recv_all((char*)packet_data.data(), size)) break;
         
-        if (decoder_.decode(packet_data.data(), size, is_config)) {
+        // What is already waiting in the socket while we still chew on this packet.
+        {
+#ifdef _WIN32
+            unsigned long backlog = 0;
+            if (ioctlsocket(video_socket_, FIONREAD, &backlog) == 0 && backlog > stats_backlog_peak) {
+#else
+            int backlog = 0;
+            if (ioctl(video_socket_, FIONREAD, &backlog) == 0 &&
+                (unsigned long)backlog > stats_backlog_peak) {
+#endif
+                stats_backlog_peak = (unsigned long)backlog;
+            }
+        }
+
+        const auto decode_begin = std::chrono::steady_clock::now();
+        const bool got_frame = decoder_.decode(packet_data.data(), size, is_config);
+        stats_decode_us += std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - decode_begin).count();
+        ++stats_packets;
+        stats_bytes += size;
+
+        if (got_frame) {
             if (frame_cb_) {
                 AVFrame* frame = (AVFrame*)decoder_.get_frame();
                 if (!logged_first_frame && frame) {
@@ -656,6 +724,23 @@ void ScrcpyClient::video_thread_loop() {
                 }
                 frame_cb_(frame);
             }
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        const auto window_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - stats_since).count();
+        if (window_ms >= 5000 && stats_packets > 0) {
+            std::ostringstream oss;
+            oss << "[Scrcpy] " << (stats_packets * 1000 / window_ms) << " fps"
+                << ", decode " << (stats_decode_us / stats_packets / 1000.0) << " ms/frame"
+                << ", " << (stats_bytes * 8 / window_ms / 1000) << " Mbit/s"
+                << ", socket backlog peak " << (stats_backlog_peak / 1024) << " KiB";
+            log_stream_event(oss.str());
+            stats_since = now;
+            stats_packets = 0;
+            stats_decode_us = 0;
+            stats_bytes = 0;
+            stats_backlog_peak = 0;
         }
     }
 
@@ -833,11 +918,119 @@ void ScrcpyClient::inject_set_clipboard(const std::string& text) {
     send_control(buf.data(), buf.size());
 }
 
+void ScrcpyClient::inject_expand_notification_panel() {
+    uint8_t buf[1] = {5}; // SC_CONTROL_MSG_TYPE_EXPAND_NOTIFICATION_PANEL
+    send_control(buf, sizeof(buf));
+}
+
+void ScrcpyClient::inject_expand_settings_panel() {
+    uint8_t buf[1] = {6}; // SC_CONTROL_MSG_TYPE_EXPAND_SETTINGS_PANEL
+    send_control(buf, sizeof(buf));
+}
+
+void ScrcpyClient::inject_collapse_panels() {
+    uint8_t buf[1] = {7}; // SC_CONTROL_MSG_TYPE_COLLAPSE_PANELS
+    send_control(buf, sizeof(buf));
+}
+
+void ScrcpyClient::inject_screen_power_mode(bool on) {
+    uint8_t buf[2];
+    buf[0] = 10;             // SC_CONTROL_MSG_TYPE_SET_SCREEN_POWER_MODE
+    buf[1] = on ? 2 : 0;     // 2 = POWER_MODE_NORMAL, 0 = POWER_MODE_OFF
+    // Ugg! Only remember the phone as dark once the word really left the cave.
+    // A word that never arrived changed nothing on the other side.
+    if (send_control(buf, sizeof(buf))) {
+        screen_forced_off_.store(!on);
+        log_stream_event(on ? "[Scrcpy] Device screen power back to normal"
+                            : "[Scrcpy] Device screen power turned off");
+    } else if (!on) {
+        log_stream_event("[Scrcpy] Could not turn device screen off — control socket silent");
+    }
+}
+
 void ScrcpyClient::inject_get_clipboard(uint8_t copy_key) {
     // get device clip. cave man request clip text from phone.
     uint8_t buf[2];
     buf[0] = 8; // SC_CONTROL_MSG_TYPE_GET_CLIPBOARD
     buf[1] = copy_key; // 0 = NONE, 1 = COPY, 2 = CUT
+
+    send_control(buf, sizeof(buf));
+}
+
+bool ScrcpyClient::device_supports_uhid() {
+    if (config_.device_id.empty()) {
+        return false;
+    }
+
+    pm::adb::AdbClient adb;
+    const std::string answer = adb.execute_shell_command(config_.device_id, UHID_PROBE_COMMAND);
+    const bool allowed = answer.find("PM_UHID_OK") != std::string::npos;
+
+    log_stream_event(allowed
+        ? "[Scrcpy] Phone allows /dev/uhid, virtual USB keyboard is possible"
+        : "[Scrcpy] Phone refuses /dev/uhid, staying on text injection");
+    return allowed;
+}
+
+bool ScrcpyClient::uhid_create(uint16_t id, const std::string& name,
+                               const uint8_t* report_desc, size_t desc_size) {
+    if (!report_desc || desc_size == 0 || desc_size > 0xFFFF) {
+        return false;
+    }
+
+    // The name gets one length stone only. A longer one would have to be cut, and
+    // cutting UTF-8 in the middle breaks umlauts — so cave man rather sends none
+    // and lets the phone fall back to plain "scrcpy".
+    const size_t name_length = name.size() <= UHID_MAX_NAME_LENGTH ? name.size() : 0;
+
+    std::vector<uint8_t> buf(4 + name_length + 2 + desc_size);
+    buf[0] = MSG_UHID_CREATE;
+    write16(buf.data() + 1, id);
+    buf[3] = static_cast<uint8_t>(name_length);
+    if (name_length > 0) {
+        std::memcpy(buf.data() + 4, name.data(), name_length);
+    }
+    write16(buf.data() + 4 + name_length, static_cast<uint16_t>(desc_size));
+    std::memcpy(buf.data() + 6 + name_length, report_desc, desc_size);
+
+    if (!send_control(buf.data(), buf.size())) {
+        log_stream_event("[Scrcpy] Could not send UHID_CREATE, keyboard stays virtual-less");
+        return false;
+    }
+
+    std::ostringstream oss;
+    oss << "[Scrcpy] Virtual USB keyboard created (id=" << id
+        << ", report_desc=" << desc_size << " bytes)";
+    log_stream_event(oss.str());
+    return true;
+}
+
+void ScrcpyClient::uhid_input(uint16_t id, const uint8_t* data, size_t size) {
+    if (!data || size == 0 || size > UHID_MAX_REPORT_SIZE) {
+        return;
+    }
+
+    // Every key press and release lands here, so no heap digging on this path.
+    uint8_t buf[5 + UHID_MAX_REPORT_SIZE];
+    buf[0] = MSG_UHID_INPUT;
+    write16(buf + 1, id);
+    write16(buf + 3, static_cast<uint16_t>(size));
+    std::memcpy(buf + 5, data, size);
+
+    send_control(buf, 5 + size);
+}
+
+void ScrcpyClient::uhid_destroy(uint16_t id) {
+    uint8_t buf[3];
+    buf[0] = MSG_UHID_DESTROY;
+    write16(buf + 1, id);
+
+    send_control(buf, sizeof(buf));
+}
+
+void ScrcpyClient::open_hard_keyboard_settings() {
+    uint8_t buf[1];
+    buf[0] = MSG_OPEN_HARD_KEYBOARD_SETTINGS;
 
     send_control(buf, sizeof(buf));
 }

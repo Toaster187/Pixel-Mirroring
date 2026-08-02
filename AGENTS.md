@@ -37,7 +37,7 @@ Pixel-Mirroring/
 |       |-- settings.*    Persistente Einstellungen inkl. Ton an/aus
 |       |-- adb/          ADB Protocol Client + ShellProcess (abbrechbarer adb-shell-Prozess)
 |       |-- stream/       scrcpy Protocol, VideoDecoder, VideoRenderer, AudioPlayer, CaptureController
-|       |-- input/        Input Forwarding (Mouse, Keyboard, Touch)
+|       |-- input/        Input Forwarding (Mouse, Keyboard, Touch) + HidKeyboard (UHID-Tastatur)
 |       |-- network/      Network Discovery (cpp-httplib, Subnet Scan)
 |       |-- window/       Plattform-spezifische Fenster (Win32; Cocoa unfertig)
 |       `-- tray/         System Tray (Win32)
@@ -236,9 +236,63 @@ jedem Textfeld korrekt dargestellt werden. Damit das dauerhaft hält, gilt:
 - **Aufnahmen bevorzugen den Hardware-Encoder** (`h264_mf`, sonst NVENC/QSV/AMF), mit
   automatischem Rückfall auf `libx264` und passendem Pixelformat.
 - **Tastenkürzel:** Navigation liegt auf **Alt** (`Alt+B` zurück, `Alt+H` Start,
-  `Alt+S` Übersicht), weil Strg+C/V die Zwischenablage und Strg+U/L Sperren/Entsperren
-  belegen. Alt-Tasten kommen als `WM_SYSKEYDOWN`/`WM_SYSKEYUP`; nur B/H/S werden
-  abgefangen, damit `Alt+F4` weiter bei `DefWindowProc` ankommt.
+  `Alt+S` Übersicht, `Alt+N` Benachrichtigungen, `Alt+Q` Schnelleinstellungen,
+  `Alt+Umschalt+N/Q` schließt wieder), weil Strg+C/V die Zwischenablage und Strg+U/L
+  Sperren/Entsperren belegen. Alt-Tasten kommen als `WM_SYSKEYDOWN`/`WM_SYSKEYUP`; nur
+  B/H/S/N/Q werden abgefangen, damit `Alt+F4` weiter bei `DefWindowProc` ankommt.
+  B/H/S sind Android-Keycodes und laufen über `set_key_callback`; N/Q sind
+  scrcpy-Control-Messages 5/6/7 und laufen deshalb über den `MenuAction`-Weg,
+  genau wie Strg+U/L.
+- **Display komplett aus ist Opt-in und muss IMMER rückgängig gemacht werden:**
+  `Settings::m_screen_off` (Standard aus) schickt Control-Message 10
+  `SET_SCREEN_POWER_MODE(OFF)`, sobald der Stream steht - die ehrliche Version von
+  `m_lowest_brightness`, das nur per ADB dimmt. Das Handy bleibt wach und steuerbar,
+  nur das Panel ist dunkel; `PowerManager.isInteractive` bleibt deshalb true und der
+  Screen-Poll-Wächter schlägt nicht fälschlich an. Zurückgestellt wird auf drei
+  Wegen, keiner davon ist überflüssig: (1) `ScrcpyClient::stop()` schickt `NORMAL`
+  *bevor* die Sockets abgebaut werden, (2) der scrcpy-Server hält auf dem Handy einen
+  eigenen CleanUp-Prozess, der auch beim Serverabsturz greift, (3) ist
+  `screen_forced_off()` beim Beenden noch true, schickt `main.cpp` per ADB
+  `input keyevent 223; sleep 0.5; input keyevent 224`. Der Schlaf-Weck-Doppelschlag in
+  (3) ist nötig: ein bloßes Wecken tut nichts, weil Android einen Display-Power-Mode
+  nur dann neu setzt, wenn sich sein *eigener* Bildschirmzustand ändert - und der ist
+  aus seiner Sicht schon an. `screen_forced_off_` wird in `start()` absichtlich **nicht**
+  zurückgesetzt: ein Panel, das eine Sitzung mit totem Socket dunkel gelassen hat, muss
+  von der nächsten noch repariert werden können.
+- **Dateiübertragung ist absichtlich langsam:** ins Fenster gezogene Dateien gehen
+  über `AdbClient::push_file_paced` in 1-MiB-Stücken raus, und nach jedem Stück wartet
+  der Transfer genau so lange, wie das Stück gedauert hat. Damit gehört dem Stream
+  mindestens die Hälfte der Funkzeit, unabhängig davon, wie schnell das WLAN heute ist.
+  Nicht auf ein einzelnes `adb push` "optimieren" - dann ruckelt das Bild während der
+  Übertragung. Die Stücke wachsen unter `<ziel>.pmpart` und bekommen erst per `mv` den
+  echten Namen, damit eine abgebrochene Übertragung keine vorhandene Datei zerstört.
+  Eine abgelegte APK, die installiert werden soll, wandert nach `/data/local/tmp` und
+  wird von dort per `pm install` entpackt - `adb install` würde sie ein zweites Mal
+  ungebremst übertragen, und der Paketinstallierer kommt nicht an `/sdcard` heran.
+- **Optionale UHID-Tastatur** (`Settings::m_uhid_keyboard`, standardmäßig aus): statt
+  `inject_text` hängt eine virtuelle USB-HID-Tastatur am Handy (scrcpy-Control-Messages
+  12 `UHID_CREATE`, 13 `UHID_INPUT`, 14 `UHID_DESTROY` sowie 15
+  `OPEN_HARD_KEYBOARD_SETTINGS`). Was dabei nicht kaputtgehen darf:
+  - **Erst fragen, dann bauen.** `ScrcpyClient::device_supports_uhid()` prüft `/dev/uhid`
+    per ADB. Wirft `UhidManager.open()` auf der Handy-Seite, fliegt die Exception aus
+    `handleEvent()` und reißt den **kompletten Control-Thread** des Servers mit - Maus,
+    Touch, Tastatur und Zwischenablage sind still, während das Bild weiterläuft.
+    `UHID_CREATE` niemals ungeprüft senden.
+  - **Das Wire-Format hängt an der Server-Version.** Der gebündelte Server 2.7 erwartet
+    `type(1) id(2 BE) name_len(1) name rd_size(2 BE) rd_data`; das `name`-Feld gibt es vor
+    2.7 nicht und spätere scrcpy-Versionen ergänzen Vendor-/Product-IDs. Vor Änderungen
+    gegen die mitgelieferte JAR prüfen.
+  - **Pro Taste darf genau ein Pfad feuern.** `Win32Window::uhid_keyboard_` schaltet um:
+    ist er an, gehen `WM_KEYDOWN`/`WM_KEYUP`/`WM_SYSKEYDOWN`/`WM_SYSKEYUP` an
+    `send_raw_key()` und `WM_CHAR` wird verworfen; ist er aus, bleibt alles wie vorher.
+    Lautstärketasten und die Alt-/Strg-Kürzel sind die bewussten Ausnahmen.
+  - **Scancodes statt Virtual Keys.** Der ganze Sinn ist, dass das *Handy* das Zeichen
+    bestimmt - also wird die physische Tastenposition aus `lParam` geschickt, nie `wParam`.
+  - **AltGr** erzeugt unter Windows immer zusätzlich ein linkes Strg;
+    `HidKeyboard::build_report()` filtert es heraus, solange rechtes Alt gehalten wird.
+    Ohne das kommt `AltGr+Q` als `Strg+AltGr+Q` an.
+  - Tastenwiederholung macht das Handy selbst (so wie bei einer echten Tastatur) - der
+    Client schickt jeden Druck genau einmal.
 - **Hardware-Dekodierung fehlt mit Absicht:** `d3d11va`/`dxva2` sind vorhanden, aber
   SDL2 kann keine fremde D3D11-Textur übernehmen. Die nötige GPU->CPU-Rückkopie
   wäre vermutlich langsamer als die jetzige Software-Dekodierung. Erst messen.

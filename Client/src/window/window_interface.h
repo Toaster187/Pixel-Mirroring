@@ -1,7 +1,9 @@
 #pragma once
+#include <cstdint>
 #include <string>
 #include <memory>
 #include <functional>
+#include <vector>
 struct SDL_Renderer;
 struct SDL_Window;
 
@@ -21,20 +23,38 @@ enum class PointerAction {
     UP
 };
 
+// Cave man drags rock onto window. Bubble shows how much of it is already on the phone.
+enum class TransferState {
+    IDLE,   // No bubble
+    ACTIVE, // Ring fills up while the rock travels
+    DONE,   // Green tick, fades away on its own
+    FAILED  // Red mark, fades away on its own
+};
+
 enum class MenuAction {
     FACTORY_RESET,
-    TOGGLE_FPS_LIMIT,
-    TOGGLE_RESOLUTION_LIMIT,
+    // One stone per quality level — FPS, resolution and bitrate travel together.
+    SET_QUALITY_BATTERY,
+    SET_QUALITY_BALANCED,
+    SET_QUALITY_MAXIMUM,
     SET_PIN,
     UNLOCK_DEVICE,
     LOCK_DEVICE,
     TOGGLE_COMPATIBILITY_MODE,
     TOGGLE_LOWEST_BRIGHTNESS,
+    TOGGLE_SCREEN_OFF,
+    // Top curtains of the phone. Alt+Down pulls them, Alt+Shift+Down the switches
+    // behind them, Alt+Up shoves everything back up.
+    EXPAND_NOTIFICATION_PANEL,
+    EXPAND_SETTINGS_PANEL,
+    COLLAPSE_PANELS,
     TAKE_SCREENSHOT,
     TOGGLE_RECORDING,
     TOGGLE_SEND_CAPTURES_TO_PHONE,
     TOGGLE_AUDIO,
-    TOGGLE_AUTO_ROTATE
+    TOGGLE_AUTO_ROTATE,
+    TOGGLE_UHID_KEYBOARD,
+    OPEN_KEYBOARD_SETTINGS
 };
 
 class IWindow {
@@ -80,6 +100,16 @@ public:
     // Set text callback. Cave man write words. Params: text.
     virtual void set_text_callback(std::function<void(const std::string&)> cb) = 0;
 
+    // Set raw key callback. Reports the PHYSICAL key position (PC set-1 scancode)
+    // instead of the letter the PC layout painted on it, so the phone can put its
+    // own German layout on top. Params: action (0 = down, 1 = up), scancode,
+    // extended flag. Only fires while the virtual USB keyboard is switched on.
+    virtual void set_raw_key_callback(std::function<void(int, uint32_t, bool)> cb) = 0;
+
+    // Set focus-lost callback. Cave man leaves window while still holding Shift —
+    // somebody has to tell the phone to let go.
+    virtual void set_focus_lost_callback(std::function<void()> cb) = 0;
+
     // Set scroll callback. Cave man scroll screen. Params: x, y, w, h, hscroll, vscroll.
     virtual void set_scroll_callback(std::function<void(int, int, int, int, float, float)> cb) = 0;
     
@@ -101,18 +131,31 @@ public:
     virtual void set_restore_callback(std::function<void()> cb) = 0;
 
     // Set checkbox states on the menu options from outside
-    virtual void set_fps_limited(bool limited) = 0;
-    virtual void set_resolution_limited(bool limited) = 0;
+    // Selected quality level: 0 = Akku, 1 = Ausgewogen, 2 = Maximal
+    virtual void set_quality_preset(int preset) = 0;
     virtual void set_compatibility_mode(bool enabled) = 0;
     virtual void set_lowest_brightness(bool enabled) = 0;
+    virtual void set_screen_off(bool enabled) = 0;
     virtual void set_capture_send_to_phone(bool enabled) = 0;
     virtual void set_audio_enabled(bool enabled) = 0;
     // Reflects the phone's actual accelerometer_rotation value — read from the
     // device on connect, never a fixed app default. Toggling it in the menu is
     // the only thing that ever changes it.
     virtual void set_auto_rotate_enabled(bool enabled) = 0;
+    // Doubles as the menu checkmark AND as the switch that decides where key
+    // presses go: while this is on they travel as real USB keyboard reports, and
+    // the text/keycode path stays silent so nothing is typed twice.
+    virtual void set_uhid_keyboard(bool enabled) = 0;
     virtual void set_recording(bool recording) = 0;
     virtual void trigger_screenshot_flash() = 0;
+
+    // Set a callback for files dropped onto the window. Params: UTF-8 paths.
+    virtual void set_file_drop_callback(std::function<void(const std::vector<std::string>&)> cb) = 0;
+
+    // Drives the file-transfer bubble. progress is 0.0 .. 1.0, label is the short text
+    // drawn next to the ring (file name, count, or the reason it went wrong).
+    // Safe to call from any thread.
+    virtual void set_transfer_status(TransferState state, float progress, const std::string& label) = 0;
 
     // Clipboard callbacks & sync
     virtual void set_os_clipboard_update_callback(std::function<void(const std::string&)> cb) = 0;

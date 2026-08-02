@@ -4,15 +4,37 @@
 
 namespace pm {
 
+// MEOW. THREE STONES INSTEAD OF TWO SWITCHES. CAVE MAN PICK ONE, ALL NUMBERS FOLLOW.
+enum class QualityPreset {
+    BATTERY  = 0, // Akku sparen
+    BALANCED = 1, // Ausgewogen — was the old default, stays the default
+    MAXIMUM  = 2  // Maximal
+};
+
+// What a preset actually means on the wire.
+struct QualitySpec {
+    int max_fps;
+    int max_size;       // 0 = full resolution
+    int video_bit_rate; // bit/s
+};
+
+QualitySpec quality_spec(QualityPreset preset);
+
 // MEOW. SETTINGS STRUCT. PRESERVE OPTIONS.
 struct Settings {
-    int max_fps = 60;       // 60 = unlocked, 30 = limited
-    int max_size = 0;       // 0 = full resolution, 720 = 720p
+    QualityPreset m_quality = QualityPreset::BALANCED;
     std::string m_pin = ""; // Saved PIN. Encrypted on Windows.
     bool m_compatibility_mode = false; // CAVE MAN USE SLOW PIN UNLOCK COMPATIBILITY.
     bool m_lowest_brightness = true;   // CAVE MAN MAKE SCREEN BRIGHTNESS VERY LOW AT START
+    // The honest version of the line above: the phone's panel goes dark for real.
+    // Opt-in only — a black phone that nobody asked for is a broken phone.
+    bool m_screen_off = false;
     bool m_send_captures_to_phone = true; // CAVE MAN PUSH FINISHED CAPTURE BACK TO PHONE
     bool m_audio_enabled = true;       // CAVE MAN HEAR PHONE SOUND ON PC SPEAKER
+    // CAVE MAN HANG REAL USB KEYBOARD ON PHONE INSTEAD OF SHOUTING LETTERS.
+    // Off by default: not every phone opens /dev/uhid, and the layout has to be
+    // set on the phone once before it is useful.
+    bool m_uhid_keyboard = false;
 };
 
 Settings load_settings();

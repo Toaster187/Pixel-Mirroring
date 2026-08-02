@@ -35,6 +35,11 @@ public:
         bool lowest_brightness = true;
     };
 
+    // Biggest HID report this client will carry to the phone. A keyboard report
+    // is 8 bytes; the cap only exists so the hot send path can use a stone from
+    // the stack instead of digging in the heap on every keystroke.
+    static constexpr size_t UHID_MAX_REPORT_SIZE = 64;
+
     ScrcpyClient();
     ~ScrcpyClient();
 
@@ -50,9 +55,14 @@ public:
     using FrameCallback = std::function<void(AVFrame* frame)>;
     using DisconnectCallback = std::function<void()>;
     using ClipboardCallback = std::function<void(const std::string& text)>;
+    using ControlLostCallback = std::function<void()>;
     void set_frame_callback(FrameCallback cb);
     void set_disconnect_callback(DisconnectCallback cb);
     void set_device_clipboard_callback(ClipboardCallback cb);
+
+    // Fires when the phone's control thread falls over. The picture keeps running
+    // but nothing listens any more — no keys, no mouse, no clipboard.
+    void set_control_lost_callback(ControlLostCallback cb);
 
     // Input Injection
     void inject_touch(int action, float x, float y, int w, int h);
@@ -61,6 +71,36 @@ public:
     void inject_text(const std::string& text);
     void inject_set_clipboard(const std::string& text);
     void inject_get_clipboard(uint8_t copy_key = 0);
+
+    // Cave man pulls the phone's top curtains down or shoves them back up.
+    // Server 2.7 message types 5, 6 and 7 — one bare byte each.
+    void inject_expand_notification_panel();
+    void inject_expand_settings_panel();
+    void inject_collapse_panels();
+
+    // Type 10: the phone's light itself, not just its brightness. false = panel dark,
+    // true = panel back to normal. The phone stays awake and steerable either way.
+    void inject_screen_power_mode(bool on);
+
+    // True while WE hold the phone's light down. Stays true across stop() when the
+    // "light back on" word never reached the phone — then somebody else must fix it.
+    bool screen_forced_off() const { return screen_forced_off_.load(); }
+
+    // Virtual USB devices (scrcpy UHID protocol).
+    //
+    // Ugg! ASK FIRST. If the phone refuses /dev/uhid and we tell the server to
+    // build a keyboard anyway, the server's whole control thread dies with it —
+    // keys, mouse, touch and clipboard all go quiet while the picture happily
+    // keeps running. device_supports_uhid() is what stops that from happening.
+    bool device_supports_uhid();
+    bool uhid_create(uint16_t id, const std::string& name,
+                     const uint8_t* report_desc, size_t desc_size);
+    void uhid_input(uint16_t id, const uint8_t* data, size_t size);
+    void uhid_destroy(uint16_t id);
+
+    // Opens the phone's physical-keyboard settings, where the German layout is
+    // assigned to the virtual keyboard.
+    void open_hard_keyboard_settings();
 
 private:
     bool setup_tunnel();
@@ -101,6 +141,10 @@ private:
     std::thread control_thread_;
     std::atomic<bool> running_{false};
 
+    // Deliberately NOT reset in start(): if the phone's light is still down from a
+    // session whose socket died, the next session has to know and put it back.
+    std::atomic<bool> screen_forced_off_{false};
+
     // Turns false when the phone says it cannot capture sound. Video must not care.
     bool audio_available_{false};
     AudioPlayer audio_player_;
@@ -108,6 +152,7 @@ private:
     FrameCallback frame_cb_;
     DisconnectCallback disconnect_cb_;
     ClipboardCallback clipboard_cb_;
+    ControlLostCallback control_lost_cb_;
 
     // Device Info
     std::string device_name_;
