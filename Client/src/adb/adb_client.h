@@ -10,6 +10,11 @@
 
 namespace pm::adb {
 
+// Ugg! EVERY std::string in this cave — paths in, output out — is UTF-8. adb speaks
+// UTF-8, and the child is spawned with CreateProcessW, so the whole road is one
+// letter-table now. NEVER hand a path::string() to anything here: on Windows that is
+// the tribe's old table and it spells Cyrillic, CJK and emoji as "?". The road from
+// a path is pm::util::path_to_utf8().
 std::string get_executable_dir();
 
 // Cave man wraps a name in single stones so the phone shell does not chew on spaces,

@@ -1,5 +1,6 @@
 #include "scrcpy_client.h"
 #include "../adb/adb_client.h"
+#include "../util/encoding.h"
 #include <algorithm>
 #include <iostream>
 #include <random>
@@ -46,7 +47,7 @@ void log_stream_event(const std::string& message) {
 #endif
 #endif
     if (log_dir.empty()) {
-        log_dir = pm::adb::get_executable_dir();
+        log_dir = pm::util::path_from_utf8(pm::adb::get_executable_dir());
     }
 
     std::error_code ec;
@@ -71,10 +72,17 @@ constexpr uint8_t MSG_OPEN_HARD_KEYBOARD_SETTINGS = 15;
 constexpr size_t UHID_MAX_NAME_LENGTH = 127;
 
 // Cave man knocks on the hole where fake keyboards are born and listens whether
-// anybody opens. Two knocks: does it exist, and may the shell hand (which is the
-// hand the scrcpy server has) write to it. Anything else means "no".
+// anybody opens. He knocks EXACTLY the way the server knocks: read AND write in one
+// hand (3<>). The server reads the phone's answers (caps-lock light and such) back
+// out of the very same hole, so a hole that only takes and never gives would sail
+// through a write-only knock and then tear the control thread anyway.
+//
+// The knock happens inside its own little cave (...) because a failed "exec" kills
+// the shell it sits in — inside the brackets only the small shell dies and the big
+// one still gets to shout FAIL. Nothing is born from opening alone; the fake
+// keyboard only exists once UHID_CREATE is sent.
 constexpr const char* UHID_PROBE_COMMAND =
-    "dd if=/dev/zero of=/dev/uhid count=0 2>/dev/null && echo PM_UHID_OK || echo PM_UHID_FAIL";
+    "(exec 3<>/dev/uhid) 2>/dev/null && echo PM_UHID_OK || echo PM_UHID_FAIL";
 
 // Big-endian stone writers. Cave man used to carve these four times in four holes.
 void write16(uint8_t* out, uint16_t value) {
@@ -93,6 +101,21 @@ void write64(uint8_t* out, uint64_t value) {
     for (int i = 0; i < 8; ++i) {
         out[i] = static_cast<uint8_t>((value >> (56 - i * 8)) & 0xff);
     }
+}
+
+// How big the pile of untouched stones in the socket is right now. Both tribes have
+// the same question and a different word for it — the fork lives HERE and not in the
+// middle of an if-head, where a later change to one branch quietly breaks the other's
+// brackets.
+unsigned long socket_backlog(SOCKET socket_handle) {
+#ifdef _WIN32
+    unsigned long pending = 0;
+    return ioctlsocket(socket_handle, FIONREAD, &pending) == 0 ? pending : 0;
+#else
+    int pending = 0;
+    return ioctl(socket_handle, FIONREAD, &pending) == 0
+        ? static_cast<unsigned long>(pending) : 0;
+#endif
 }
 
 // Cave man taps socket on shoulder so a thread sleeping in recv() wakes up.
@@ -322,15 +345,18 @@ bool ScrcpyClient::start_server_process() {
     pm::adb::AdbClient adb;
     
     // 1. Push server (Cave man check file size on device first to skip slow push over Wi-Fi)
-    std::string exe_dir = pm::adb::get_executable_dir();
-    std::filesystem::path server_path = std::filesystem::path(exe_dir) / "scrcpy-server.jar";
-    
+    // get_executable_dir() hands out UTF-8, so the road into a path goes through
+    // path_from_utf8 — a plain path(exe_dir) would read it with the old table.
+    const std::filesystem::path exe_dir =
+        pm::util::path_from_utf8(pm::adb::get_executable_dir());
+    std::filesystem::path server_path = exe_dir / "scrcpy-server.jar";
+
     if (!std::filesystem::exists(server_path)) {
-        server_path = std::filesystem::path(exe_dir) / ".." / "scrcpy_download" / "scrcpy-server.jar";
+        server_path = exe_dir / ".." / "scrcpy_download" / "scrcpy-server.jar";
     }
-    
+
     if (!std::filesystem::exists(server_path)) {
-        std::filesystem::path current = std::filesystem::path(exe_dir);
+        std::filesystem::path current = exe_dir;
         for (int i = 0; i < 3; ++i) {
             current = current.parent_path();
             std::filesystem::path check_server = current / "scrcpy_download" / "scrcpy-server.jar";
@@ -362,7 +388,8 @@ bool ScrcpyClient::start_server_process() {
 
     if (!skip_push) {
         std::cout << "[Scrcpy] Pushing server..." << std::endl;
-        if (!adb.push_file(config_.device_id, server_path.string(), "/data/local/tmp/scrcpy-server.jar")) {
+        if (!adb.push_file(config_.device_id, pm::util::path_to_utf8(server_path),
+                           "/data/local/tmp/scrcpy-server.jar")) {
             std::cerr << "[Scrcpy] Could not push scrcpy-server.jar!" << std::endl;
             return false;
         }
@@ -691,18 +718,7 @@ void ScrcpyClient::video_thread_loop() {
         if (!recv_all((char*)packet_data.data(), size)) break;
         
         // What is already waiting in the socket while we still chew on this packet.
-        {
-#ifdef _WIN32
-            unsigned long backlog = 0;
-            if (ioctlsocket(video_socket_, FIONREAD, &backlog) == 0 && backlog > stats_backlog_peak) {
-#else
-            int backlog = 0;
-            if (ioctl(video_socket_, FIONREAD, &backlog) == 0 &&
-                (unsigned long)backlog > stats_backlog_peak) {
-#endif
-                stats_backlog_peak = (unsigned long)backlog;
-            }
-        }
+        stats_backlog_peak = (std::max)(stats_backlog_peak, socket_backlog(video_socket_));
 
         const auto decode_begin = std::chrono::steady_clock::now();
         const bool got_frame = decoder_.decode(packet_data.data(), size, is_config);
@@ -958,13 +974,30 @@ void ScrcpyClient::inject_get_clipboard(uint8_t copy_key) {
 }
 
 bool ScrcpyClient::device_supports_uhid() {
-    if (config_.device_id.empty()) {
+    const std::string device_id = config_.device_id;
+    if (device_id.empty()) {
         return false;
     }
 
+    // Ugg! The same phone gives the same answer every time, and asking costs a whole
+    // adb child — once per connect, once more after every quality restart. Cave man
+    // writes the answer on the wall next to the phone's name and reads it from there.
+    {
+        std::lock_guard<std::mutex> guard(uhid_probe_mutex_);
+        const auto known = uhid_probe_cache_.find(device_id);
+        if (known != uhid_probe_cache_.end()) {
+            return known->second;
+        }
+    }
+
     pm::adb::AdbClient adb;
-    const std::string answer = adb.execute_shell_command(config_.device_id, UHID_PROBE_COMMAND);
+    const std::string answer = adb.execute_shell_command(device_id, UHID_PROBE_COMMAND);
     const bool allowed = answer.find("PM_UHID_OK") != std::string::npos;
+
+    {
+        std::lock_guard<std::mutex> guard(uhid_probe_mutex_);
+        uhid_probe_cache_[device_id] = allowed;
+    }
 
     log_stream_event(allowed
         ? "[Scrcpy] Phone allows /dev/uhid, virtual USB keyboard is possible"

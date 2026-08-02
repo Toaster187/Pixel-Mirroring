@@ -32,6 +32,7 @@
 #include "input/input_handler.h"
 #include "network/network_scanner.h"
 #include "tray/tray_interface.h"
+#include "util/encoding.h"
 #include "settings.h"
 #include <httplib.h>
 #include <nlohmann/json.hpp>
@@ -44,45 +45,15 @@ constexpr int HEARTBEAT_INTERVAL_MS = 5000;
 // Where dropped rocks land on the phone. Every file cave on Android knows this one.
 constexpr const char* DROP_TARGET_DIR = "/sdcard/Download";
 
-// Cave man turns UTF-8 rock-name into the name shape this cave's tools speak.
-std::filesystem::path path_from_utf8(const std::string& utf8) {
-#ifdef _WIN32
-    const int len = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), static_cast<int>(utf8.size()), nullptr, 0);
-    if (len <= 0) return std::filesystem::path(utf8);
-    std::wstring wide(len, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), static_cast<int>(utf8.size()), &wide[0], len);
-    return std::filesystem::path(wide);
-#else
-    return std::filesystem::path(utf8);
-#endif
-}
-
-// Ugg! And the same road back. A rock-name that goes onto the window must be UTF-8,
-// because the window chews every text with CP_UTF8. path::string() hands out the
-// tribe's OWN old letter-table instead (cp1252 here), where "ö" is a single stone —
-// the window then finds half a letter and paints a black diamond. So: never let
-// path::string() near the window, only this.
-//
-// The other road, the one to adb, deliberately keeps path::string(): adb is started
-// with CreateProcessA, which reads the same old letter-table, so both sides agree.
-std::string path_to_utf8(const std::filesystem::path& path) {
-#ifdef _WIN32
-    const std::wstring wide = path.wstring();
-    if (wide.empty()) return std::string();
-    const int len = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), static_cast<int>(wide.size()),
-                                        nullptr, 0, nullptr, nullptr);
-    if (len <= 0) return path.string();
-    std::string utf8(len, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), static_cast<int>(wide.size()),
-                        &utf8[0], len, nullptr, nullptr);
-    return utf8;
-#else
-    return path.string();
-#endif
-}
+// Ugg! Both roads between rock-names and UTF-8 used to be carved twice, once here
+// and once in the adb cave. Now there is ONE pair, and BOTH ends of every road use
+// it: the window paints with CP_UTF8, and adb is started with CreateProcessW, so
+// there is no longer a second letter-table anywhere for a name to fall into.
+using pm::util::path_from_utf8;
+using pm::util::path_to_utf8;
 
 bool has_extension(const std::filesystem::path& file, const char* wanted) {
-    std::string ext = file.extension().string();
+    std::string ext = path_to_utf8(file.extension());
     std::transform(ext.begin(), ext.end(), ext.begin(),
         [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return ext == wanted;
@@ -447,7 +418,7 @@ std::filesystem::path get_config_dir() {
     }
 #endif
 #endif
-    std::filesystem::path fallback = pm::adb::get_executable_dir();
+    std::filesystem::path fallback = path_from_utf8(pm::adb::get_executable_dir());
     std::error_code ec;
     std::filesystem::create_directories(fallback, ec);
     return fallback;
@@ -503,7 +474,7 @@ void clear_setup_state() {
 }
 
 std::optional<std::filesystem::path> find_android_apk() {
-    std::filesystem::path exe_dir = pm::adb::get_executable_dir();
+    std::filesystem::path exe_dir = path_from_utf8(pm::adb::get_executable_dir());
     std::vector<std::filesystem::path> roots;
     roots.push_back(exe_dir);
 
@@ -637,6 +608,11 @@ bool start_stream(
 // Ugg! A switch that is on but does nothing is worse than no switch at all. When
 // the phone refuses the virtual keyboard, cave man says so once, out loud — the
 // status line under the picture is invisible while the stream runs.
+//
+// ONLY for the hand that just flipped the switch in the menu. On an automatic
+// connect this stone stays on the ground: a modal wall in front of a cave man who
+// is waiting for the picture answers a question he did not ask, and the switch has
+// already turned itself off, so the menu tells the same story next time he looks.
 void show_uhid_unavailable_message(pm::window::IWindow& window) {
 #ifdef _WIN32
     MessageBoxW(
@@ -777,7 +753,7 @@ bool run_first_time_setup(
             return false;
         }
 
-        if (!adb.install_app(usb_device->id, apk_path->string())) {
+        if (!adb.install_app(usb_device->id, path_to_utf8(*apk_path))) {
             std::string message = build_install_error_message(adb, usb_device->id);
             window.post_task([&window, message]() {
                 window.set_app_state(pm::window::AppState::SETUP);
@@ -1017,12 +993,13 @@ bool start_stream(
         uhid_keyboard = input.enable_uhid_keyboard();
         if (!uhid_keyboard) {
             // Turn the wish off instead of leaving a switch on that does nothing.
+            // No modal wall here — see show_uhid_unavailable_message. The refusal is
+            // already in stream.log, and the menu shows the switch off from now on.
             pm::Settings stored = pm::load_settings();
             stored.m_uhid_keyboard = false;
             pm::save_settings(stored);
             window.post_task([&window]() {
                 window.set_status_text("Dieses Handy erlaubt keine USB-Tastatur. Texteingabe bleibt aktiv.");
-                show_uhid_unavailable_message(window);
             });
         }
     }
@@ -1261,6 +1238,7 @@ static int app_main() {
     window->set_capture_send_to_phone(initial_settings.m_send_captures_to_phone);
     window->set_audio_enabled(initial_settings.m_audio_enabled);
     window->set_uhid_keyboard(initial_settings.m_uhid_keyboard);
+    window->set_auto_pause_minimized(initial_settings.m_auto_pause_minimized);
 
     SavedBrightness saved_brightness; // Cave man remember phone sun level
     std::atomic<bool> phone_auto_rotate{true}; // Mirrors the phone's OWN rotation switch, never sets a default
@@ -1277,6 +1255,44 @@ static int app_main() {
     });
     pm::stream::VideoRenderer renderer;
     pm::input::InputHandler input(&scrcpy);
+
+    // Ugg! Building the fake keyboard means asking the phone first, and that takes
+    // long enough for cave man to hit the stone a second time. The builder cannot see
+    // the second hit, finishes anyway and switches the keyboard on — while the saved
+    // stone already says "off" and no uhid_destroy was ever sent.
+    //
+    // This holds the NEWEST wish, and the builder checks it before it declares
+    // victory. A counter of hits would also spot "somebody hit again", but it cannot
+    // tell on-off-on from on-off — and in the first case tearing the keyboard down
+    // would be exactly wrong. What matters is the wish, not how often it was hit.
+    //
+    // Stands ABOVE background_tasks on purpose: the task pile joins its workers when
+    // it dies, so everything a task holds by reference has to outlive the pile.
+    std::atomic<bool> uhid_wanted{initial_settings.m_uhid_keyboard};
+
+    // --- Auto-pause while the window is folded down ---------------------------
+    //
+    // Ugg! A window folded down to the taskbar shows the human NOTHING, and the phone
+    // still paints sixty pictures a heartbeat and throws them all over the WLAN. So
+    // the picture-river is taken down while the window is down — but the poke that
+    // keeps the phone's ADB hole open stays alive. That is the whole trick: the way
+    // back is then just "build the stream again", with no searching, no /connect and
+    // no pairing dance. Without the poke the phone's watchdog shuts ADB after 60s and
+    // coming back would cost the full cold road.
+    //
+    // Same idea as the USB-keyboard switch one block up: the minimize shout arrives on
+    // the drawing hand, so it may only write down a wish — never take a stream apart.
+    std::atomic<bool> auto_pause_enabled{initial_settings.m_auto_pause_minimized};
+    std::atomic<bool> pause_wanted{false};   // newest wish from the window
+    std::atomic<bool> auto_paused{false};    // true only while WE hold the stream down
+    std::atomic<bool> pause_worker_busy{false};
+    // The phone this session belongs to, remembered so the way back needs no search.
+    std::string paused_device_id;
+    std::mutex paused_device_mutex;
+
+    // Filled in further down, next to apply_quality_now, where the stream and the
+    // heartbeat live. The menu only needs to know it exists.
+    std::function<void()> reconcile_pause_state;
 
     BackgroundTasks background_tasks;
 
@@ -1296,9 +1312,9 @@ static int app_main() {
         background_tasks.run([device_id, path, w]() {
             pm::adb::AdbClient adb;
             const std::string remote_dir = "/sdcard/Pictures/PixelMirroring";
-            const std::string remote_path = remote_dir + "/" + path.filename().string();
+            const std::string remote_path = remote_dir + "/" + path_to_utf8(path.filename());
             adb.execute_shell_command(device_id, "mkdir -p " + remote_dir);
-            const bool sent = adb.push_file(device_id, path.string(), remote_path);
+            const bool sent = adb.push_file(device_id, path_to_utf8(path), remote_path);
             if (sent) {
                 // Trigger our custom BroadcastReceiver in the companion app to scan the file via MediaScannerConnection (reliable on Android 11+)
                 adb.execute_shell_command(device_id,
@@ -1389,11 +1405,11 @@ static int app_main() {
 
             for (size_t i = 0; i < files.size() && !should_stop; ++i) {
                 const std::filesystem::path& file = files[i];
-                // TWO names for the same rock, and they must not be swapped: the first
-                // one walks to adb (old letter-table, see path_to_utf8), the second one
-                // onto the window (UTF-8). Same letters, different stones.
-                const std::string name = file.filename().string();
-                const std::string name_ui = path_to_utf8(file.filename());
+                // ONE name for the rock now. It used to be two — one in the tribe's old
+                // letter-table for adb, one in UTF-8 for the window — and mixing them up
+                // painted "Größe.pdf" as "Gr��e.pdf". adb is started with CreateProcessW
+                // these days, so both roads speak UTF-8 and there is nothing left to mix.
+                const std::string name = path_to_utf8(file.filename());
                 const bool as_app = install_apks && has_extension(file, ".apk");
                 // An APK the human wants installed rests in the shell's own corner —
                 // the package unpacker cannot read out of /sdcard on modern phones.
@@ -1402,13 +1418,13 @@ static int app_main() {
                     : (std::string(DROP_TARGET_DIR) + "/" + name);
                 // With several rocks the bubble counts trips, with one it shows the name.
                 const std::string label = files.size() == 1
-                    ? name_ui
-                    : (std::to_string(i + 1) + "/" + std::to_string(files.size()) + " " + name_ui);
+                    ? name
+                    : (std::to_string(i + 1) + "/" + std::to_string(files.size()) + " " + name);
 
                 const float base = static_cast<float>(i) / static_cast<float>(files.size());
                 const float span = 1.0f / static_cast<float>(files.size());
                 int last_percent = -1;
-                const bool sent = adb.push_file_paced(device_id, file.string(), remote_path,
+                const bool sent = adb.push_file_paced(device_id, path_to_utf8(file), remote_path,
                     [&](uint64_t done, uint64_t total) {
                         if (total == 0) return;
                         const int percent = static_cast<int>(done * 100 / total);
@@ -1420,7 +1436,7 @@ static int app_main() {
                     &should_stop);
 
                 if (!sent) {
-                    failure = should_stop ? "Übertragung abgebrochen." : ("Fehlgeschlagen: " + name_ui);
+                    failure = should_stop ? "Übertragung abgebrochen." : ("Fehlgeschlagen: " + name);
                     break;
                 }
 
@@ -1439,10 +1455,7 @@ static int app_main() {
                     adb.execute_shell_command(device_id,
                         "am broadcast -a dev.pixelmirroring.app.SCAN_FILE -e path " +
                         pm::adb::shell_quote(remote_path));
-                    // The memory-stone is NOT adb: the control hole speaks UTF-8, and
-                    // the rock on the phone already carries its real name. Hand over the
-                    // name the phone itself sees, not the one the tribe's table made.
-                    clipboard_path = std::string(DROP_TARGET_DIR) + "/" + name_ui;
+                    clipboard_path = remote_path;
                 }
                 ++carried;
             }
@@ -1572,7 +1585,7 @@ static int app_main() {
                 }
 #endif
                 window->trigger_screenshot_flash();
-                window->set_status_text("Bildschirmfoto gespeichert: " + screenshot->filename().string());
+                window->set_status_text("Bildschirmfoto gespeichert: " + path_to_utf8(screenshot->filename()));
                 if (current_settings.m_send_captures_to_phone) {
                     publish_capture_to_phone(*screenshot);
                 }
@@ -1586,7 +1599,7 @@ static int app_main() {
                         window->set_status_text("Videoaufnahme enthielt keine speicherbaren Frames.");
                         break;
                     }
-                    window->set_status_text("Videoaufnahme gespeichert: " + recording->filename().string());
+                    window->set_status_text("Videoaufnahme gespeichert: " + path_to_utf8(recording->filename()));
                     if (current_settings.m_send_captures_to_phone) {
                         publish_capture_to_phone(*recording);
                     }
@@ -1630,6 +1643,9 @@ static int app_main() {
                 current_settings.m_uhid_keyboard = wanted;
                 pm::save_settings(current_settings);
 
+                // The newest wish, for any builder that is still waiting on the phone.
+                uhid_wanted.store(wanted);
+
                 if (!scrcpy.is_running()) {
                     window->set_uhid_keyboard(wanted);
                     window->set_status_text(wanted
@@ -1648,8 +1664,21 @@ static int app_main() {
                 // question over ADB must never block the drawing hand. The switch
                 // that routes keys only flips once the phone really has it —
                 // flipping it early would drop every key hit in between.
-                background_tasks.run([&input, w = window.get()]() {
+                background_tasks.run([&input, &uhid_wanted, w = window.get()]() {
                     const bool created = input.enable_uhid_keyboard();
+
+                    // Cave man hit the stone again while the phone was still thinking,
+                    // and this time he wants it OFF. Take the keyboard back down and
+                    // leave without a word — the newer hit already told the window.
+                    // Without this the phone keeps a keyboard the saved stone says is
+                    // off, and uhid_destroy is never sent.
+                    if (!uhid_wanted.load()) {
+                        if (created) {
+                            input.disable_uhid_keyboard();
+                        }
+                        return;
+                    }
+
                     if (!created) {
                         pm::Settings failed = pm::load_settings();
                         failed.m_uhid_keyboard = false;
@@ -1674,6 +1703,24 @@ static int app_main() {
                 }
                 scrcpy.open_hard_keyboard_settings();
                 window->set_status_text("Tastatur-Einstellungen am Handy geöffnet.");
+                break;
+            }
+            case pm::window::MenuAction::TOGGLE_AUTO_PAUSE_MINIMIZED: {
+                const bool wanted = !current_settings.m_auto_pause_minimized;
+                current_settings.m_auto_pause_minimized = wanted;
+                pm::save_settings(current_settings);
+                auto_pause_enabled.store(wanted);
+                window->set_auto_pause_minimized(wanted);
+
+                // Switched off while the stream is lying down: give the picture back
+                // right away instead of leaving it paused until the next fold-up.
+                if (!wanted && auto_paused.load()) {
+                    pause_wanted.store(false);
+                    reconcile_pause_state();
+                }
+                window->set_status_text(wanted
+                    ? "Stream pausiert künftig, wenn das Fenster minimiert wird."
+                    : "Stream läuft künftig auch bei minimiertem Fenster weiter.");
                 break;
             }
             case pm::window::MenuAction::TOGGLE_SEND_CAPTURES_TO_PHONE: {
@@ -1789,8 +1836,9 @@ static int app_main() {
         input.handle_text(text);
     });
     window->set_raw_key_callback([&](int action, uint32_t scancode, bool extended) {
-        // key hole hit. cave man send the position, phone picks the letter.
-        input.handle_raw_key(action, scancode, extended);
+        // key hole hit. cave man send the position, phone picks the letter. A "no"
+        // travels back so the window can still send the key the old way.
+        return input.handle_raw_key(action, scancode, extended);
     });
     window->set_focus_lost_callback([&]() {
         // cave man leaves. nothing stays pressed on the phone.
@@ -1833,24 +1881,24 @@ static int app_main() {
     std::atomic<bool> stop_heartbeat{false};
     const std::string client_name = get_client_name();
 
+    // fopen used to get a path::string() here — the tribe's old letter-table, which
+    // cannot spell a home cave in Cyrillic. A stream takes the path itself and needs
+    // no letter-table at all.
     std::string client_id;
-    std::string client_id_path = get_client_id_path().string();
-    FILE* f = fopen(client_id_path.c_str(), "r");
-    if (f) {
-        char buf[256];
-        if (fgets(buf, sizeof(buf), f)) {
-            client_id = buf;
-            if (!client_id.empty() && client_id.back() == '\n') client_id.pop_back();
+    const std::filesystem::path client_id_path = get_client_id_path();
+    {
+        std::ifstream file(client_id_path);
+        if (file && std::getline(file, client_id)) {
+            if (!client_id.empty() && client_id.back() == '\r') client_id.pop_back();
         }
-        fclose(f);
     }
     if (client_id.empty()) {
         std::random_device rd;
         std::mt19937 gen(rd());
         std::uniform_int_distribution<> distrib(100000, 999999);
         client_id = "desktop-client-" + std::to_string(distrib(gen));
-        FILE* fw = fopen(client_id_path.c_str(), "w");
-        if (fw) { fputs(client_id.c_str(), fw); fclose(fw); }
+        std::ofstream file(client_id_path, std::ios::trunc);
+        if (file) file << client_id;
     }
 
     auto stop_heartbeat_thread = [&]() {
@@ -1867,10 +1915,17 @@ static int app_main() {
             // Heartbeat only keeps phone ADB awake — disconnect detection is
             // handled by scrcpy video stream recv() failing
             pm::network::NetworkScanner hb_scanner;
-            while (!should_stop && !stop_heartbeat && scrcpy.is_running()) {
+            // A paused stream counts as alive. The picture is gone but the phone must
+            // keep its ADB hole open, or the way back stops being warm. auto_paused is
+            // raised BEFORE the stream is taken down for exactly this reason — the
+            // other order leaves a blink in which both are false and the poke dies.
+            const auto still_wanted = [&]() {
+                return scrcpy.is_running() || auto_paused.load();
+            };
+            while (!should_stop && !stop_heartbeat && still_wanted()) {
                 hb_scanner.send_heartbeat(ip, client_id, client_name);
                 for (int i = 0; i < HEARTBEAT_INTERVAL_MS / 100
-                     && !should_stop && !stop_heartbeat && scrcpy.is_running(); ++i) {
+                     && !should_stop && !stop_heartbeat && still_wanted(); ++i) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 }
             }
@@ -1905,6 +1960,81 @@ static int app_main() {
             if (start_stream(*window, scrcpy, renderer, input, device_id,
                              &saved_brightness, background_tasks, &phone_auto_rotate)) {
                 start_heartbeat(device_id.substr(0, device_id.rfind(':')));
+            }
+        });
+    };
+
+    // One worker walks over and makes the world match the newest wish (declared far
+    // above, where the menu can reach it). What matters is the WISH, not how often
+    // the human hit the stone.
+    reconcile_pause_state = [&]() {
+        if (pause_worker_busy.exchange(true)) return; // one hand is enough
+        background_tasks.run([&]() {
+            ScopeExit mark_done([&]() { pause_worker_busy = false; });
+
+            // Cave man walks back and forth as long as the wish keeps changing under
+            // him. The bound is only there so a human hammering the minimize stone
+            // cannot keep one hand walking forever.
+            for (int rounds = 0; rounds < 8 && !should_stop; ++rounds) {
+                const bool want_paused = pause_wanted.load();
+                if (want_paused == auto_paused.load()) return;
+
+                if (want_paused) {
+                    // Never cut into somebody else's work: a recording would end up a
+                    // broken file, and a quality restart is already holding the stream
+                    // in both hands. In those cases cave man simply does nothing, and
+                    // because auto_paused stays down, coming back does nothing either.
+                    //
+                    // A connect that is still walking is NOT in this list on purpose:
+                    // it only ever raises is_running() once the stream really stands,
+                    // and it asks again at the end of its road (see start_connection).
+                    if (!scrcpy.is_running() || renderer.is_recording() ||
+                        quality_restart_running.load()) {
+                        return;
+                    }
+                    {
+                        std::lock_guard<std::mutex> guard(paused_device_mutex);
+                        paused_device_id = scrcpy.get_device_id();
+                    }
+                    // Raise the flag FIRST — see the heartbeat loop.
+                    auto_paused.store(true);
+                    scrcpy.stop();
+                    window->post_task([w = window.get()]() {
+                        w->set_app_state(pm::window::AppState::CONNECTED);
+                        w->set_status_text("Pausiert — Fenster ist minimiert.");
+                    });
+                    continue;
+                }
+
+                std::string device_id;
+                {
+                    std::lock_guard<std::mutex> guard(paused_device_mutex);
+                    device_id = paused_device_id;
+                }
+                window->post_task([w = window.get()]() {
+                    w->set_app_state(pm::window::AppState::CONNECTED);
+                    w->set_status_text("Stream wird fortgesetzt...");
+                });
+
+                // The warm road: ADB is still awake because the poke never stopped,
+                // so there is nothing to look for and nothing to ask permission for.
+                const bool resumed = !device_id.empty() &&
+                    start_stream(*window, scrcpy, renderer, input, device_id,
+                                 &saved_brightness, background_tasks, &phone_auto_rotate);
+
+                // Lower the flag only now: while the stream was being built the poke
+                // still had to count as wanted.
+                auto_paused.store(false);
+
+                if (!resumed && !should_stop && !pause_wanted.load()) {
+                    // Phone went to sleep, WLAN moved, ADB shut after all — whatever
+                    // it was, the warm road is gone. Walk the cold one.
+                    window->post_task([w = window.get()]() {
+                        w->set_status_text("Verbindung neu aufbauen...");
+                    });
+                    start_connection(true);
+                    return;
+                }
             }
         });
     };
@@ -2024,6 +2154,8 @@ static int app_main() {
         connection_thread = std::thread([&, automatic]() {
             connection_running = true;
             ScopeExit mark_done([&]() { connection_running = false; });
+            // A fresh connection replaces whatever the pause was holding on to.
+            auto_paused.store(false);
             pm::adb::AdbClient adb;
 
             // Ugg wake ADB first. No pretend network magic.
@@ -2114,6 +2246,12 @@ static int app_main() {
                 std::string hb_ip = tcp_device->id.substr(0, tcp_device->id.rfind(':'));
                 start_heartbeat(hb_ip);
                 start_screen_poll(hb_ip, tcp_device->id);
+                // Ugg! The human folded the window down while cave man was still on
+                // the road. The stream is up now and nobody is looking at it — ask
+                // the pause hand to walk once more.
+                if (pause_wanted.load()) {
+                    reconcile_pause_state();
+                }
             } else if (!should_stop) {
                 window->post_task([w = window.get()]() {
                     w->set_app_state(pm::window::AppState::SETUP);
@@ -2125,6 +2263,21 @@ static int app_main() {
 
     window->set_start_callback([&]() {
         start_connection(false);
+    });
+
+    // Fires on the drawing hand, so it may only write down the wish and wave.
+    window->set_minimize_callback([&](bool minimized) {
+        if (!auto_pause_enabled.load()) {
+            // Switched off mid-session while the stream was already down: let the
+            // picture come back anyway instead of leaving a paused stream forever.
+            if (!minimized && auto_paused.load()) {
+                pause_wanted.store(false);
+                reconcile_pause_state();
+            }
+            return;
+        }
+        pause_wanted.store(minimized);
+        reconcile_pause_state();
     });
 
     window->show();

@@ -470,14 +470,27 @@ bool Win32Window::send_raw_key(bool pressed, LPARAM lparam) {
     if (scancode == 0) return false;
 
     const bool extended = (lparam & (1 << 24)) != 0;
+    const uint32_t hole = scancode | (extended ? 0x100u : 0u);
 
     // A held key repeats by itself on the phone, the same way a cabled keyboard
     // works. Cave man does not carve the same stone sixty times a heartbeat — but
-    // he still swallows the message, or the key would be typed twice.
-    if (pressed && (lparam & (1 << 30)) != 0) return true;
+    // he still swallows the message, or the key would be typed twice. Only for the
+    // holes the fake keyboard really took: one it refused walks the old road on
+    // every repeat too, exactly like it did on the first press.
+    if (pressed && (lparam & (1 << 30)) != 0) {
+        return hid_held_keys_.count(hole) != 0;
+    }
 
-    m_raw_key_cb_(pressed ? 0 : 1, scancode, extended);
-    return true;
+    // Ugg! "No" means no. A boot keyboard has no volume and no media buttons, and
+    // a key the fake keyboard hands back must NOT be eaten here — the Android
+    // keycode path below is the whole reason it says no in the first place.
+    const bool taken = m_raw_key_cb_(pressed ? 0 : 1, scancode, extended);
+    if (pressed && taken) {
+        hid_held_keys_.insert(hole);
+    } else {
+        hid_held_keys_.erase(hole);
+    }
+    return taken;
 }
 
 int Win32Window::hit_test_button(POINT pt) {
@@ -1006,14 +1019,24 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         return 0;
-    case WM_SIZE:
-        if (wp != SIZE_MINIMIZED) {
+    case WM_SIZE: {
+        // Ugg! This shouts on every drag of the window edge as well, so cave man
+        // only passes the word on when the window really went down or came back up.
+        const bool now_minimized = (wp == SIZE_MINIMIZED);
+        if (now_minimized != minimized_) {
+            minimized_ = now_minimized;
+            if (m_minimize_cb_) {
+                m_minimize_cb_(now_minimized);
+            }
+        }
+        if (!now_minimized) {
             recalc_layout();
             update_region();
             // Cave man trigger render now so live resize look smooth
             PostMessage(hwnd_, WM_VIDEO_RENDER, 0, 0);
         }
         return 0;
+    }
     case WM_SIZING:
         handle_sizing(wp, lp); return TRUE;
     case WM_NCHITTEST:
@@ -1139,6 +1162,7 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
                 }
             }
             if (wp == 'U' && (GetKeyState(VK_CONTROL) & 0x8000)) {
+                swallowed_shortcuts_.insert(static_cast<UINT>(wp));
                 if (menu_cb_) {
                     menu_cb_(MenuAction::UNLOCK_DEVICE);
                 }
@@ -1146,15 +1170,24 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
             }
             if (wp == 'L' && (GetKeyState(VK_CONTROL) & 0x8000)) {
                 // Cave man lock screen and turn off light
+                swallowed_shortcuts_.insert(static_cast<UINT>(wp));
                 if (menu_cb_) {
                     menu_cb_(MenuAction::LOCK_DEVICE);
                 }
                 return 0;
             }
         }
+        // Ugg! Cave man ate the press, so as far as the phone is concerned that key
+        // never went down — and a "let go" for a key nobody pressed is a word the
+        // phone did not need to hear. Eat the release of the same key too.
+        if (msg == WM_KEYUP && swallowed_shortcuts_.erase(static_cast<UINT>(wp)) > 0) {
+            return 0;
+        }
         // With the virtual USB keyboard hanging on the phone every key travels as
         // a real key press instead. Volume keys stay behind: a boot keyboard has
         // no such button, so they keep riding the Android keycode path below.
+        // (send_raw_key would hand them back anyway now — this only spares the
+        // fake keyboard a question whose answer is already known.)
         if (uhid_keyboard_ && app_state_ == AppState::STREAMING &&
             wp != VK_VOLUME_UP && wp != VK_VOLUME_DOWN && wp != VK_VOLUME_MUTE) {
             if (send_raw_key(msg == WM_KEYDOWN, lp)) {
@@ -1221,6 +1254,8 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_KILLFOCUS: {
         // Cave man walks away mid-word. Everything he still held goes up now.
+        hid_held_keys_.clear();
+        swallowed_shortcuts_.clear();
         if (m_focus_lost_cb_) {
             m_focus_lost_cb_();
         }
@@ -1367,6 +1402,7 @@ namespace {
     constexpr UINT ID_TOGGLE_AUTO_ROTATE = 1016;
     constexpr UINT ID_TOGGLE_UHID_KEYBOARD = 1014;
     constexpr UINT ID_OPEN_KEYBOARD_SETTINGS = 1015;
+    constexpr UINT ID_TOGGLE_AUTO_PAUSE = 1017;
 
     constexpr UINT ID_SCREENSHOT = 1101;
     constexpr UINT ID_TOGGLE_RECORDING = 1102;
@@ -1670,6 +1706,8 @@ void Win32Window::build_settings_menu_items() {
     g_menu_items.push_back({ID_TOGGLE_LOWEST_BRIGHTNESS, L"Bildschirm auf niedrigste Helligkeit", true, lowest_brightness_, false});
     g_menu_items.push_back({ID_TOGGLE_SCREEN_OFF, L"Handy-Display komplett aus", true, screen_off_, false});
     g_menu_items.push_back({ID_TOGGLE_AUDIO, L"Ton vom Handy übertragen", true, audio_enabled_, false});
+    g_menu_items.push_back({ID_TOGGLE_AUTO_PAUSE, L"Stream pausieren, wenn Fenster minimiert",
+                            true, auto_pause_minimized_, false});
     g_menu_items.push_back({ID_TOGGLE_UHID_KEYBOARD, L"Echte USB-Tastatur am Handy", true, uhid_keyboard_, false});
     if (uhid_keyboard_) {
         if (app_state_ == AppState::STREAMING) {
@@ -1756,6 +1794,7 @@ void Win32Window::show_context_menu(POINT pt) {
                 case ID_TOGGLE_LOWEST_BRIGHTNESS: action = MenuAction::TOGGLE_LOWEST_BRIGHTNESS; break;
                 case ID_TOGGLE_SCREEN_OFF: action = MenuAction::TOGGLE_SCREEN_OFF; break;
                 case ID_TOGGLE_AUDIO:  action = MenuAction::TOGGLE_AUDIO; break;
+                case ID_TOGGLE_AUTO_PAUSE: action = MenuAction::TOGGLE_AUTO_PAUSE_MINIMIZED; break;
                 case ID_TOGGLE_AUTO_ROTATE: action = MenuAction::TOGGLE_AUTO_ROTATE; break;
                 case ID_TOGGLE_UHID_KEYBOARD: action = MenuAction::TOGGLE_UHID_KEYBOARD; break;
                 case ID_OPEN_KEYBOARD_SETTINGS: action = MenuAction::OPEN_KEYBOARD_SETTINGS; break;
@@ -1787,6 +1826,7 @@ void Win32Window::show_context_menu(POINT pt) {
         case ID_TOGGLE_LOWEST_BRIGHTNESS: action = MenuAction::TOGGLE_LOWEST_BRIGHTNESS; break;
         case ID_TOGGLE_SCREEN_OFF: action = MenuAction::TOGGLE_SCREEN_OFF; break;
         case ID_TOGGLE_AUDIO:  action = MenuAction::TOGGLE_AUDIO; break;
+        case ID_TOGGLE_AUTO_PAUSE: action = MenuAction::TOGGLE_AUTO_PAUSE_MINIMIZED; break;
         case ID_TOGGLE_AUTO_ROTATE: action = MenuAction::TOGGLE_AUTO_ROTATE; break;
         case ID_TOGGLE_UHID_KEYBOARD: action = MenuAction::TOGGLE_UHID_KEYBOARD; break;
         case ID_OPEN_KEYBOARD_SETTINGS: action = MenuAction::OPEN_KEYBOARD_SETTINGS; break;

@@ -5,6 +5,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(PM_PORTABLE_BUILD "Build a portable version that does not write to AppData" OFF)
+option(PM_BUILD_TESTS "Build the small standalone self-checks" ON)
 
 find_package(FFMPEG REQUIRED)
 find_package(httplib CONFIG REQUIRED)
@@ -41,6 +42,7 @@ add_executable(PixelMirroring
     src/stream/audio_player.cpp
     src/input/input_handler.cpp
     src/input/hid_keyboard.cpp
+    src/util/encoding.cpp
     # src/config/settings.cpp
     ${PLATFORM_SOURCES}
 )
@@ -53,6 +55,25 @@ endif()
 
 if(PM_PORTABLE_BUILD)
     target_compile_definitions(PixelMirroring PRIVATE PM_PORTABLE_BUILD)
+endif()
+
+# --- Self-checks ---
+# Ugg! No test tribe moved in here. This is one small cave with its own main() and a
+# hand-carved check(): it only needs hid_keyboard.cpp, so it builds in a blink and
+# drags in neither FFmpeg nor SDL. It is NOT installed and NOT packaged.
+# Run it with "ctest --test-dir build --output-on-failure" or start the exe directly.
+if(PM_BUILD_TESTS)
+    enable_testing()
+
+    add_executable(pm_hid_keyboard_test
+        tests/hid_keyboard_test.cpp
+        src/input/hid_keyboard.cpp
+    )
+    if(MSVC)
+        target_compile_options(pm_hid_keyboard_test PRIVATE /EHsc /utf-8)
+    endif()
+
+    add_test(NAME hid_keyboard COMMAND pm_hid_keyboard_test)
 endif()
 
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/copy_apk.cmake" "

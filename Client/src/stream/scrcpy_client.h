@@ -6,6 +6,7 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <unordered_map>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -144,6 +145,12 @@ private:
     // Deliberately NOT reset in start(): if the phone's light is still down from a
     // session whose socket died, the next session has to know and put it back.
     std::atomic<bool> screen_forced_off_{false};
+
+    // What each phone once answered about /dev/uhid. A phone does not change its
+    // mind while the cave is open, so the adb child only has to run once per phone.
+    // Written from the connection thread, read from the UI thread on a menu click.
+    std::mutex uhid_probe_mutex_;
+    std::unordered_map<std::string, bool> uhid_probe_cache_;
 
     // Turns false when the phone says it cannot capture sound. Video must not care.
     bool audio_available_{false};

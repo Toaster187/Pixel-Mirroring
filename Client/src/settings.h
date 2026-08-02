@@ -35,6 +35,11 @@ struct Settings {
     // Off by default: not every phone opens /dev/uhid, and the layout has to be
     // set on the phone once before it is useful.
     bool m_uhid_keyboard = false;
+    // A minimized window shows the human NOTHING, while the phone keeps painting
+    // 60 pictures a second and throwing them over the WLAN. So the picture-river
+    // dries up while the window is down and starts again when it comes back.
+    // On by default: nobody wants to pay for a stream they cannot see.
+    bool m_auto_pause_minimized = true;
 };
 
 Settings load_settings();

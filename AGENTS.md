@@ -190,7 +190,19 @@ jedem Textfeld korrekt dargestellt werden. Damit das dauerhaft hält, gilt:
   in `Client/CMakeLists.txt` bewusst **nicht** definiert - jeder suffixlose Win32-Aufruf ist die
   ANSI-Variante. Immer explizit schreiben.
 - Zwischen `std::string` (immer UTF-8) und `std::wstring` nur über `MultiByteToWideChar` /
-  `WideCharToMultiByte` mit `CP_UTF8` konvertieren - nie `CP_ACP`.
+  `WideCharToMultiByte` mit `CP_UTF8` konvertieren - nie `CP_ACP`. Die vier Umwandlungen
+  stehen in `Client/src/util/encoding.{h,cpp}` (`pm::util::path_from_utf8`,
+  `path_to_utf8`, `utf8_to_wide`, `wide_to_utf8`) - diese benutzen, keine fünfte Kopie
+  von Hand schreiben.
+- **`std::filesystem::path::string()` unter Windows nie aufrufen.** Es liefert die
+  ANSI-Codepage, in der Kyrillisch, CJK und Emoji zu `?` werden. Stattdessen
+  `pm::util::path_to_utf8()`; der Weg zurück ist `path_from_utf8()`, nie
+  `std::filesystem::path(narrow_string)`.
+- **Jeder `std::string`, der ein Modul verlässt, ist UTF-8** - auch jeder Pfad, der nach
+  `pm::adb` geht. `AdbClient` startet adb mit `CreateProcessW`, `get_executable_dir()`
+  benutzt `GetModuleFileNameW`; damit spricht die ganze Kette PC -> adb -> Handy
+  dieselbe Tabelle. FFmpeg (`avio_open`, `avformat_alloc_output_context2`) erwartet
+  unter Windows ebenfalls UTF-8.
 - GDI+ zeichnet nur `wchar_t`: narrow Strings vorher nach UTF-16 konvertieren.
 - **Android**: `-Dfile.encoding=UTF-8` in `gradle.properties`, `compileOptions.encoding = "UTF-8"`
   und `options.encoding = "UTF-8"` für alle `JavaCompile`-Tasks.
@@ -276,10 +288,36 @@ jedem Textfeld korrekt dargestellt werden. Damit das dauerhaft hält, gilt:
   eigenen APK, die der Mensch absichtlich einrichtet, sind vorab erteilte
   Berechtigungen vertretbar - eine ins Fenster gezogene Datei ist ein Fremder und
   muss Kamera, Mikrofon und Standort genauso beim Handy erfragen wie jede andere App.
-  Zwei Namen sind hier außerdem kodierungskritisch: der Dateiname geht auf zwei
-  verschiedenen Wegen ans Fenster (UTF-8, über `path_to_utf8()`) und an adb
-  (`CreateProcessA`, also ANSI-Codepage, über `path::string()`). Wer sie vertauscht,
-  malt `Größe.pdf` als `Gr��e.pdf` in die Transfer-Bubble.
+  Liegengebliebene `.pmpart`/`.pmglue` werden vor dem ersten Stück per `rm -f`
+  weggeräumt: das Aufräumen am Ende von `push_file_paced` läuft nur, wenn die
+  Übertragung *endet* - ein hart beendeter Client lässt sie sonst für immer im
+  Dateimanager des Handys liegen.
+- **Auto-Pause bei minimiertem Fenster** (`Settings::m_auto_pause_minimized`,
+  standardmäßig **an**): ein zur Taskleiste gefaltetes Fenster zeigt nichts, das Handy
+  kodiert aber weiter und das WLAN trägt weiter ~20 Mbit/s. `Win32Window` meldet über
+  `set_minimize_callback` nur die Flanke `SIZE_MINIMIZED`/`SIZE_RESTORED` (`WM_SIZE`
+  feuert auch bei jedem Ziehen am Fensterrand), `main.cpp` gleicht daraufhin ab:
+  - **Der Heartbeat muss den Stream überleben.** `POST /heartbeat` verhindert, dass der
+    Watchdog am Handy ADB nach 60 s abschaltet - genau deshalb ist der Rückweg warm:
+    Fortsetzen ist nur noch ein weiteres `start_stream()`, ohne Suche, ohne `/connect`,
+    ohne Pairing. Die Heartbeat-Schleife läuft daher, solange
+    `scrcpy.is_running() || auto_paused` gilt, und `auto_paused` wird **vor**
+    `scrcpy.stop()` gesetzt; in der anderen Reihenfolge gibt es einen Moment, in dem
+    beides falsch ist und der Heartbeat-Thread endgültig aussteigt.
+  - **Der Fensterthread schreibt nur einen Wunsch auf.** `pause_wanted` ist ein Atomic,
+    ein einzelner Hintergrund-Task (`reconcile_pause_state`) gleicht die Welt daran an.
+    Einen Stream im Fensterthread abzubauen oder aufzubauen würde die Oberfläche
+    einfrieren.
+  - **Pausiert wird übersprungen, nie erzwungen.** Nicht während einer Aufnahme (ein
+    abgerissener Stream hinterlässt eine kaputte Datei) und nicht während
+    `apply_quality_now` (das hält den Stream bereits in beiden Händen). Wird das
+    Pausieren übersprungen, bleibt `auto_paused` unten - dann tut auch das
+    Wiederherstellen nichts. Ein noch laufender Verbindungsaufbau steht bewusst nicht in
+    dieser Liste: er meldet `is_running()` erst, wenn der Stream wirklich steht, und
+    stößt den Abgleich am Ende seines eigenen Weges noch einmal an.
+  - **Beim Fortsetzen gibt es den kalten Weg als Rückfall.** Scheitert `start_stream()`
+    beim Wiederherstellen - Handy eingeschlafen, WLAN gewechselt, ADB doch abgeschaltet -
+    ruft der Task `start_connection(true)` auf, statt ein totes Fenster stehen zu lassen.
 - **Optionale UHID-Tastatur** (`Settings::m_uhid_keyboard`, standardmäßig aus): statt
   `inject_text` hängt eine virtuelle USB-HID-Tastatur am Handy (scrcpy-Control-Messages
   12 `UHID_CREATE`, 13 `UHID_INPUT`, 14 `UHID_DESTROY` sowie 15
@@ -288,7 +326,13 @@ jedem Textfeld korrekt dargestellt werden. Damit das dauerhaft hält, gilt:
     per ADB. Wirft `UhidManager.open()` auf der Handy-Seite, fliegt die Exception aus
     `handleEvent()` und reißt den **kompletten Control-Thread** des Servers mit - Maus,
     Touch, Tastatur und Zwischenablage sind still, während das Bild weiterläuft.
-    `UHID_CREATE` niemals ungeprüft senden.
+    `UHID_CREATE` niemals ungeprüft senden. Die Probe öffnet **lesend und schreibend**
+    (`(exec 3<>/dev/uhid)`), weil der Server die UHID-Output-Reports aus demselben
+    Deskriptor zurückliest - eine reine Schreibprobe käme auf einem Gerät durch, das
+    Lesen verweigert, und würde genau den Thread reißen, den sie schützen soll. Die
+    Subshell ist nötig, weil ein fehlgeschlagenes `exec` die Shell beendet, in der es
+    steht. Das Ergebnis wird pro `device_id` gemerkt, damit Neuverbindungen und
+    Qualitäts-Neustarts keinen weiteren `adb`-Prozess kosten.
   - **Das Wire-Format hängt an der Server-Version.** Der gebündelte Server 2.7 erwartet
     `type(1) id(2 BE) name_len(1) name rd_size(2 BE) rd_data`; das `name`-Feld gibt es vor
     2.7 nicht und spätere scrcpy-Versionen ergänzen Vendor-/Product-IDs. Vor Änderungen
@@ -297,6 +341,15 @@ jedem Textfeld korrekt dargestellt werden. Damit das dauerhaft hält, gilt:
     ist er an, gehen `WM_KEYDOWN`/`WM_KEYUP`/`WM_SYSKEYDOWN`/`WM_SYSKEYUP` an
     `send_raw_key()` und `WM_CHAR` wird verworfen; ist er aus, bleibt alles wie vorher.
     Lautstärketasten und die Alt-/Strg-Kürzel sind die bewussten Ausnahmen.
+  - **Eine abgelehnte Taste muss zurückfallen, nicht verschwinden.** Der Rückgabewert
+    reicht von `HidKeyboard::process_key()` über `InputHandler::handle_raw_key()` bis
+    `Win32Window::send_raw_key()` durch; `false` heißt "die Boot-Tastatur hat diese
+    Taste nicht", und das Fenster schickt sie dann über den Android-Keycode-Pfad.
+    `send_raw_key()` merkt sich in `hid_held_keys_`, welche Scancodes die HID-Tastatur
+    genommen hat - allein damit auch die Auto-Repeats einer *abgelehnten* Taste weiter
+    durchfallen. Bei einer Taste, deren Druck ein Kürzel (Strg+U/L) geschluckt hat,
+    wird auch das Loslassen geschluckt (`swallowed_shortcuts_`), sonst bekommt das
+    Handy ein Release für eine Taste, die es nie gedrückt gesehen hat.
   - **Scancodes statt Virtual Keys.** Der ganze Sinn ist, dass das *Handy* das Zeichen
     bestimmt - also wird die physische Tastenposition aus `lParam` geschickt, nie `wParam`.
   - **AltGr** erzeugt unter Windows immer zusätzlich ein linkes Strg;
@@ -319,6 +372,7 @@ jedem Textfeld korrekt dargestellt werden. Damit das dauerhaft hält, gilt:
 ### Desktop Client
 
 - CMake Build: `cmake --preset default && cmake --build build/`
+- Selbsttest: `ctest --test-dir build --output-on-failure`
 - Manueller Test mit angeschlossenem Android-Gerät
 
 ### Android
@@ -326,9 +380,27 @@ jedem Textfeld korrekt dargestellt werden. Damit das dauerhaft hält, gilt:
 - Gradle Build: `gradle assembleDebug`
 - Manueller Test auf physischem Gerät
 
+### CI
+
+`.github/workflows/build.yml` übersetzt bei jedem Pull Request Android und den
+Windows-Client mit MSVC (gleicher Compiler, gleiches `/utf-8` wie die Auslieferung)
+und lässt `ctest` laufen - ohne Packaging. `release.yml` baut zusätzlich die
+Installer und nur auf `v*`-Tags.
+
+### Der einzige automatische Test
+
+`Client/tests/hid_keyboard_test.cpp` - ein eigenständiges `main()` mit
+handgeschriebenem `check()` (bewusst **kein** `assert`: die Auslieferung ist ein
+Release-Build mit `NDEBUG`, dort wäre jede Zusicherung wegoptimiert). Er nagelt die
+Scancode-Tabelle, die AltGr-Phantom-Strg-Maske, Extended-vs-Numpad-Paare und den
+6-Tasten-Rollover fest. Ziel `pm_hid_keyboard_test` (Option `PM_BUILD_TESTS`,
+standardmäßig an), hängt nur an `hid_keyboard.cpp` und wird weder installiert noch
+paketiert. Kein Test-Framework hinzufügen - für weitere Absicherungen dasselbe
+Muster benutzen.
+
 ### Was sich nicht automatisiert testen lässt
 
-Es gibt keine Testsuite. Alles Verhalten am Gerät ist manuell zu prüfen - besonders
+Alles andere. Verhalten am Gerät ist manuell zu prüfen - besonders
 Verbindungsaufbau/Reconnect, Tonwiedergabe (falsche Abtastrate fällt sofort als
 falsche Tonhöhe auf), Umlauteingabe und die Aufnahme. Kompilieren heißt hier nicht
 "funktioniert".
