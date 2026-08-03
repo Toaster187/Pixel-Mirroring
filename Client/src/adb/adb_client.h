@@ -10,23 +10,25 @@
 
 namespace pm::adb {
 
-// Ugg! EVERY std::string in this cave — paths in, output out — is UTF-8. adb speaks
-// UTF-8, and the child is spawned with CreateProcessW, so the whole road is one
-// letter-table now. NEVER hand a path::string() to anything here: on Windows that is
-// the tribe's old table and it spells Cyrillic, CJK and emoji as "?". The road from
-// a path is pm::util::path_to_utf8().
+// EVERY std::string in this module — paths going in, output coming out — is UTF-8.
+// adb speaks UTF-8 and the child process is spawned with CreateProcessW, so the whole
+// chain uses one encoding. NEVER pass a path::string() to anything here: on Windows
+// that returns the ANSI code page, which renders Cyrillic, CJK and emoji as "?".
+// Convert with pm::util::path_to_utf8() instead.
 std::string get_executable_dir();
 
-// Cave man wraps a name in single stones so the phone shell does not chew on spaces,
-// and a stone inside the name cannot break out and become a command of its own.
-// Every path that came from a human — dropped files above all — goes through here.
+// Wraps a string in single quotes so the device shell does not split it on spaces,
+// and escapes embedded quotes so nothing inside the name can break out and become a
+// command of its own. Every path that came from user input — dropped files above all
+// — goes through here.
 std::string shell_quote(const std::string& text);
 
 /**
  * A long-running "adb shell" child process that can be killed again.
  *
- * Ugg! Old cave man threw spear at process and forgot it. Spear never came back,
- * process never died. Now cave man keeps rope on spear: stop() pulls it back in.
+ * The scrcpy server used to run on a detached thread with no handle kept, so it was
+ * never terminated and every session leaked a thread and an adb.exe. This owns the
+ * child instead: stop() kills it and joins the reader thread.
  */
 class ShellProcess {
 public:
@@ -82,7 +84,7 @@ public:
     // Returns a list of currently connected devices
     std::vector<Device> get_connected_devices();
 
-    // Cave man sees all phones, even sleepy or not trusted.
+    // All devices adb knows about, including offline and unauthorized ones.
     std::vector<Device> get_devices();
 
     // Forces offline/unauthorized devices to reconnect to trigger prompt
@@ -91,29 +93,29 @@ public:
     // Connects to a device via TCP/IP
     bool connect_device(const std::string& ip, int port = 5555);
 
-    // Cave man tells ADB daemon to listen on air.
+    // Switches the device's adbd to TCP/IP mode on the given port.
     bool enable_tcpip(const std::string& device_id, int port = 5555);
 
-    // Cave man puts Android helper APK on phone. ONLY for user who sit at phone now,
-    // never other users, never private space. Ugg! Other caves are not our cave.
+    // Installs the companion APK. ONLY into the user profile that is currently in the
+    // foreground — never other users, never the private space.
     bool install_app(const std::string& device_id, const std::string& apk_path);
 
-    // Cave man tells phone to unpack an APK that already lies on it. That way a
-    // dropped APK travels ONCE — paced — instead of a second time at full speed.
-    // For STRANGE rocks only, so it deliberately does NOT pre-grant permissions the
-    // way install_app does — the phone asks the human itself, as for any other app.
+    // Installs an APK that is already on the device, so a dropped APK is transferred
+    // once (paced) instead of a second time at full speed by "adb install". Used only
+    // for files the user dropped in, so it deliberately does NOT pre-grant permissions
+    // the way install_app does — the phone asks for them like it does for any app.
     bool install_pushed_app(const std::string& device_id, const std::string& remote_apk_path);
 
-    // What went wrong last time install_app said no? Raw adb words for human eyes.
+    // Why the last install_app failed — raw adb output, meant to be shown to the user.
     const std::string& last_install_error() const { return m_last_install_error; }
 
-    // Cave man ask phone which user sit in front of fire right now. Empty = no answer.
+    // The user profile currently in the foreground. Empty if the device did not answer.
     std::string get_current_user(const std::string& device_id);
 
-    // Cave man look in EVERY cave (user) for app, not only own one.
+    // Every user profile that has the package installed, not just the current one.
     std::vector<std::string> users_with_app(const std::string& device_id, const std::string& package_name);
 
-    // Cave man wakes Android helper app and service.
+    // Starts the companion app and its foreground service.
     bool start_app(const std::string& device_id, const std::string& package_name);
     bool start_service(const std::string& device_id, const std::string& service_name);
 
@@ -123,10 +125,11 @@ public:
     // Pushes a file to the device
     bool push_file(const std::string& device_id, const std::string& local_path, const std::string& remote_path);
 
-    // Same rock, but carried in small pieces. Between pieces cave man rests as long as
-    // the throw took, so the picture-river keeps most of the air. on_progress(sent, total)
-    // is shouted from the calling thread after every piece. cancel may be nothing;
-    // when it turns true the carrying stops and the half rock is swept off the phone.
+    // Same as push_file, but in small chunks. After each chunk the transfer sleeps for
+    // as long as that chunk took, so the video stream keeps at least half the WLAN
+    // airtime. on_progress(sent, total) is called from the calling thread after every
+    // chunk. cancel may be null; when it turns true the transfer stops and the partial
+    // file is removed from the device.
     bool push_file_paced(const std::string& device_id, const std::string& local_path,
                          const std::string& remote_path,
                          const std::function<void(uint64_t, uint64_t)>& on_progress = {},
@@ -142,13 +145,13 @@ public:
     bool auto_grant_secure_settings();
     bool grant_secure_settings(const std::string& device_id);
 
-    // Cave man peek if app already live on phone.
+    // Is the package installed for the current user?
     bool is_app_installed(const std::string& device_id, const std::string& package_name);
 
-    // Cave man check if phone already trust cave app.
+    // Has the package already been granted the given permission?
     bool has_permission(const std::string& device_id, const std::string& package_name, const std::string& permission);
 
-    // Cave man reads phone IP from Android route stones.
+    // Reads the device's WLAN IP out of its routing table.
     std::string get_device_ip(const std::string& device_id);
 
 private:

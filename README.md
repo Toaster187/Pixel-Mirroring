@@ -454,7 +454,7 @@ Pixel Mirroring ist Open-Source und freut sich über Beiträge! Hier sind die wi
 - **C++**: C++20, alles unter Namespace `pm::`, PascalCase für Klassen, snake_case für Methoden, SCREAMING_SNAKE_CASE für Konstanten
 - **Kotlin**: Jetpack Compose, Coroutines, Material 3, Package `dev.pixelmirroring.app.*`
 - **Encoding**: Alle Dateien UTF-8 ohne BOM; deutsche Umlaute müssen überall korrekt rendern
-- **Kommentare**: Caveman-Stil in Code-Kommentaren (z.B. `// Ugg! ADB nicht gefunden...`); normale Sprache in PRs/Issues
+- **Kommentare**: sachlich und knapp, meist auf Englisch. Sie erklären *warum* eine Stelle so aussieht (feste Reihenfolge auf dem Draht, Android-Eigenheit, verhinderte Regression), nicht was die Zeile tut. Details in `AGENTS.md`
 
 ### Branching & PRs
 1. Fork das Projekt

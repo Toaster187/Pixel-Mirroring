@@ -1,11 +1,11 @@
-// Ugg! The scancode table in hid_keyboard.cpp is exactly the kind of stone wall that
-// breaks quietly: one wrong number and a single key types the wrong letter on the
-// phone, on a keyboard layout nobody here owns. Nothing on the way there complains.
+// The scancode table in hid_keyboard.cpp is exactly the kind of thing that breaks
+// quietly: one wrong number and a single key types the wrong character on the phone,
+// on a keyboard layout nobody here owns. Nothing along the way complains.
 //
-// So this little cave presses keys at HidKeyboard and looks at the stones it carves.
-// No test tribe, no new build system — one main(), one check(), and a count at the
-// end. Build it with the client (target pm_hid_keyboard_test) and run it, or let
-// ctest do it.
+// So this feeds key events into HidKeyboard and checks the reports it produces. No
+// test framework and no new build system — one main(), one check(), and a count at
+// the end. Built with the client (target pm_hid_keyboard_test), run directly or via
+// ctest.
 
 #include "../src/input/hid_keyboard.h"
 
@@ -18,8 +18,8 @@ namespace {
 int g_checks = 0;
 int g_failures = 0;
 
-// NOT assert(): the client ships as Release, and Release carves NDEBUG, which makes
-// every assert vanish. A test that silently passes is worse than no test.
+// NOT assert(): the client ships as Release, which defines NDEBUG and compiles every
+// assert away. A test that silently passes is worse than no test.
 void check(bool condition, const std::string& what) {
     ++g_checks;
     if (condition) return;
@@ -50,8 +50,8 @@ void check_report(const uint8_t* report, uint8_t modifiers,
                 ", got " + bytes_to_text(report) + ")");
 }
 
-// Modifier bits, spelled out again so a wrong number in hid_keyboard.cpp cannot
-// quietly agree with itself.
+// The modifier bits are spelled out again here on purpose, so a wrong value in
+// hid_keyboard.cpp cannot quietly agree with itself.
 constexpr uint8_t L_CTRL  = 0x01;
 constexpr uint8_t L_SHIFT = 0x02;
 constexpr uint8_t L_ALT   = 0x04;
@@ -62,7 +62,7 @@ constexpr uint8_t R_ALT   = 0x40;
 constexpr uint8_t R_GUI   = 0x80;
 
 constexpr bool PLAIN = false;
-constexpr bool EXTRA = true;   // the keyboard shouted E0 first
+constexpr bool EXTRA = true;   // the scancode arrived with the E0 prefix
 
 void test_report_descriptor() {
     std::printf("report descriptor\n");
@@ -70,12 +70,12 @@ void test_report_descriptor() {
     const uint8_t* desc = pm::input::HidKeyboard::report_descriptor(&size);
     check(desc != nullptr, "descriptor exists");
     check(size > 0, "descriptor has a size");
-    // The phone builds its keyboard out of these bytes. Head and tail must be a
-    // proper Generic-Desktop/Keyboard collection or Android sees a stranger.
+    // The device builds its keyboard from these bytes. Start and end must form a
+    // proper Generic-Desktop/Keyboard collection or Android rejects the device.
     check(desc[0] == 0x05 && desc[1] == 0x01, "descriptor starts with Usage Page (Generic Desktop)");
     check(desc[2] == 0x09 && desc[3] == 0x06, "descriptor says Usage (Keyboard)");
     check(desc[size - 1] == 0xC0, "descriptor ends with End Collection");
-    // Asking without a place to write the size must not fall over.
+    // Calling it without an out-parameter for the size must not crash.
     check(pm::input::HidKeyboard::report_descriptor(nullptr) == desc,
           "descriptor pointer is the same without an out-size");
 }
@@ -91,13 +91,13 @@ void test_plain_keys() {
     check(kb.process_key(false, 0x1E, PLAIN, report), "A comes up");
     check_report(report, 0, {}, "A up is an empty report");
 
-    // Two keys at once keep their places, sorted by usage — B (0x05) after A (0x04)
-    // no matter which hand hit first.
+    // Two keys at once keep stable slots, sorted by usage — B (0x05) after A (0x04)
+    // regardless of which was pressed first.
     check(kb.process_key(true, 0x30, PLAIN, report), "B goes down");
     check(kb.process_key(true, 0x1E, PLAIN, report), "A goes down after B");
     check_report(report, 0, {0x04, 0x05}, "A and B ride in usage order");
 
-    // The same key pressed twice is still one key.
+    // The same key pressed twice still occupies exactly one slot.
     check(kb.process_key(true, 0x1E, PLAIN, report), "A pressed again");
     check_report(report, 0, {0x04, 0x05}, "a second A press changes nothing");
 }
@@ -117,12 +117,12 @@ void test_modifiers() {
     kb.process_key(false, 0x36, PLAIN, report);
     check_report(report, 0, {}, "both Shifts let go");
 
-    // Same scancode, different key — the E0 stone is what tells them apart.
+    // Same scancode, different key — the E0 prefix is what tells them apart.
     kb.process_key(true, 0x1D, PLAIN, report);
-    check_report(report, L_CTRL, {}, "plain 0x1D is left Strg");
+    check_report(report, L_CTRL, {}, "plain 0x1D is left Ctrl");
     kb.process_key(false, 0x1D, PLAIN, report);
     kb.process_key(true, 0x1D, EXTRA, report);
-    check_report(report, R_CTRL, {}, "extended 0x1D is right Strg");
+    check_report(report, R_CTRL, {}, "extended 0x1D is right Ctrl");
     kb.process_key(false, 0x1D, EXTRA, report);
 
     kb.process_key(true, 0x38, PLAIN, report);
@@ -136,34 +136,34 @@ void test_modifiers() {
     check_report(report, R_GUI, {}, "extended 0x5C is the right window key");
     kb.process_key(false, 0x5C, EXTRA, report);
 
-    // Letting go of something that was never held still has to be told: cave man
-    // may have walked in while the key was already down.
+    // A release for a key that was never seen pressed still has to be reported: the
+    // window may have gained focus while the key was already held.
     check(kb.process_key(false, 0x2A, PLAIN, report),
           "releasing an unheld modifier still sends a report");
 }
 
 void test_altgr_phantom_ctrl() {
-    std::printf("AltGr phantom Strg\n");
+    std::printf("AltGr phantom Ctrl\n");
     pm::input::HidKeyboard kb;
     uint8_t report[pm::input::HidKeyboard::REPORT_SIZE] = {};
 
-    // This is exactly what Windows sends for one press of AltGr: a left Strg nobody
-    // touched, then right Alt. Handing both to the phone turns AltGr+Q into
-    // Strg+AltGr+Q and the "@" never appears.
+    // This is exactly what Windows sends for a single AltGr press: a left Ctrl nobody
+    // touched, then right Alt. Forwarding both turns AltGr+Q into Ctrl+AltGr+Q and the
+    // "@" never appears.
     kb.process_key(true, 0x1D, PLAIN, report);
-    check_report(report, L_CTRL, {}, "the phantom Strg alone still looks like Strg");
+    check_report(report, L_CTRL, {}, "the phantom Ctrl alone still looks like Ctrl");
 
     kb.process_key(true, 0x38, EXTRA, report);
-    check_report(report, R_ALT, {}, "while AltGr is held the phantom Strg is masked out");
+    check_report(report, R_ALT, {}, "while AltGr is held the phantom Ctrl is masked out");
 
     kb.process_key(true, 0x10, PLAIN, report);
-    check_report(report, R_ALT, {0x14}, "AltGr+Q carries no Strg");
+    check_report(report, R_ALT, {0x14}, "AltGr+Q carries no Ctrl");
 
     kb.process_key(false, 0x10, PLAIN, report);
     kb.process_key(false, 0x38, EXTRA, report);
-    // The mask hides the bit, it does not delete it. A REAL Strg that is still down
-    // has to come back the moment AltGr goes up.
-    check_report(report, L_CTRL, {}, "the Strg bit is only hidden, not thrown away");
+    // The mask hides the bit, it does not clear the state. A REAL Ctrl that is still
+    // held has to reappear the moment AltGr is released.
+    check_report(report, L_CTRL, {}, "the Ctrl bit is only hidden, not discarded");
 }
 
 void test_extended_versus_keypad() {
@@ -177,8 +177,8 @@ void test_extended_versus_keypad() {
         uint8_t extended_usage;
         const char* name;
     };
-    // Every one of these numbers is the same on both sides of the E0 stone, and every
-    // one of them means a different key. Swapping a pair sends arrow-up as a "8".
+    // Each of these scancodes exists on both sides of the E0 prefix and means a
+    // different key on each. Swapping a pair would send arrow-up as "8".
     const Pair pairs[] = {
         {0x1C, 0x28, 0x58, "Enter vs keypad Enter"},
         {0x35, 0x38, 0x54, "the -/ key vs keypad /"},
@@ -209,14 +209,14 @@ void test_keys_the_board_does_not_have() {
     uint8_t report[pm::input::HidKeyboard::REPORT_SIZE] = {};
     std::memset(report, 0xEE, sizeof(report));
 
-    // A "no" is the whole point: the window then walks the Android keycode road
-    // instead, and the key does not disappear.
+    // Returning false is the whole point: the window then falls back to the Android
+    // keycode path and the key is not lost.
     check(!kb.process_key(true, 0x00, PLAIN, report), "scancode 0 is not a key");
     check(!kb.process_key(true, 0x54, PLAIN, report), "SysRq is not on the board");
     check(!kb.process_key(true, 0xFF, PLAIN, report), "a scancode past the table is not a key");
     check(!kb.process_key(true, 0x02, EXTRA, report), "an extended key nobody knows is not a key");
     check(report[0] == 0xEE, "a refused key leaves the report untouched");
-    check(!kb.process_key(true, 0x1E, PLAIN, nullptr), "no report stone, no work");
+    check(!kb.process_key(true, 0x1E, PLAIN, nullptr), "no report buffer, no work");
 }
 
 void test_rollover() {
@@ -224,7 +224,7 @@ void test_rollover() {
     pm::input::HidKeyboard kb;
     uint8_t report[pm::input::HidKeyboard::REPORT_SIZE] = {};
 
-    // A, S, D, F, G, H — six holes, six slots, still a proper report.
+    // A, S, D, F, G, H — six keys, six slots, still a valid report.
     const uint32_t six[] = {0x1E, 0x1F, 0x20, 0x21, 0x22, 0x23};
     for (uint32_t scancode : six) {
         kb.process_key(true, scancode, PLAIN, report);
@@ -232,19 +232,19 @@ void test_rollover() {
     check_report(report, 0, {0x04, 0x07, 0x09, 0x0A, 0x0B, 0x16},
                  "six keys fill all six slots in usage order");
 
-    // The seventh does not push anybody out — the spec says shout rollover instead.
+    // The seventh does not evict anyone — the spec says to report rollover instead.
     kb.process_key(true, 0x24, PLAIN, report);
     check_report(report, 0, {0x01, 0x01, 0x01, 0x01, 0x01, 0x01},
                  "the seventh key turns the whole report into rollover");
 
-    // Let one go and the report is a normal one again.
+    // Releasing one makes it a normal report again.
     kb.process_key(false, 0x1E, PLAIN, report);
     check_report(report, 0, {0x07, 0x09, 0x0A, 0x0B, 0x0D, 0x16},
                  "back to six keys, back to a normal report");
 }
 
 void test_release_all() {
-    std::printf("cave man walks away\n");
+    std::printf("window loses focus\n");
     pm::input::HidKeyboard kb;
     uint8_t report[pm::input::HidKeyboard::REPORT_SIZE] = {};
 
@@ -256,16 +256,16 @@ void test_release_all() {
     check_report(report, 0, {}, "letting go empties modifiers AND key slots");
     check(!kb.release_all(report), "letting go twice says nothing the second time");
 
-    // Only a modifier down is still "something held" — otherwise the phone SHOUTS
-    // IN CAPITALS forever after cave man walks to another window.
+    // A held modifier alone still counts as "something held" — otherwise the device
+    // keeps typing in capitals after the window loses focus.
     kb.process_key(true, 0x36, PLAIN, report);
     check(kb.release_all(report), "a lone Shift also has to be let go");
 
-    // Only a key down, no modifier.
+    // A held key with no modifier has to be released too.
     kb.process_key(true, 0x39, PLAIN, report);   // Space
     check(kb.release_all(report), "a lone key also has to be let go");
     check(!kb.release_all(report), "and then there is nothing left");
-    check(!kb.release_all(nullptr), "no report stone, no work");
+    check(!kb.release_all(nullptr), "no report buffer, no work");
 }
 
 } // namespace

@@ -13,7 +13,8 @@ struct SwsContext;
 
 namespace pm::stream {
 
-// Cave man keep copy of stream picture, make photo and moving picture on PC.
+// Keeps a copy of the current stream frame so screenshots and recordings can be
+// produced on the PC side.
 class CaptureController {
 public:
     CaptureController() = default;
@@ -38,12 +39,12 @@ private:
     AVStream* m_video_stream{nullptr};
     SwsContext* m_video_scaler{nullptr};
 
-    // Ugg! Cave man used to carve a brand new tablet for every single frame while
-    // recording (~3 MB per frame at 60 per second). Now one tablet gets reused.
+    // One reused frame for the whole recording. Allocating a fresh one per frame meant
+    // ~3 MB of allocation 60 times a second.
     AVFrame* m_encode_frame{nullptr};
     AVPacket* m_encode_packet{nullptr};
-    // Whatever shape the chosen encoder wants: YUV420P for software, often NV12 for
-    // the graphics card. Stored so the scaler converts into the right one.
+    // The pixel format the chosen encoder wants: YUV420P for software, usually NV12
+    // for hardware. Stored so the scaler converts into the right one.
     int m_encode_pixel_format{0}; // AVPixelFormat
 
     std::filesystem::path m_video_path;

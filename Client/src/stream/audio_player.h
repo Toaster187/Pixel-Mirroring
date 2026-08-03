@@ -6,12 +6,12 @@
 
 namespace pm::stream {
 
-// Cave man carry phone sound to PC speaker.
+// Plays the phone's audio through the PC's speakers.
 //
-// Ugg! No decoder here on purpose. The scrcpy server can hand us plain PCM
-// (audio_codec=raw), so the sound needs no unpacking at all — no codec config
-// dance, no extra FFmpeg library, and nothing that can desync. It costs about
-// 1.5 Mbit/s next to a 20 Mbit/s video stream, which on a home WLAN is nothing.
+// No decoder here, on purpose. The scrcpy server can send plain PCM
+// (audio_codec=raw), so there is nothing to unpack — no codec config packets, no
+// extra FFmpeg dependency, and nothing that can silently desync. It costs about
+// 1.5 Mbit/s next to a 20 Mbit/s video stream, which is negligible on a home WLAN.
 class AudioPlayer {
 public:
     AudioPlayer() = default;

@@ -1,6 +1,6 @@
 root = true
 
-# Ugg! Every fire in cave must write UTF-8. Umlauts (ä ö ü ß) break otherwise.
+# Every editor must write UTF-8, otherwise the German umlauts (ä ö ü ß) break.
 [*]
 charset = utf-8
 insert_final_newline = true

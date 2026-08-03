@@ -22,7 +22,9 @@ Android/app/src/main/java/dev/pixelmirroring/app/
     MainActivity.kt
     data/     PairedClientStore (persisted pairing state, DataStore-Preferences)
     network/  ApiModels, NetworkScanner (local network discovery data)
-    service/  MirroringService, BootReceiver, NotificationHelper, DiscoveryHttpServer, AdbWifiManager
+    service/  MirroringService, BootReceiver, MediaScannerReceiver, NotificationHelper,
+              DiscoveryHttpServer, AdbWifiManager
+Android/app/src/test/            JUnit4 + Robolectric unit tests (ApiModels, PairedClientStore)
 Android/app/proguard-rules.pro  R8 keep rules (manifest components, kotlinx-serialization models)
 Client/                        C++20 desktop client
     CMakeLists.txt              build config (CMake 3.25+, vcpkg toolchain)
@@ -30,7 +32,10 @@ Client/                        C++20 desktop client
     scrcpy-server.jar           unmodified upstream scrcpy server binary, pushed to the device at runtime
     src/
         main.cpp                 entry point (WinMain on Windows, main on POSIX); drives ADB/scrcpy/window/tray/settings together
-        settings.{h,cpp}         pm::Settings — persisted user settings (max_fps, max_size, encrypted PIN, brightness, compatibility mode, audio on/off)
+        settings.{h,cpp}         pm::Settings — persisted user settings: quality preset (BATTERY/BALANCED/MAXIMUM,
+                                 which carries max_fps + max_size + bitrate together), encrypted PIN, compatibility
+                                 mode, lowest brightness, screen off, send captures to phone, audio on/off,
+                                 UHID keyboard, auto-pause while minimized
         adb/                    pm::adb — wraps the adb CLI as a subprocess (discovery, tcpip connect, install/start app, shell exec, push, port fwd)
                                  plus pm::adb::ShellProcess, a killable long-running "adb shell" child
         stream/                 pm::stream — scrcpy wire protocol: raw video+audio+control sockets, VideoDecoder (FFmpeg),
@@ -83,21 +88,32 @@ which is otherwise unusual. Without it the APK is ~60 MB instead of ~4 MB. Conse
   `gradle assembleDebug -PcomposeTooling`.
 - R8 runs shrink-only on debuggable builds (no obfuscation), which is the low-risk mode.
 
-**Testing:** verification is essentially manual, with a physical/connected Android
-device, on both sides. The one exception is `Client/tests/hid_keyboard_test.cpp` — a
-standalone `main()` with a hand-rolled `check()` (deliberately **not** `assert`: the
-shipped build defines `NDEBUG` and would compile every assertion away). It pins the
-PC-scancode → HID-usage table, the AltGr phantom-Ctrl mask, extended-vs-keypad pairs
-and 6-key rollover. It builds as target `pm_hid_keyboard_test` (option
-`PM_BUILD_TESTS`, default ON), links nothing but `hid_keyboard.cpp`, and is neither
-installed nor packaged:
+**Testing:** verification is mostly manual, with a physical/connected Android device,
+on both sides. Anything involving the stream, the window, ADB or a real phone has no
+automated coverage at all — compiling is not evidence that it works.
 
-```
-ctest --test-dir build --output-on-failure
-```
+Two islands are automated:
 
-Android has only default JUnit/Espresso boilerplate. Do not add a test framework —
-extend the same pattern if something else needs pinning.
+- `Client/tests/hid_keyboard_test.cpp` — a standalone `main()` with a hand-rolled
+  `check()` (deliberately **not** `assert`: the shipped build defines `NDEBUG` and
+  would compile every assertion away). It pins the PC-scancode → HID-usage table, the
+  AltGr phantom-Ctrl mask, extended-vs-keypad pairs and 6-key rollover. It builds as
+  target `pm_hid_keyboard_test` (option `PM_BUILD_TESTS`, default ON), links nothing
+  but `hid_keyboard.cpp`, and is neither installed nor packaged. CI runs it.
+
+  ```
+  ctest --test-dir build --output-on-failure
+  ```
+
+- `Android/app/src/test/` — JUnit4 unit tests (Robolectric is on the test classpath)
+  over the `kotlinx-serialization` wire models (`ApiModelsTest`) and the pairing rules
+  in `PairedClientStore` (`PairedClientStoreTest`). Run with `gradle test` from
+  `Android/`. **CI does not run these** — `build.yml` only does `gradle assembleDebug`,
+  so run them yourself when you touch either file.
+
+The instrumented (`androidTest`) source set is still Espresso boilerplate. Do not add a
+test framework to either side — extend the existing pattern if something else needs
+pinning.
 
 **CI**: two workflows.
 - `.github/workflows/build.yml` — on every pull request, on pushes to `main`, and on
@@ -146,7 +162,10 @@ extend the same pattern if something else needs pinning.
 
 - **C++ (Client)**: C++20; everything under namespace `pm::` (`pm::adb`, `pm::stream`, `pm::window`, `pm::input`, `pm::tray`, `pm::network`); classes PascalCase, methods snake_case, constants SCREAMING_SNAKE_CASE, member variables prefixed `m_`; ownership via `std::unique_ptr` (raw pointers are non-owning only); no exceptions — use `bool`/`std::optional` return values for error handling.
 - **Kotlin (Android)**: package `dev.pixelmirroring.app.*`; foreground-service-based architecture; Compose + Material 3 for UI; Kotlin coroutines for async.
-- **Code comments** (both C++ and Kotlin) are written in a deliberately informal "caveman" register (e.g. `// Ugg! ADB not found ... Downloading from Google...`) per project convention in `AGENTS.md` — this applies only to in-code comments, not to user-facing communication, commit messages, or documentation, which should stay normal and professional (German or English).
+- **Code comments** (both C++ and Kotlin) are plain, professional technical English. Earlier revisions used a deliberately informal "caveman" register (`// Ugg! ...`, `// MEOW. ...`, "cave man", "stones", "rocks"); that convention is retired. Do not add new comments in that style, and rewrite any survivor you touch. What a comment should say:
+  - **Why, not what.** `// AltGr arrives with a phantom left Ctrl, so mask it out` earns its place; `// increment i` does not.
+  - Explain the non-obvious constraint — a fixed wire order, a workaround for an Android quirk, a regression the line prevents. Cite the device or issue it was verified against where that is known (`// Verified on a Pixel 9`, `// see issue #46`).
+  - English is the default — it is what most of the codebase already uses. German is fine where a comment quotes a German UI string or an Android settings path the reader has to find on the phone, and where a file is already German throughout (the CI workflows).
 - No hardcoded paths; conditional compilation goes through CMake, not ad-hoc preprocessor branches.
 
 ### Text encoding / German umlauts (mandatory)

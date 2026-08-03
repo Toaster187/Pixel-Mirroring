@@ -24,23 +24,30 @@ geöffnet: **Video -> Audio -> Control**.
 Pixel-Mirroring/
 |-- Android/              Kotlin/Jetpack Compose App
 |   |-- app/proguard-rules.pro  R8 Keep-Regeln (Manifest-Klassen, Serializer)
+|   |-- app/src/test/     JUnit4-Unit-Tests (ApiModels, PairedClientStore), Robolectric im Klassenpfad
 |   `-- app/src/main/java/dev/pixelmirroring/app/
 |       |-- MainActivity.kt
 |       |-- data/         PairedClientStore, Persistenz
 |       |-- network/      ApiModels, lokale Netzwerkdaten
-|       `-- service/      MirroringService, BootReceiver, NotificationHelper, DiscoveryHttpServer, AdbWifiManager
+|       `-- service/      MirroringService, BootReceiver, MediaScannerReceiver,
+|                         NotificationHelper, DiscoveryHttpServer, AdbWifiManager
 |-- Client/               C++20 Desktop Client
-|   |-- CMakeLists.txt    Build-Config (CMake 3.25+)
+|   |-- CMakeLists.txt    Build-Config (CMake 3.25+, vcpkg-Toolchain)
 |   |-- vendor/platform-tools/  Gebündelte Android Platform Tools für das Desktop-Paket
+|   |-- scrcpy-server.jar Unveränderte scrcpy-Server-JAR, wird zur Laufzeit aufs Gerät gepusht
+|   |-- tests/            Eigenständige Selbsttests (nacktes main() + check(), kein Framework)
+|   |-- vcpkg/            Git-Submodul (kompletter vcpkg-Checkout) — riesig, aus Suchen ausklammern
 |   `-- src/
 |       |-- main.cpp      Entry Point (WinMain auf Windows, main auf POSIX)
-|       |-- settings.*    Persistente Einstellungen inkl. Ton an/aus
+|       |-- settings.*    Persistente Einstellungen (Qualitätsstufe, PIN, Ton, UHID, Auto-Pause, ...)
 |       |-- adb/          ADB Protocol Client + ShellProcess (abbrechbarer adb-shell-Prozess)
 |       |-- stream/       scrcpy Protocol, VideoDecoder, VideoRenderer, AudioPlayer, CaptureController
 |       |-- input/        Input Forwarding (Mouse, Keyboard, Touch) + HidKeyboard (UHID-Tastatur)
 |       |-- network/      Network Discovery (cpp-httplib, Subnet Scan)
 |       |-- window/       Plattform-spezifische Fenster (Win32; Cocoa unfertig)
-|       `-- tray/         System Tray (Win32)
+|       |-- tray/         System Tray (Win32)
+|       `-- util/         encoding.* — die EINZIGEN Umwandlungen zwischen UTF-8,
+|                         std::wstring und std::filesystem::path
 `-- scrcpy_download/      scrcpy Server Binary
 ```
 
@@ -155,7 +162,7 @@ ADB **bleibt nicht dauerhaft aktiviert** (Sicherheitslücke geschlossen). Stattd
 - Member-Variablen: `m_` Prefix
 - Ownership: `std::unique_ptr` für Ownership, Raw Pointer nur non-owning
 - Error Handling: Return-Werte (`bool`, `std::optional`), keine Exceptions
-- Kommentare: Caveman-Sprache
+- Kommentare: siehe [Code-Kommentare](#code-kommentare)
 
 ### Kotlin (Android App)
 
@@ -163,7 +170,25 @@ ADB **bleibt nicht dauerhaft aktiviert** (Sicherheitslücke geschlossen). Stattd
 - UI: Jetpack Compose mit Material 3
 - Async: Kotlin Coroutines
 - Packages: `dev.pixelmirroring.app.*`
-- Kommentare: Caveman-Sprache
+- Kommentare: siehe [Code-Kommentare](#code-kommentare)
+
+### Code-Kommentare
+
+Kommentare sind sachlicher Fließtext, in beiden Sprachen dieselbe Regel. Frühere
+Stände benutzten einen absichtlich primitiven "Caveman"-Stil (`// Ugg! ...`,
+`// MEOW. ...`, "cave man", "Steine", "Felsen"); diese Konvention ist abgeschafft.
+Keine neuen Kommentare in diesem Stil, und wer einen alten anfasst, schreibt ihn um.
+
+- **Warum, nicht was.** `// AltGr kommt unter Windows immer mit einem Phantom-Strg,
+  das hier herausmaskiert wird` verdient seinen Platz, `// i erhöhen` nicht.
+- Die nicht offensichtliche Randbedingung erklären: eine feste Reihenfolge auf dem
+  Draht, ein Workaround für eine Android-Eigenheit, ein Regressionsfall, den die
+  Zeile verhindert. Wo bekannt, die Quelle nennen (`// Auf einem Pixel 9 geprüft`,
+  `// siehe Issue #46`).
+- Standardsprache ist Englisch — so ist der größte Teil des Codes geschrieben.
+  Deutsch ist dort richtig, wo ein Kommentar einen deutschen UI-Text oder einen
+  Einstellungspfad am Handy zitiert, und in Dateien, die durchgängig deutsch sind
+  (die CI-Workflows).
 
 ### Plattformübergreifend
 
@@ -378,6 +403,11 @@ jedem Textfeld korrekt dargestellt werden. Damit das dauerhaft hält, gilt:
 ### Android
 
 - Gradle Build: `gradle assembleDebug`
+- Unit-Tests: `gradle test` — JUnit4 über die Serialisierung der Wire-Modelle
+  (`ApiModelsTest`) und die Pairing-Regeln in `PairedClientStore`
+  (`PairedClientStoreTest`). **Die CI führt sie nicht aus** (`build.yml` baut nur
+  `assembleDebug`), also selbst laufen lassen, wer eine der beiden Dateien anfasst.
+- Der `androidTest`-Sourceset ist weiterhin Espresso-Boilerplate.
 - Manueller Test auf physischem Gerät
 
 ### CI
@@ -387,7 +417,7 @@ Windows-Client mit MSVC (gleicher Compiler, gleiches `/utf-8` wie die Auslieferu
 und lässt `ctest` laufen - ohne Packaging. `release.yml` baut zusätzlich die
 Installer und nur auf `v*`-Tags.
 
-### Der einzige automatische Test
+### Der einzige automatische Test auf der Client-Seite
 
 `Client/tests/hid_keyboard_test.cpp` - ein eigenständiges `main()` mit
 handgeschriebenem `check()` (bewusst **kein** `assert`: die Auslieferung ist ein
@@ -417,13 +447,13 @@ falsche Tonhöhe auf), Umlauteingabe und die Aufnahme. Kompilieren heißt hier n
 
 ---
 
-## Zusammenfassung der Caveman-Regeln
+## Sprache je nach Kontext
 
 | Kontext | Sprache |
 |---|---|
-| Internes Denken / Reasoning | Caveman |
 | User-Kommunikation | Normales Deutsch, professionell & technisch |
-| Code-Kommentare (C++) | Caveman |
-| Code-Kommentare (Kotlin) | Caveman |
+| Code-Kommentare (C++) | Sachlich, in der Regel Englisch — siehe [Code-Kommentare](#code-kommentare) |
+| Code-Kommentare (Kotlin) | Sachlich, in der Regel Englisch — siehe [Code-Kommentare](#code-kommentare) |
 | Commit Messages | Normales Deutsch oder Englisch |
 | Dokumentation | Normales Deutsch oder Englisch |
+| UI-Texte der App | Deutsch (inkl. korrekter Umlaute, siehe Textkodierung) |

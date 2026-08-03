@@ -42,13 +42,13 @@ constexpr const char* ANDROID_PACKAGE = "dev.pixelmirroring.app";
 constexpr const char* ANDROID_SERVICE = "dev.pixelmirroring.app/.service.MirroringService";
 constexpr int ADB_TCP_PORT = 5555;
 constexpr int HEARTBEAT_INTERVAL_MS = 5000;
-// Where dropped rocks land on the phone. Every file cave on Android knows this one.
+// Where dropped files land on the phone. Every Android file manager knows this path.
 constexpr const char* DROP_TARGET_DIR = "/sdcard/Download";
 
-// Ugg! Both roads between rock-names and UTF-8 used to be carved twice, once here
-// and once in the adb cave. Now there is ONE pair, and BOTH ends of every road use
-// it: the window paints with CP_UTF8, and adb is started with CreateProcessW, so
-// there is no longer a second letter-table anywhere for a name to fall into.
+// Both conversions between file names and UTF-8 used to exist twice, once here and
+// once in pm::adb. There is one pair now and both ends of the chain use it: the
+// window renders with CP_UTF8 and adb is spawned with CreateProcessW, so no second
+// code page is left anywhere for a name to fall into.
 using pm::util::path_from_utf8;
 using pm::util::path_to_utf8;
 
@@ -86,14 +86,14 @@ struct SetupState {
     std::string device_name;
 };
 
-// Cave man remember sun brightness before making screen dark
+// The phone's brightness as it was before we dimmed it, so it can be put back.
 struct SavedBrightness {
     int brightness = -1;           // -1 = not saved
     int brightness_mode = -1;      // -1 = not saved, 0 = manual, 1 = auto
-    std::string device_id;         // which phone this belong to
+    std::string device_id;         // which phone this belongs to
 };
 
-// Cave man read sun level from phone before smashing it to zero
+// Reads the current brightness off the phone before it gets turned down.
 SavedBrightness read_brightness(pm::adb::AdbClient& adb, const std::string& device_id) {
     SavedBrightness saved;
     saved.device_id = device_id;
@@ -116,7 +116,7 @@ SavedBrightness read_brightness(pm::adb::AdbClient& adb, const std::string& devi
     return saved;
 }
 
-// Cave man put sun brightness back to old level
+// Puts the saved brightness back on the phone.
 void restore_brightness(pm::adb::AdbClient& adb, const SavedBrightness& saved) {
     if (saved.device_id.empty() || saved.brightness < 0) return;
 
@@ -128,9 +128,9 @@ void restore_brightness(pm::adb::AdbClient& adb, const SavedBrightness& saved) {
         "settings put system screen_brightness " + std::to_string(saved.brightness));
 }
 
-// Cave man read phone's OWN rotation switch instead of guessing. The toggle in
-// the menu must always start out matching whatever the human already set on the
-// phone — never a fixed app default that quietly flips it. See issue #46.
+// Reads the phone's own rotation setting instead of guessing. The menu toggle must
+// always start out matching whatever the user already set on the phone — never a
+// fixed app default that quietly flips it. See issue #46.
 bool read_auto_rotate(pm::adb::AdbClient& adb, const std::string& device_id) {
     std::string res = adb.execute_shell_command(device_id, "settings get system accelerometer_rotation");
     res.erase(0, res.find_first_not_of(" \n\r\t"));
@@ -147,10 +147,9 @@ private:
     std::function<void()> fn_;
 };
 
-// Ugg! Cave man used to throw helper hunters into the woods and forget them
-// (std::thread::detach). When the cave burned down they were still out there,
-// writing on stones that no longer existed. Now every hunter is counted and
-// waited for before the fire goes out.
+// Background work used to be std::thread::detach'ed and then forgotten. On shutdown
+// those threads were still running and writing through references to objects that no
+// longer existed. Every worker is tracked here and joined before teardown.
 class BackgroundTasks {
 public:
     ~BackgroundTasks() { join_all(); }
@@ -219,7 +218,7 @@ namespace {
     bool g_pin_done = false;
     WNDPROC g_old_edit_proc;
 
-    // Ugg! Window give wide chars, rest of tribe speak UTF-8. Translate!
+    // Win32 hands out wchar_t, every std::string in this codebase is UTF-8.
     std::string wide_to_utf8(const wchar_t* wstr) {
         if (!wstr || !wstr[0]) return "";
         int len = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, nullptr, 0, nullptr, nullptr);
@@ -344,7 +343,8 @@ std::string prompt_user_for_pin(void* parent_hwnd = nullptr) {
         while (true) {
             const BOOL got = GetMessageW(&msg, nullptr, 0, 0);
             if (got == 0) {
-                // Ugg! Do not swallow the "leave cave" shout while PIN box is open.
+                // WM_QUIT arrived while the PIN box owns the loop. Re-post it so the
+                // main message loop still sees it and the app can shut down.
                 PostQuitMessage(static_cast<int>(msg.wParam));
                 break;
             }
@@ -406,7 +406,8 @@ bool path_exists(const std::filesystem::path& path) {
 std::filesystem::path get_config_dir() {
 #ifndef PM_PORTABLE_BUILD
 #ifdef _WIN32
-    // CAVE MAN NO WRITE APPDATA FOR PORTABLE. ONLY EXE DIR.
+    // A portable build must not touch %LOCALAPPDATA% — it keeps everything next to
+    // the EXE. Only the installed build gets a per-user config directory.
     const char* local_app_data = std::getenv("LOCALAPPDATA");
     if (local_app_data && local_app_data[0] != '\0') {
         std::filesystem::path path = std::filesystem::path(local_app_data) / "PixelMirroring";
@@ -503,8 +504,9 @@ std::optional<std::filesystem::path> find_android_apk() {
     return std::nullopt;
 }
 
-// ADB babbles many lines ("Performing Streamed Install" first!). Dig out the one
-// line that says what actually broke, else last line with words on it.
+// adb prints several lines and the useful one is rarely the first ("Performing
+// Streamed Install" comes first). Pick the line that names the failure, otherwise
+// fall back to the last non-empty line.
 std::string extract_adb_reason(const std::string& output) {
     std::istringstream stream(output);
     std::string line;
@@ -516,7 +518,7 @@ std::string extract_adb_reason(const std::string& output) {
 
         const auto failure = line.find("Failure");
         if (failure != std::string::npos) {
-            return line.substr(failure); // "Failure [INSTALL_FAILED_...]" - the good stuff
+            return line.substr(failure); // "Failure [INSTALL_FAILED_...]" — the actual reason
         }
         if (line.find("failed") != std::string::npos || line.find("Error") != std::string::npos) {
             fallback = line;
@@ -528,7 +530,7 @@ std::string extract_adb_reason(const std::string& output) {
     return fallback;
 }
 
-// Ugg! "Did not work" tells human nothing. Say WHICH stone lies in the way.
+// "Installation failed" tells the user nothing actionable. Name the actual blocker.
 std::string build_install_error_message(pm::adb::AdbClient& adb, const std::string& device_id) {
     const std::string error = adb.last_install_error();
 
@@ -538,8 +540,9 @@ std::string build_install_error_message(pm::adb::AdbClient& adb, const std::stri
         error.find("signatures do not match") != std::string::npos;
 
     if (signature_clash) {
-        // Old app sits in other user or private space. Cave man NEVER touch other caves,
-        // so human must clear it there. We only point finger at the right cave.
+        // An older copy sits in another user profile or the private space. We never
+        // install into or uninstall from profiles other than the active one, so the
+        // user has to clear it there — all we can do is name the right profile.
         std::string where = "einem anderen Profil";
         auto users = adb.users_with_app(device_id, ANDROID_PACKAGE);
         if (!users.empty()) {
@@ -605,14 +608,14 @@ bool start_stream(
     std::atomic<bool>* out_phone_auto_rotate
 );
 
-// Ugg! A switch that is on but does nothing is worse than no switch at all. When
-// the phone refuses the virtual keyboard, cave man says so once, out loud — the
-// status line under the picture is invisible while the stream runs.
+// A switch that is on but does nothing is worse than no switch at all. When the
+// phone refuses the virtual keyboard, say so once in a dialog — the status line
+// under the video is not visible while the stream is running.
 //
-// ONLY for the hand that just flipped the switch in the menu. On an automatic
-// connect this stone stays on the ground: a modal wall in front of a cave man who
-// is waiting for the picture answers a question he did not ask, and the switch has
-// already turned itself off, so the menu tells the same story next time he looks.
+// ONLY for a user who just flipped the switch in the menu. On an automatic connect
+// this stays silent: a modal box in front of somebody waiting for the picture
+// answers a question they did not ask, and the switch has already turned itself
+// off, so the menu tells the same story next time they open it.
 void show_uhid_unavailable_message(pm::window::IWindow& window) {
 #ifdef _WIN32
     MessageBoxW(
@@ -628,8 +631,8 @@ void show_uhid_unavailable_message(pm::window::IWindow& window) {
 #endif
 }
 
-// user_requested = the human pressed Ctrl+U / used the menu. Then we also type when
-// the lock state cannot be read; on automatic connects we stay quiet instead.
+// user_requested = the user pressed Ctrl+U or used the menu. Then we type the PIN
+// even when the lock state cannot be read; on automatic connects we stay quiet.
 bool unlock_device_if_needed(const std::string& device_id, pm::window::IWindow* window = nullptr,
                              bool user_requested = false);
 
@@ -648,7 +651,7 @@ std::optional<pm::adb::Device> wait_for_usb_authorization(
         auto usb = find_usb_device(devices);
         if (!usb) {
             window.set_status_text("Warte auf USB-Gerät...");
-            requested_reconnect = false; // reset state
+            requested_reconnect = false; // device unplugged — allow another reconnect attempt
         } else {
             if (usb->state == "unauthorized") {
                 window.set_status_text("Bitte USB-Debugging auf dem Handy erlauben.");
@@ -677,7 +680,8 @@ std::optional<pm::adb::Device> connect_configured_device(
 ) {
     pm::network::NetworkScanner scanner;
 
-    // Ugg! Maybe the cave connection from before is still warm — no need to wake ADB again.
+    // The previous session may still be inside the phone's 60s idle window, in which
+    // case the TCP device is already connected and ADB does not need waking at all.
     if (!setup_state.device_ip.empty()) {
         auto devices = adb.get_connected_devices();
         if (auto tcp = find_tcp_device(devices, setup_state.device_ip)) {
@@ -687,7 +691,7 @@ std::optional<pm::adb::Device> connect_configured_device(
 
     if (should_stop) return std::nullopt;
 
-    // Ugg! ADB is off cold — poke the phone's discovery server to wake it up first.
+    // ADB is off. Ask the phone's discovery server to turn it back on before connecting.
     if (!setup_state.device_ip.empty()) {
         window.set_status_text("Wecke Gerät " + setup_state.device_ip + "...");
         if (auto discovered = scanner.request_connect(setup_state.device_ip, client_id, client_name)) {
@@ -739,7 +743,7 @@ bool run_first_time_setup(
         return false;
     }
 
-    // Cave man check if app already on phone before trying install.
+    // Skip the APK push entirely when the app is already there.
     bool app_installed = adb.is_app_installed(usb_device->id, ANDROID_PACKAGE);
 
     if (!app_installed) {
@@ -762,23 +766,22 @@ bool run_first_time_setup(
             return false;
         }
     } else {
-        // App already on phone, skip APK install.
+        // App already installed, so no APK push — but it may still be paired to a
+        // DIFFERENT PC. The phone stores exactly one clientId and never drops it on
+        // its own; nothing in the app ever calls removePairedClient(). So once this
+        // PC's client_id.txt changes (the "Werkseinstellungen" menu deletes it), the
+        // phone answers every /connect with 403 and there is no way back.
         //
-        // Ugg! But it may still remember a DIFFERENT PC. The phone stores exactly one
-        // paired clientId and never forgets it on its own — nothing in the app ever
-        // calls removePairedClient(). So once this PC's client_id.txt changes (the
-        // "Werkseinstellungen" menu deletes it!), the phone answers every /connect
-        // with 403 and the PC is locked out for good, with no way back.
-        //
-        // Running setup over USB means the human is holding the phone, cable in hand.
-        // That is proof enough to start the pairing over: wipe the app's stored state
-        // so the fresh clientId gets adopted on the next /connect. The permission is
-        // re-granted right below, because clearing the data drops it too.
+        // Running setup over USB means the user is physically holding the phone with
+        // a cable attached. That is enough proof of ownership to restart the pairing:
+        // clear the app's stored state so the new clientId is adopted on the next
+        // /connect. WRITE_SECURE_SETTINGS is re-granted just below, because clearing
+        // the app data revokes it too.
         window.post_task([&window]() { window.set_status_text("Alte Kopplung wird gelöst..."); });
         adb.execute_shell_command(usb_device->id, std::string("pm clear ") + ANDROID_PACKAGE);
     }
 
-    // Cave man check if permission already granted before yelling at phone.
+    // Skip the grant when the permission survived from an earlier setup.
     bool has_perm = adb.has_permission(usb_device->id, ANDROID_PACKAGE, "android.permission.WRITE_SECURE_SETTINGS");
 
     if (!has_perm) {
@@ -845,7 +848,8 @@ bool run_first_time_setup(
         window.set_status_text("Verbunden: " + device_ip);
     });
     
-    // Cave man run unlock and stream start in parallel for sub-second startup!
+    // Unlocking and starting the stream do not depend on each other. Running them
+    // in parallel keeps first-picture latency under a second.
     std::string tcp_id = tcp_device->id;
     auto unlock_future = std::async(std::launch::async, [tcp_id, &window]() {
         return unlock_device_if_needed(tcp_id, &window);
@@ -906,7 +910,7 @@ bool start_stream(
     pm::stream::ScrcpyClient::Config config;
     config.device_id = device_id;
 
-    // MEOW. WELD SETTINGS TO CONFIG.
+    // Translate the saved settings into the scrcpy server command line.
     pm::Settings settings = pm::load_settings();
     const pm::QualitySpec quality = pm::quality_spec(settings.m_quality);
     config.max_fps = quality.max_fps;
@@ -916,7 +920,8 @@ bool start_stream(
     config.audio = settings.m_audio_enabled;
 
     if (settings.m_lowest_brightness) {
-        // CAVE MAN DECREASE SUN SHINE SO SMARTPHONE SCREEN IS DARKEST SHADE OF GREY
+        // Remember the phone's current brightness, then turn it all the way down.
+        // This only dims via ADB; m_screen_off below is what really turns the panel off.
         std::string dev_id = device_id;
         tasks.run([dev_id, out_saved_brightness]() {
             pm::adb::AdbClient adb;
@@ -927,8 +932,8 @@ bool start_stream(
         });
     }
 
-    // Cave man read phone's rotation switch, never sets it — the menu toggle
-    // must start out exactly where the phone already was (see issue #46).
+    // Reads the phone's rotation setting, never writes it — the menu toggle has to
+    // start out exactly where the phone already was (see issue #46).
     {
         std::string dev_id = device_id;
         pm::window::IWindow* w = &window;
@@ -955,7 +960,7 @@ bool start_stream(
     });
 
     if (!scrcpy.start(config)) {
-        // Cave man speaks to the window only through the UI thread, like everywhere else.
+        // Window state is only ever touched from the UI thread, as everywhere else.
         window.post_task([&window]() {
             window.set_app_state(pm::window::AppState::SCANNING);
             window.set_status_text("Stream konnte nicht gestartet werden.");
@@ -976,25 +981,26 @@ bool start_stream(
 
     input.set_device_size(w, h);
 
-    // The control socket only exists once the stream is up, so the phone's light is
-    // dealt with here and not next to the brightness dance above. The "else" is not
-    // dead weight: it catches a session whose light-back-on word never arrived.
+    // The control socket only exists once the stream is up, which is why the panel
+    // power mode is handled here and not next to the brightness code above. The
+    // "else" is not dead weight: it catches a session whose "panel back on" message
+    // never reached the phone.
     if (settings.m_screen_off) {
         scrcpy.inject_screen_power_mode(false);
     } else if (scrcpy.screen_forced_off()) {
         scrcpy.inject_screen_power_mode(true);
     }
 
-    // Ugg! The USB keyboard can only be built once the control hole is open, and
-    // only on a phone that actually allows it — asking a phone that does not kills
-    // the whole control thread on the other side (see device_supports_uhid).
+    // The virtual keyboard can only be created once the control socket is open, and
+    // only on a phone that actually allows it — sending UHID_CREATE to one that does
+    // not kills the server's entire control thread (see device_supports_uhid).
     bool uhid_keyboard = false;
     if (settings.m_uhid_keyboard) {
         uhid_keyboard = input.enable_uhid_keyboard();
         if (!uhid_keyboard) {
-            // Turn the wish off instead of leaving a switch on that does nothing.
-            // No modal wall here — see show_uhid_unavailable_message. The refusal is
-            // already in stream.log, and the menu shows the switch off from now on.
+            // Persist the switch as off instead of leaving one on that does nothing.
+            // No dialog here — see show_uhid_unavailable_message. The refusal is already
+            // in stream.log, and the menu shows the switch off from now on.
             pm::Settings stored = pm::load_settings();
             stored.m_uhid_keyboard = false;
             pm::save_settings(stored);
@@ -1013,8 +1019,8 @@ bool start_stream(
     return true;
 }
 
-// What the phone is doing right now. "known" says whether we could read the lock
-// state at all — if we could not, cave man must NOT start smashing keys blindly.
+// What the phone is doing right now. "known" says whether the lock state could be
+// read at all — if it could not, we must NOT start typing the PIN blindly.
 struct DeviceLockState {
     bool screen_on = true;
     bool locked = false;
@@ -1022,7 +1028,7 @@ struct DeviceLockState {
     bool low_power = false;
 };
 
-// Cave man splits the answer at the __DIV__ marks he asked the phone to print.
+// Splits the reply at the __DIV__ markers the shell command was told to print.
 std::vector<std::string> split_sections(const std::string& text, const std::string& marker) {
     std::vector<std::string> parts;
     size_t start = 0;
@@ -1038,8 +1044,8 @@ std::vector<std::string> split_sections(const std::string& text, const std::stri
     return parts;
 }
 
-// Ugg! Reads a flag like "deviceLocked=true" / "deviceLocked=1". Android says it
-// both ways depending on version, and the old code only understood "=0".
+// Reads a flag like "deviceLocked=true" or "deviceLocked=1". Android prints it both
+// ways depending on version, so both spellings have to be accepted.
 bool read_bool_flag(const std::string& text, const std::string& key, bool* out) {
     const auto pos = text.find(key);
     if (pos == std::string::npos) return false;
@@ -1060,8 +1066,8 @@ bool read_bool_flag(const std::string& text, const std::string& key, bool* out) 
 DeviceLockState read_lock_state(pm::adb::AdbClient& adb, const std::string& device_id) {
     DeviceLockState state;
 
-    // One round trip for everything, exactly like the old code did. grep runs on the
-    // phone, so barely any output travels back over the wire.
+    // One round trip for all four questions. The greps run on the phone, so only a
+    // few lines travel back over the wire.
     const std::string out = adb.execute_shell_command(device_id,
         "dumpsys power | grep -iE 'mInteractive|mWakefulness'"
         "; echo __DIV__; dumpsys trust | grep -i '(current)'"
@@ -1087,10 +1093,10 @@ DeviceLockState read_lock_state(pm::adb::AdbClient& adb, const std::string& devi
         state.screen_on = false;
     }
 
-    // Lock: look inside the CURRENT user's block. The old code only searched the
-    // one line holding "(current):", but Android prints deviceLocked on a LATER
-    // line — so it almost never saw "already unlocked" and typed the PIN into
-    // whatever was on screen. That is how a home screen widget got launched.
+    // Lock: search inside the CURRENT user's block, not just the line that holds
+    // "(current):". Android prints deviceLocked on a LATER line, so a single-line
+    // search almost never saw "already unlocked" and typed the PIN into whatever was
+    // on screen — that is how home screen widgets got launched by accident.
     const size_t current_pos = trust.find("(current)");
     if (current_pos != std::string::npos) {
         const std::string block = trust.substr(current_pos, 400);
@@ -1126,7 +1132,8 @@ bool unlock_device_if_needed(const std::string& device_id, pm::window::IWindow* 
 
     DeviceLockState state = read_lock_state(adb, device_id);
     if (state.known && !state.locked && state.screen_on) {
-        // Cave man see screen already open, do not key smash!
+        // Screen on and unlocked already — typing anything here would land in
+        // whatever app has focus.
         return true;
     }
 
@@ -1150,27 +1157,27 @@ bool unlock_device_if_needed(const std::string& device_id, pm::window::IWindow* 
         }
     }
     
-    // Cave man refuses to type into a phone he cannot prove is locked. Without this
-    // guard the keys land on the home screen and open whatever widget has focus —
-    // that is how the weather app kept popping up. An explicit Ctrl+U is different:
-    // there the human asked for it, so we type even when the state is unreadable.
+    // Never type into a phone that cannot be proven locked. Without this guard the
+    // keystrokes land on the home screen and trigger whatever widget has focus — that
+    // is how the weather app kept opening itself. An explicit Ctrl+U is different:
+    // the user asked for it, so type even when the state is unreadable.
     if (!state.known && !user_requested) {
         return true;
     }
 
-    // ONE adb call, exactly like before — the waits happen ON THE PHONE, so this
-    // costs a single round trip and stays as fast as it always was.
+    // ONE adb call: the sleeps run ON THE PHONE, so the whole unlock costs a single
+    // round trip.
     //
-    // 224 = WAKEUP, 66 = ENTER brings up the PIN pad, digits, 66 = submit.
-    // Do NOT replace the ENTER with "wm dismiss-keyguard": on a Pixel that opens the
-    // FINGERPRINT prompt instead of the PIN pad, the digits then go nowhere, and the
-    // unlock hangs on the sensor. Verified on a Pixel 9.
+    // 224 = WAKEUP, 66 = ENTER brings up the PIN pad, then the digits, then 66 to
+    // submit. Do NOT replace the ENTER with "wm dismiss-keyguard": on a Pixel that
+    // opens the FINGERPRINT prompt instead of the PIN pad, the digits go nowhere and
+    // the unlock hangs on the sensor. Verified on a Pixel 9.
     //
-    // The only real change against the old line: the two short sleeps. Previously
-    // everything was fired in one breath ("input keyevent 224 66 <digits> 66"), so on
-    // a sleeping phone the digits arrived before the PIN pad existed and were dropped
-    // — that was the "PIN falsch" on automatic connect, while a later Ctrl+U worked
-    // simply because the phone was already awake by then.
+    // The two short sleeps are load-bearing. Firing everything in one breath
+    // ("input keyevent 224 66 <digits> 66") meant that on a sleeping phone the digits
+    // arrived before the PIN pad existed and were dropped — that was the "PIN falsch"
+    // on automatic connect, while a later Ctrl+U worked simply because the phone was
+    // awake by then.
     const bool slow = settings.m_compatibility_mode;
 
     std::string digits;
@@ -1192,7 +1199,7 @@ bool unlock_device_if_needed(const std::string& device_id, pm::window::IWindow* 
 
 static int app_main() {
 #ifdef _WIN32
-    // Cave man check for single instance!
+    // Only one instance may run. A second launch hands focus to the first and exits.
     HANDLE mutex = CreateMutexA(nullptr, TRUE, "PixelMirroringSingleInstanceMutex");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         HWND existing_hwnd = FindWindowA("PixelMirroringWindowClass", nullptr);
@@ -1229,7 +1236,7 @@ static int app_main() {
     window->set_app_state(pm::window::AppState::SETUP);
     window->set_status_text("");
 
-    // MEOW. INITIAL LOAD SETTINGS AND SYNCHRONIZE CHECKBOXES.
+    // Load the saved settings once and sync every menu checkbox to them.
     pm::Settings initial_settings = pm::load_settings();
     window->set_quality_preset(static_cast<int>(initial_settings.m_quality));
     window->set_compatibility_mode(initial_settings.m_compatibility_mode);
@@ -1240,7 +1247,7 @@ static int app_main() {
     window->set_uhid_keyboard(initial_settings.m_uhid_keyboard);
     window->set_auto_pause_minimized(initial_settings.m_auto_pause_minimized);
 
-    SavedBrightness saved_brightness; // Cave man remember phone sun level
+    SavedBrightness saved_brightness; // the phone's brightness before we dimmed it
     std::atomic<bool> phone_auto_rotate{true}; // Mirrors the phone's OWN rotation switch, never sets a default
     std::atomic<bool> should_stop{false};
     pm::stream::ScrcpyClient scrcpy;
@@ -1256,42 +1263,43 @@ static int app_main() {
     pm::stream::VideoRenderer renderer;
     pm::input::InputHandler input(&scrcpy);
 
-    // Ugg! Building the fake keyboard means asking the phone first, and that takes
-    // long enough for cave man to hit the stone a second time. The builder cannot see
-    // the second hit, finishes anyway and switches the keyboard on — while the saved
-    // stone already says "off" and no uhid_destroy was ever sent.
+    // Creating the virtual keyboard asks the phone first, which takes long enough for
+    // the user to click the menu entry a second time. Without this the worker cannot
+    // see the second click, finishes anyway and switches the keyboard on — while the
+    // saved setting already says "off" and no UHID_DESTROY was ever sent.
     //
-    // This holds the NEWEST wish, and the builder checks it before it declares
-    // victory. A counter of hits would also spot "somebody hit again", but it cannot
-    // tell on-off-on from on-off — and in the first case tearing the keyboard down
-    // would be exactly wrong. What matters is the wish, not how often it was hit.
+    // This holds the NEWEST requested state, and the worker re-checks it before
+    // declaring success. A click counter would also detect "clicked again", but it
+    // cannot tell on-off-on from on-off, and in the first case tearing the keyboard
+    // down would be exactly wrong. What matters is the desired state, not the number
+    // of clicks.
     //
-    // Stands ABOVE background_tasks on purpose: the task pile joins its workers when
-    // it dies, so everything a task holds by reference has to outlive the pile.
+    // Declared ABOVE background_tasks on purpose: the task pool joins its workers in
+    // its destructor, so anything a task captures by reference must outlive the pool.
     std::atomic<bool> uhid_wanted{initial_settings.m_uhid_keyboard};
 
     // --- Auto-pause while the window is folded down ---------------------------
     //
-    // Ugg! A window folded down to the taskbar shows the human NOTHING, and the phone
-    // still paints sixty pictures a heartbeat and throws them all over the WLAN. So
-    // the picture-river is taken down while the window is down — but the poke that
-    // keeps the phone's ADB hole open stays alive. That is the whole trick: the way
-    // back is then just "build the stream again", with no searching, no /connect and
-    // no pairing dance. Without the poke the phone's watchdog shuts ADB after 60s and
-    // coming back would cost the full cold road.
+    // A window minimized to the taskbar shows nothing, while the phone keeps encoding
+    // 60 frames a second and pushing ~20 Mbit/s over the WLAN. So the stream is torn
+    // down while the window is down — but the heartbeat that keeps the phone's ADB
+    // session alive stays running. That is the whole trick: resuming is then just
+    // start_stream() again, with no discovery, no /connect and no pairing. Without the
+    // heartbeat the phone's watchdog disables ADB after 60s and coming back would cost
+    // the full cold path.
     //
-    // Same idea as the USB-keyboard switch one block up: the minimize shout arrives on
-    // the drawing hand, so it may only write down a wish — never take a stream apart.
+    // Same pattern as the UHID switch above: the minimize notification arrives on the
+    // UI thread, so it may only record the desired state — never tear a stream down.
     std::atomic<bool> auto_pause_enabled{initial_settings.m_auto_pause_minimized};
-    std::atomic<bool> pause_wanted{false};   // newest wish from the window
-    std::atomic<bool> auto_paused{false};    // true only while WE hold the stream down
+    std::atomic<bool> pause_wanted{false};   // newest desired state from the window
+    std::atomic<bool> auto_paused{false};    // true only while WE are holding the stream down
     std::atomic<bool> pause_worker_busy{false};
-    // The phone this session belongs to, remembered so the way back needs no search.
+    // The phone this session belongs to, remembered so resuming needs no discovery.
     std::string paused_device_id;
     std::mutex paused_device_mutex;
 
-    // Filled in further down, next to apply_quality_now, where the stream and the
-    // heartbeat live. The menu only needs to know it exists.
+    // Assigned further down, next to apply_quality_now, where the stream and the
+    // heartbeat are in scope. The menu handler only needs the declaration.
     std::function<void()> reconcile_pause_state;
 
     BackgroundTasks background_tasks;
@@ -1316,13 +1324,14 @@ static int app_main() {
             adb.execute_shell_command(device_id, "mkdir -p " + remote_dir);
             const bool sent = adb.push_file(device_id, path_to_utf8(path), remote_path);
             if (sent) {
-                // Trigger our custom BroadcastReceiver in the companion app to scan the file via MediaScannerConnection (reliable on Android 11+)
+                // Preferred path: our own BroadcastReceiver in the companion app runs
+                // MediaScannerConnection, which is the reliable route on Android 11+.
                 adb.execute_shell_command(device_id,
                     "am broadcast -a dev.pixelmirroring.app.SCAN_FILE -e path \"" + remote_path + "\"");
-                // Fallback: Direct content provider insert for modern Android
+                // Fallback: insert into the media provider directly.
                 adb.execute_shell_command(device_id,
                     "content insert --uri content://media/external/images/media --bind _data:s:\"" + remote_path + "\"");
-                // Legacy intent broadcast for older Android versions
+                // Last resort: the legacy scan broadcast, for older Android versions.
                 adb.execute_shell_command(device_id,
                     "am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file://" + remote_path);
             }
@@ -1334,12 +1343,12 @@ static int app_main() {
         });
     };
 
-    // Ugg! Human drags a rock from the PC cave onto the window. Rock flies to phone.
-    // One carrier at a time — two of them would fight over the phone's air.
+    // Files dragged from the PC onto the window get pushed to the phone. Only one
+    // transfer at a time — two would compete for the same WLAN airtime as the stream.
     std::atomic<bool> transfer_busy{false};
     window->set_file_drop_callback([&](const std::vector<std::string>& dropped) {
-        // While the picture is live nobody can read the status line, so a refusal has
-        // to come back as a bubble too.
+        // The status line is hidden while the video is live, so a refusal also has to
+        // show up in the transfer bubble.
         auto refuse = [&](const char* bubble, const char* status) {
             window->set_status_text(status);
             window->set_transfer_status(pm::window::TransferState::FAILED, 1.0f, bubble);
@@ -1351,7 +1360,7 @@ static int app_main() {
             return;
         }
 
-        // Bubble already tells the story of the running trip — do not paint over it.
+        // The bubble already shows the running transfer — do not overwrite it.
         if (transfer_busy.load()) {
             window->set_status_text("Es läuft bereits eine Dateiübertragung.");
             return;
@@ -1361,7 +1370,7 @@ static int app_main() {
         for (const auto& raw : dropped) {
             const std::filesystem::path file = path_from_utf8(raw);
             std::error_code ec;
-            // Whole caves (folders) need a different kind of carrying — not this trip.
+            // Directories would need recursive handling, which this path does not do.
             if (std::filesystem::is_regular_file(file, ec)) files.push_back(file);
         }
         if (files.empty()) {
@@ -1369,7 +1378,7 @@ static int app_main() {
             return;
         }
 
-        // An APK can become an app on the phone — but only if the human says so.
+        // A dropped APK can be installed instead of just copied, but only on request.
         const auto apk_count = static_cast<size_t>(std::count_if(files.begin(), files.end(),
             [](const std::filesystem::path& file) { return has_extension(file, ".apk"); }));
         bool install_apks = false;
@@ -1405,18 +1414,18 @@ static int app_main() {
 
             for (size_t i = 0; i < files.size() && !should_stop; ++i) {
                 const std::filesystem::path& file = files[i];
-                // ONE name for the rock now. It used to be two — one in the tribe's old
-                // letter-table for adb, one in UTF-8 for the window — and mixing them up
-                // painted "Größe.pdf" as "Gr��e.pdf". adb is started with CreateProcessW
-                // these days, so both roads speak UTF-8 and there is nothing left to mix.
+                // ONE spelling of the file name. There used to be two — an ANSI one for
+                // adb and a UTF-8 one for the window — and mixing them up rendered
+                // "Größe.pdf" as "Gr��e.pdf". adb is spawned with CreateProcessW now, so
+                // both ends are UTF-8 and there is nothing left to mix up.
                 const std::string name = path_to_utf8(file.filename());
                 const bool as_app = install_apks && has_extension(file, ".apk");
-                // An APK the human wants installed rests in the shell's own corner —
-                // the package unpacker cannot read out of /sdcard on modern phones.
+                // An APK that is to be installed goes to the shell's own directory: the
+                // package installer cannot read out of /sdcard on modern Android.
                 const std::string remote_path = as_app
                     ? ("/data/local/tmp/" + name)
                     : (std::string(DROP_TARGET_DIR) + "/" + name);
-                // With several rocks the bubble counts trips, with one it shows the name.
+                // With several files the bubble counts them; with one it shows the name.
                 const std::string label = files.size() == 1
                     ? name
                     : (std::to_string(i + 1) + "/" + std::to_string(files.size()) + " " + name);
@@ -1441,8 +1450,8 @@ static int app_main() {
                 }
 
                 if (as_app) {
-                    // Rock already lies on the phone — let the phone unpack it from there
-                    // and sweep the leftovers away either way.
+                    // The file is already on the phone, so install it from there and clean
+                    // up the copy afterwards either way.
                     const bool installed = adb.install_pushed_app(device_id, remote_path);
                     adb.execute_shell_command(device_id,
                         "rm -f " + pm::adb::shell_quote(remote_path));
@@ -1451,7 +1460,8 @@ static int app_main() {
                         break;
                     }
                 } else {
-                    // Poke the companion app so the file cave shows the rock right away.
+                    // Tell the companion app to scan it, so the phone's file manager and
+                    // gallery show it right away instead of after the next media scan.
                     adb.execute_shell_command(device_id,
                         "am broadcast -a dev.pixelmirroring.app.SCAN_FILE -e path " +
                         pm::adb::shell_quote(remote_path));
@@ -1465,8 +1475,8 @@ static int app_main() {
                 return;
             }
 
-            // Ugg! Put the last rock's place in the phone's memory-stone, so the human
-            // can paste it straight into whatever app wants the file.
+            // Put the last file's path on the phone's clipboard, so it can be pasted
+            // straight into whichever app is supposed to open it.
             if (!clipboard_path.empty()) {
                 scrcpy.inject_set_clipboard(clipboard_path);
             }
@@ -1484,11 +1494,12 @@ static int app_main() {
         });
     });
 
-    // MEOW. NEW QUALITY STONE MUST BITE RIGHT NOW. FILLED IN FURTHER DOWN, WHERE
-    // THE HEARTBEAT LIVES — THE MENU ONLY NEEDS TO KNOW IT EXISTS.
+    // A new quality preset has to take effect immediately. Assigned further down,
+    // where the stream and the heartbeat are in scope; the menu only needs the
+    // declaration.
     std::function<void()> apply_quality_now;
 
-    // MEOW. WIRE CONTEXT MENU CALLBACK.
+    // Context menu actions.
     window->set_menu_callback([&](pm::window::MenuAction action) {
         pm::Settings current_settings = pm::load_settings();
         switch (action) {
@@ -1532,8 +1543,8 @@ static int app_main() {
                 current_settings.m_screen_off = !current_settings.m_screen_off;
                 pm::save_settings(current_settings);
                 window->set_screen_off(current_settings.m_screen_off);
-                // Unlike every other switch here this one bites immediately — a human
-                // who unticks it wants the phone's light back NOW, not next session.
+                // Unlike every other switch here this one takes effect immediately —
+                // somebody unticking it wants the panel back on now, not next session.
                 if (scrcpy.is_running()) {
                     scrcpy.inject_screen_power_mode(!current_settings.m_screen_off);
                 }
@@ -1562,7 +1573,7 @@ static int app_main() {
                     break;
                 }
 #ifdef _WIN32
-                // Convert BMP to PNG
+                // The renderer writes a BMP; re-encode it as PNG via GDI+.
                 std::wstring bmpPath = screenshot->wstring();
                 Gdiplus::Bitmap* bmp = new Gdiplus::Bitmap(bmpPath.c_str());
                 if (bmp && bmp->GetLastStatus() == Gdiplus::Ok) {
@@ -1615,19 +1626,19 @@ static int app_main() {
                 current_settings.m_audio_enabled = !current_settings.m_audio_enabled;
                 pm::save_settings(current_settings);
                 window->set_audio_enabled(current_settings.m_audio_enabled);
-                // Ugg! The sound path is set up when the stream starts, so the switch
-                // only bites on the next connection. Say so instead of leaving the
-                // human waiting for a change that will not come.
+                // The audio socket is negotiated when the stream starts, so this switch
+                // only takes effect on the next connection. Say so, instead of leaving
+                // the user waiting for a change that will not come.
                 window->set_status_text(current_settings.m_audio_enabled
                     ? "Ton aktiviert — wirkt ab der nächsten Verbindung."
                     : "Ton deaktiviert — wirkt ab der nächsten Verbindung.");
                 break;
             }
             case pm::window::MenuAction::TOGGLE_AUTO_ROTATE: {
-                // Ugg! This one is NOT a Settings default — it only ever mirrors and
-                // flips the phone's OWN accelerometer_rotation switch (issue #46). The
-                // toggle always starts synced from the phone (see start_stream) and a
-                // click here is the only thing that ever changes it.
+                // This is NOT stored in Settings — it only ever mirrors and flips the
+                // phone's own accelerometer_rotation value (issue #46). The toggle is
+                // synced from the phone on connect (see start_stream), and a click here
+                // is the only thing that ever changes it.
                 bool new_value = !phone_auto_rotate.load();
                 phone_auto_rotate = new_value;
                 window->set_auto_rotate_enabled(new_value);
@@ -1643,7 +1654,8 @@ static int app_main() {
                 current_settings.m_uhid_keyboard = wanted;
                 pm::save_settings(current_settings);
 
-                // The newest wish, for any builder that is still waiting on the phone.
+                // Record the newest requested state for any worker still waiting on the
+                // phone's /dev/uhid probe.
                 uhid_wanted.store(wanted);
 
                 if (!scrcpy.is_running()) {
@@ -1660,18 +1672,18 @@ static int app_main() {
                     break;
                 }
 
-                // Building the keyboard asks the phone a question first, and a
-                // question over ADB must never block the drawing hand. The switch
-                // that routes keys only flips once the phone really has it —
-                // flipping it early would drop every key hit in between.
+                // Creating the keyboard probes the phone over ADB first, and that must
+                // never block the UI thread. The switch that routes key presses only
+                // flips once the phone really has the device — flipping it early would
+                // drop every keystroke in between.
                 background_tasks.run([&input, &uhid_wanted, w = window.get()]() {
                     const bool created = input.enable_uhid_keyboard();
 
-                    // Cave man hit the stone again while the phone was still thinking,
-                    // and this time he wants it OFF. Take the keyboard back down and
-                    // leave without a word — the newer hit already told the window.
-                    // Without this the phone keeps a keyboard the saved stone says is
-                    // off, and uhid_destroy is never sent.
+                    // The user clicked again while the probe was still running, and this
+                    // time wants it OFF. Tear the keyboard down and return silently — the
+                    // later click already updated the window. Without this the phone keeps
+                    // a keyboard the saved setting says is off, and UHID_DESTROY is never
+                    // sent.
                     if (!uhid_wanted.load()) {
                         if (created) {
                             input.disable_uhid_keyboard();
@@ -1712,8 +1724,8 @@ static int app_main() {
                 auto_pause_enabled.store(wanted);
                 window->set_auto_pause_minimized(wanted);
 
-                // Switched off while the stream is lying down: give the picture back
-                // right away instead of leaving it paused until the next fold-up.
+                // Switched off while the stream is currently paused: resume right away
+                // instead of leaving it paused until the next minimize/restore cycle.
                 if (!wanted && auto_paused.load()) {
                     pause_wanted.store(false);
                     reconcile_pause_state();
@@ -1761,7 +1773,7 @@ static int app_main() {
                     window->set_status_text("PIN nicht eingerichtet.");
                     break;
                 }
-                // Explicit human command — type even if the lock state is unreadable.
+                // Explicit user command — type the PIN even if the lock state is unreadable.
                 run_on_device([w = window.get()](const std::string& id) {
                     unlock_device_if_needed(id, w, true);
                 });
@@ -1769,7 +1781,7 @@ static int app_main() {
             }
             case pm::window::MenuAction::LOCK_DEVICE: {
                 run_on_device([](const std::string& id) {
-                    // Cave man lock screen and turn off light
+                    // KEYCODE_SLEEP — locks the phone and turns the screen off.
                     pm::adb::AdbClient adb;
                     adb.execute_shell_command(id, "input keyevent 223");
                 });
@@ -1793,7 +1805,8 @@ static int app_main() {
             if (IsIconic(hw)) ShowWindow(hw, SW_RESTORE);
             SetForegroundWindow(hw);
 #endif
-            // Cave man wake and unlock phone on restore
+            // Coming back from the tray: wake and unlock the phone, or build a whole
+            // new connection if the old one is gone.
             if (scrcpy.is_running()) {
                 run_on_device([w = window.get()](const std::string& id) {
                     unlock_device_if_needed(id, w);
@@ -1824,7 +1837,7 @@ static int app_main() {
         input.handle_pointer(action, x, y, w, h);
     });
     window->set_key_callback([&](int action, int keycode) {
-        // key down/up. cave man click keys.
+        // action: 0 = down, 1 = up.
         if (action == 0) {
             input.handle_key_down(keycode);
         } else {
@@ -1832,26 +1845,24 @@ static int app_main() {
         }
     });
     window->set_text_callback([&](const std::string& text) {
-        // text write. cave man write words.
         input.handle_text(text);
     });
     window->set_raw_key_callback([&](int action, uint32_t scancode, bool extended) {
-        // key hole hit. cave man send the position, phone picks the letter. A "no"
-        // travels back so the window can still send the key the old way.
+        // Sends the physical key position; the phone's own layout picks the character.
+        // Returning false lets the window fall back to the Android keycode path.
         return input.handle_raw_key(action, scancode, extended);
     });
     window->set_focus_lost_callback([&]() {
-        // cave man leaves. nothing stays pressed on the phone.
+        // Focus is gone — nothing may stay held down on the phone.
         input.release_all_keys();
     });
     window->set_scroll_callback([&](int x, int y, int w, int h, float hscroll, float vscroll) {
-        // scroll wheel. cave man scroll screen.
         input.handle_scroll(x, y, w, h, hscroll, vscroll);
     });
 
-    // Ugg! If the phone's control thread dies the picture keeps flowing while every
-    // tap and key falls into a hole. Say it instead of letting the human poke a
-    // corpse — nothing here can be repaired from this side, only reconnected.
+    // If the server's control thread dies the video keeps flowing while every tap and
+    // keystroke silently goes nowhere. Say so — nothing can be repaired from this side,
+    // only reconnected.
     scrcpy.set_control_lost_callback([w = window.get()]() {
         w->post_task([w]() {
             w->set_status_text("Eingabe am Handy abgebrochen — bitte neu verbinden.");
@@ -1868,7 +1879,7 @@ static int app_main() {
         }
     });
     window->set_focus_callback([&scrcpy]() {
-        // focus get. cave man fetch clipboard from phone.
+        // Window regained focus — pull the phone's clipboard so PC and phone agree.
         if (scrcpy.is_running()) {
             scrcpy.inject_get_clipboard(0);
         }
@@ -1881,9 +1892,8 @@ static int app_main() {
     std::atomic<bool> stop_heartbeat{false};
     const std::string client_name = get_client_name();
 
-    // fopen used to get a path::string() here — the tribe's old letter-table, which
-    // cannot spell a home cave in Cyrillic. A stream takes the path itself and needs
-    // no letter-table at all.
+    // std::ifstream takes the path object directly. Going through path::string() would
+    // hand it the ANSI code page, which cannot spell a user profile in Cyrillic.
     std::string client_id;
     const std::filesystem::path client_id_path = get_client_id_path();
     {
@@ -1911,14 +1921,15 @@ static int app_main() {
         stop_heartbeat_thread();
         stop_heartbeat = false;
         heartbeat_thread = std::thread([&, ip]() {
-            // Cave man poke phone every 5s so phone knows PC still alive
-            // Heartbeat only keeps phone ADB awake — disconnect detection is
-            // handled by scrcpy video stream recv() failing
+            // POST /heartbeat every 5s so the phone knows the PC is still there. This
+            // only keeps the phone's ADB session alive; noticing a dropped connection is
+            // the job of the scrcpy video socket's recv() failing.
             pm::network::NetworkScanner hb_scanner;
-            // A paused stream counts as alive. The picture is gone but the phone must
-            // keep its ADB hole open, or the way back stops being warm. auto_paused is
-            // raised BEFORE the stream is taken down for exactly this reason — the
-            // other order leaves a blink in which both are false and the poke dies.
+            // A paused stream still counts as alive. The video is gone, but the phone
+            // must keep its ADB session open or resuming would cost the full cold path.
+            // auto_paused is raised BEFORE the stream is stopped for exactly this
+            // reason — the other order leaves a window in which both are false and the
+            // heartbeat thread exits for good.
             const auto still_wanted = [&]() {
                 return scrcpy.is_running() || auto_paused.load();
             };
@@ -1932,14 +1943,15 @@ static int app_main() {
         });
     };
 
-    // MEOW. QUALITY STONE SWAPPED. SCRCPY ONLY READS ITS NUMBERS WHEN IT IS BORN,
-    // SO THE STREAM MUST DIE AND COME BACK. HEARTBEAT DIES WITH IT — WAKE IT AGAIN.
+    // The scrcpy server reads fps/size/bitrate from its command line at startup only,
+    // so a new quality preset means stopping and restarting the stream. The heartbeat
+    // thread ends with it and has to be started again.
     std::atomic<bool> quality_restart_running{false};
     apply_quality_now = [&]() {
-        // Nothing streaming: the next connect picks the new stone up by itself.
+        // Nothing streaming: the next connect picks the new preset up by itself.
         if (!scrcpy.is_running()) return;
         if (renderer.is_recording()) {
-            // Tearing the stream out mid-recording would leave a broken file behind.
+            // Restarting the stream mid-recording would leave a broken file behind.
             window->post_task([w = window.get()]() {
                 w->set_status_text("Qualität wirkt nach dem Ende der Aufnahme.");
             });
@@ -1964,30 +1976,30 @@ static int app_main() {
         });
     };
 
-    // One worker walks over and makes the world match the newest wish (declared far
-    // above, where the menu can reach it). What matters is the WISH, not how often
-    // the human hit the stone.
+    // A single worker reconciles the actual stream state with the newest requested one
+    // (declared far above, where the menu can reach it). What matters is the requested
+    // state, not how many times the user toggled it.
     reconcile_pause_state = [&]() {
-        if (pause_worker_busy.exchange(true)) return; // one hand is enough
+        if (pause_worker_busy.exchange(true)) return; // one worker is enough
         background_tasks.run([&]() {
             ScopeExit mark_done([&]() { pause_worker_busy = false; });
 
-            // Cave man walks back and forth as long as the wish keeps changing under
-            // him. The bound is only there so a human hammering the minimize stone
-            // cannot keep one hand walking forever.
+            // Keep reconciling as long as the requested state keeps changing underneath.
+            // The bound only exists so somebody hammering the minimize button cannot keep
+            // this worker spinning forever.
             for (int rounds = 0; rounds < 8 && !should_stop; ++rounds) {
                 const bool want_paused = pause_wanted.load();
                 if (want_paused == auto_paused.load()) return;
 
                 if (want_paused) {
-                    // Never cut into somebody else's work: a recording would end up a
-                    // broken file, and a quality restart is already holding the stream
-                    // in both hands. In those cases cave man simply does nothing, and
-                    // because auto_paused stays down, coming back does nothing either.
+                    // Never cut into somebody else's work: a torn stream would leave a
+                    // recording as a broken file, and a quality restart already owns the
+                    // stream. In those cases do nothing at all — auto_paused stays false,
+                    // so restoring does nothing either.
                     //
-                    // A connect that is still walking is NOT in this list on purpose:
-                    // it only ever raises is_running() once the stream really stands,
-                    // and it asks again at the end of its road (see start_connection).
+                    // An in-flight connect is deliberately NOT in this list: it only
+                    // raises is_running() once the stream really stands, and it re-runs
+                    // this reconcile at the end of its own path (see start_connection).
                     if (!scrcpy.is_running() || renderer.is_recording() ||
                         quality_restart_running.load()) {
                         return;
@@ -1996,7 +2008,7 @@ static int app_main() {
                         std::lock_guard<std::mutex> guard(paused_device_mutex);
                         paused_device_id = scrcpy.get_device_id();
                     }
-                    // Raise the flag FIRST — see the heartbeat loop.
+                    // Raise the flag BEFORE stopping — see the heartbeat loop.
                     auto_paused.store(true);
                     scrcpy.stop();
                     window->post_task([w = window.get()]() {
@@ -2016,19 +2028,19 @@ static int app_main() {
                     w->set_status_text("Stream wird fortgesetzt...");
                 });
 
-                // The warm road: ADB is still awake because the poke never stopped,
-                // so there is nothing to look for and nothing to ask permission for.
+                // The warm path: ADB is still up because the heartbeat never stopped, so
+                // there is nothing to discover and no pairing to negotiate.
                 const bool resumed = !device_id.empty() &&
                     start_stream(*window, scrcpy, renderer, input, device_id,
                                  &saved_brightness, background_tasks, &phone_auto_rotate);
 
-                // Lower the flag only now: while the stream was being built the poke
-                // still had to count as wanted.
+                // Lower the flag only now: while the stream was being rebuilt the
+                // heartbeat still had to count as wanted.
                 auto_paused.store(false);
 
                 if (!resumed && !should_stop && !pause_wanted.load()) {
-                    // Phone went to sleep, WLAN moved, ADB shut after all — whatever
-                    // it was, the warm road is gone. Walk the cold one.
+                    // Phone asleep, WLAN changed, ADB disabled after all — whatever it
+                    // was, the warm path is gone. Fall back to a full connect.
                     window->post_task([w = window.get()]() {
                         w->set_status_text("Verbindung neu aufbauen...");
                     });
@@ -2056,25 +2068,25 @@ static int app_main() {
             int clip_poll_counter = 0;
             int adb_poll_counter = 0;
 
-            // Cave man keeps ONE messenger instead of carving a new one every round.
+            // One reused HTTP client instead of a fresh one on every poll round.
             httplib::Client screen_client(poll_ip.empty() ? "127.0.0.1" : poll_ip, 18294);
             screen_client.set_connection_timeout(0, 500000); // 500ms
             screen_client.set_read_timeout(0, 500000);       // 500ms
 
             while (!should_stop && !stop_screen_poll) {
-                bool screen_on = true; // assume on unless check confirms off
+                bool screen_on = true; // assume on unless a check proves otherwise
                 bool phone_answered = false;
 
                 if (scrcpy.is_running()) {
                     clip_poll_counter++;
                     if (clip_poll_counter >= 3) { // every ~1.5s
                         clip_poll_counter = 0;
-                        // periodic clip check. cave man ask phone for clip.
+                        // Pull the phone's clipboard so PC and phone stay in sync.
                         scrcpy.inject_get_clipboard(0);
                     }
                 }
 
-                // 1. Try HTTP /screen endpoint (fastest & most accurate)
+                // 1. The companion app's /screen endpoint — fastest and most accurate.
                 if (!poll_ip.empty()) {
                     if (auto res = screen_client.Get("/screen")) {
                         if (res->status == 200) {
@@ -2087,15 +2099,14 @@ static int app_main() {
                     }
                 }
 
-                // 2. ADB shell check as a safety net.
-                // Ugg! Old cave man threw a whole adb spear TWICE every heartbeat,
-                // even when the phone had already answered. Starting a process 2x
-                // per second eats fire on both sides for nothing. Now it only runs
-                // every ~2s when the phone stays silent, ~5s as a cross-check.
+                // 2. An ADB shell check as a safety net. Every one of these spawns an
+                // adb process, so it must not run on every poll round: roughly every 2s
+                // while the phone stays silent, every 5s as a cross-check when it answers.
                 const int adb_check_interval = phone_answered ? 10 : 4;
                 if (screen_on && !device_id.empty() && ++adb_poll_counter >= adb_check_interval) {
                     adb_poll_counter = 0;
-                    // Cave man ask PowerManager instead. dumpsys display gives history log of past OFF events!
+                    // Ask PowerManager, not "dumpsys display" — the latter prints a history
+                    // of past OFF events and would read as "screen off" long after the fact.
                     std::string power_state = poll_adb.execute_shell_command(
                         device_id, "dumpsys power | grep -iE 'mInteractive|mIsInteractive'");
                     if (!power_state.empty()) {
@@ -2110,30 +2121,30 @@ static int app_main() {
                     last_screen_on = screen_on;
                     
                     if (!screen_on) {
-                        // Cave man put sun brightness back when screen goes off
+                        // Screen went off: hand the phone its original brightness back.
                         if (saved_brightness.brightness >= 0) {
                             pm::adb::AdbClient restore_adb;
                             restore_brightness(restore_adb, saved_brightness);
-                            saved_brightness = {}; // Cave man forget — already restored
+                            saved_brightness = {}; // already restored, do not restore twice
                         }
                         
                         window->post_task([&]() {
-                            // Cave man hide window to tray when phone screen off — no black screen!
+                            // Hide to the tray rather than showing a black window.
                             if (window->is_visible()) {
                                 window->hide();
                                 if (tray) tray->show();
                             }
                             window->set_app_state(pm::window::AppState::SETUP);
                         });
-                        // Cave man stop everything to save battery when screen off
+                        // Tear the stream down so the phone stops encoding for nobody.
                         if (scrcpy.is_running()) {
                             scrcpy.stop();
                         }
-                        break; // Kill the poll thread entirely! Fully disconnected.
+                        break; // fully disconnected — this thread has nothing left to poll
                     }
                 }
                 
-                // Cave man sleep 500ms before next poll
+                // ~500ms until the next poll, in 100ms slices so shutdown stays responsive.
                 for (int i = 0; i < 5 && !should_stop && !stop_screen_poll; ++i) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 }
@@ -2154,11 +2165,11 @@ static int app_main() {
         connection_thread = std::thread([&, automatic]() {
             connection_running = true;
             ScopeExit mark_done([&]() { connection_running = false; });
-            // A fresh connection replaces whatever the pause was holding on to.
+            // A fresh connection supersedes whatever the pause state was holding.
             auto_paused.store(false);
             pm::adb::AdbClient adb;
 
-            // Ugg wake ADB first. No pretend network magic.
+            // The adb server has to be up before anything else can talk to a device.
             window->post_task([w = window.get()]() { w->set_status_text("ADB wird gestartet..."); });
             adb.init();
 
@@ -2184,15 +2195,14 @@ static int app_main() {
                 should_stop
             );
             if (!tcp_device || should_stop) {
-                // Ugg! Old cave man SMASHED the pairing stone whenever a single manual
-                // attempt failed. A sleeping phone, a WLAN hiccup or a companion app
-                // that was not running was enough to throw the whole setup away — and
-                // the next press then demanded a full USB re-setup. Never again: the
-                // pairing survives a failed attempt.
+                // Do NOT clear the setup state here. A sleeping phone, a WLAN hiccup or a
+                // companion app that was not running used to be enough to throw the whole
+                // pairing away, and the next attempt then demanded a full USB re-setup.
+                // The pairing has to survive a failed attempt.
                 //
-                // If a cable happens to be plugged in, redo the setup right away,
-                // because that is what the human wanted anyway. Otherwise keep
-                // everything and say what actually helps.
+                // If a cable happens to be plugged in, redo the setup right away — that
+                // is what a manual retry is asking for anyway. Otherwise keep everything
+                // and show a message that actually helps.
                 if (!automatic && !should_stop && find_usb_device(adb.get_devices(), "device")) {
                     window->post_task([w = window.get()]() {
                         w->set_status_text("Nicht über WLAN erreichbar — richte per USB neu ein...");
@@ -2222,7 +2232,7 @@ static int app_main() {
                 w->set_status_text(name.empty() ? "Verbunden" : name);
             });
             
-            // Cave man parallelize unlock and start_stream for instant video!
+            // Unlock and stream startup are independent — run them in parallel.
             std::string tcp_id = tcp_device->id;
             auto unlock_future = std::async(std::launch::async, [tcp_id, w = window.get()]() {
                 return unlock_device_if_needed(tcp_id, w);
@@ -2246,9 +2256,8 @@ static int app_main() {
                 std::string hb_ip = tcp_device->id.substr(0, tcp_device->id.rfind(':'));
                 start_heartbeat(hb_ip);
                 start_screen_poll(hb_ip, tcp_device->id);
-                // Ugg! The human folded the window down while cave man was still on
-                // the road. The stream is up now and nobody is looking at it — ask
-                // the pause hand to walk once more.
+                // The window was minimized while this connect was still running. The
+                // stream is up now with nobody watching, so run the reconcile once more.
                 if (pause_wanted.load()) {
                     reconcile_pause_state();
                 }
@@ -2265,11 +2274,11 @@ static int app_main() {
         start_connection(false);
     });
 
-    // Fires on the drawing hand, so it may only write down the wish and wave.
+    // Fires on the UI thread, so it may only record the desired state and hand off.
     window->set_minimize_callback([&](bool minimized) {
         if (!auto_pause_enabled.load()) {
-            // Switched off mid-session while the stream was already down: let the
-            // picture come back anyway instead of leaving a paused stream forever.
+            // Auto-pause was switched off mid-session while the stream was already
+            // paused: resume anyway instead of leaving it paused forever.
             if (!minimized && auto_paused.load()) {
                 pause_wanted.store(false);
                 reconcile_pause_state();
@@ -2292,7 +2301,7 @@ static int app_main() {
     stop_screen_poll = true;
     stop_heartbeat = true;
 
-    // Cave man put sun brightness back before leaving cave, while tunnel still strong
+    // Restore the phone's brightness while ADB is still connected.
     if (saved_brightness.brightness >= 0) {
         pm::adb::AdbClient restore_adb;
         restore_brightness(restore_adb, saved_brightness);
@@ -2300,15 +2309,15 @@ static int app_main() {
 
     scrcpy.stop();
 
-    // Ugg! stop() already asks the phone for its light back through the talking-hole,
-    // and the scrcpy server keeps its own helper on the phone for the same job. If BOTH
-    // failed — hole dead before we could shout, helper killed too — the human would be
-    // left holding a phone with no picture at all. Last resort over ADB.
+    // Third and last layer of panel restore. stop() already sent NORMAL over the
+    // control socket, and the scrcpy server runs its own device-side CleanUp for the
+    // same job. If BOTH failed — socket dead before we could send, server killed too —
+    // the user would be left holding a phone with a permanently dark screen.
     //
-    // A lone wake-poke is not enough: Android only hands the panel a new power mode when
-    // its own idea of the screen state CHANGES, and it already thinks the screen is on.
-    // So put the phone to sleep and wake it again — that makes it re-light the panel
-    // itself and throws away the darkness we forced on it.
+    // A bare wakeup is not enough: Android only re-issues a display power mode when its
+    // OWN screen state changes, and it already thinks the screen is on. Putting the
+    // phone to sleep and waking it makes it re-light the panel itself and discards the
+    // power mode we forced on it.
     if (scrcpy.screen_forced_off()) {
         const std::string dark_device = scrcpy.get_device_id();
         if (!dark_device.empty()) {
@@ -2321,14 +2330,14 @@ static int app_main() {
     if (connection_thread.joinable()) connection_thread.join();
     if (screen_poll_thread.joinable()) screen_poll_thread.join();
     if (heartbeat_thread.joinable()) heartbeat_thread.join();
-    // Cave man waits for every helper hunter before the cave stones disappear.
+    // Every background worker must finish before the objects it captured go away.
     background_tasks.join_all();
 
     if (tray) tray->hide();
 
 #ifdef _WIN32
-    // Ugg! Window still holds GDI+ letter-stones. It must die BEFORE GDI+ closes,
-    // otherwise it hands back stones to a workshop that no longer exists.
+    // The window still owns GDI+ font objects. It has to be destroyed BEFORE
+    // GdiplusShutdown, or it releases them into a GDI+ that no longer exists.
     renderer.shutdown();
     tray.reset();
     window.reset();

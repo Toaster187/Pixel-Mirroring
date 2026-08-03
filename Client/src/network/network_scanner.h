@@ -20,10 +20,10 @@ public:
 
     std::optional<DiscoveredDevice> discover_and_connect(const std::string& client_id, const std::string& client_name);
 
-    // Ugg! Poke a known IP directly instead of sweeping the whole subnet.
+    // Contact a known IP directly instead of scanning the whole subnet.
     std::optional<DiscoveredDevice> request_connect(const std::string& ip, const std::string& client_id, const std::string& client_name);
 
-    // Ugg! Tell the phone "PC still alive" so it doesn't close the ADB door.
+    // Tells the device the PC is still there, so its watchdog does not disable ADB.
     bool send_heartbeat(const std::string& ip, const std::string& client_id, const std::string& client_name);
 
 private:

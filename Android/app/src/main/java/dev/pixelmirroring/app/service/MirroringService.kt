@@ -50,7 +50,7 @@ class MirroringService : Service() {
     private val isScreenOn = AtomicBoolean(true)
     private var receiverRegistered = false
 
-    // Ugg! Session tracking so we know when the PC cave went quiet.
+    // Session tracking, so the watchdog can tell when the PC stopped calling in.
     private val sessionActive = AtomicBoolean(false)
     private val lastSeenElapsedMs = AtomicLong(0L)
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -91,9 +91,10 @@ class MirroringService : Service() {
     private fun registerNetworkCallback() {
         val connectivityManager = getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as ConnectivityManager
 
-        // Ugg! An empty request means the phone shouts about EVERY path — mobile data,
-        // VPN, bluetooth. Cave man only cares about the local WLAN cave, because that
-        // is the only one the PC can knock on.
+        // An empty request would deliver callbacks for EVERY transport — mobile data,
+        // VPN, Bluetooth. Only the local WLAN matters here, because that is the only
+        // one the PC can reach us on. Filtering also keeps the callback rate down,
+        // which matters for battery.
         val request = NetworkRequest.Builder()
             .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
             .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
@@ -115,8 +116,8 @@ class MirroringService : Service() {
     }
 
     // A WLAN hiccup fires several callbacks in a row. Restarting the servers on each
-    // one tore the door down exactly while the PC was trying to walk through it, so
-    // cave man waits for the shouting to stop first.
+    // one tore the listener down exactly while the PC was trying to connect, so wait
+    // for the callbacks to settle first.
     private fun scheduleDiscoveryRestart() {
         if (!serviceScope.isActive) return
         discoveryRestartJob?.cancel()
@@ -128,7 +129,8 @@ class MirroringService : Service() {
 
     private fun startSessionWatchdog() {
         serviceScope.launch {
-            // Ugg! Service crashed/rebooted mid-session? Adopt the old session so it still times out.
+            // If the service crashed or the device rebooted mid-session, adopt the
+            // stored session so the watchdog still times it out and disables ADB.
             if (clientStore.isSessionActive()) {
                 sessionActive.set(true)
                 lastSeenElapsedMs.set(SystemClock.elapsedRealtime())
@@ -209,7 +211,7 @@ class MirroringService : Service() {
         return pairingMutex.withLock {
             val alreadyAuthorized = clientStore.isClientPaired(clientId)
             if (alreadyAuthorized && clientStore.getPairedClient() == null) {
-                // Ugg first friend gets paired.
+                // Trust on first use: the first client to connect becomes the paired one.
                 clientStore.savePairedClient(clientId, clientName)
             }
             alreadyAuthorized
@@ -226,7 +228,7 @@ class MirroringService : Service() {
     }
 
     private fun endSession() {
-        // Ugg! PC went quiet. Close the ADB cave door.
+        // The PC stopped calling in — close the ADB attack surface again.
         adbWifiManager.disableAdbTcpIp()
         adbWifiManager.disableAdbWifi()
         adbWifiManager.setAdbEnabled(false)

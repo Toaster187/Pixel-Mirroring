@@ -21,30 +21,30 @@ public:
     void handle_scroll(int x, int y, int window_w, int window_h, float hscroll, float vscroll);
     void handle_text(const std::string& text);
 
-    // One physical key on the PC, named by its hardware position (PC set-1
-    // scancode), not by the letter the PC layout painted on it. Only travels
-    // while the virtual USB keyboard is alive; otherwise it is dropped and the
-    // old inject_text/inject_keycode path does the work.
+    // One physical key on the PC, identified by its hardware position (PC set-1
+    // scancode) rather than by the character the PC layout assigns to it. Only sent
+    // while the virtual USB keyboard is attached; otherwise it is dropped and the
+    // inject_text/inject_keycode path does the work.
     //
-    // Returns false when nothing was sent — no keyboard hanging on the phone, or a
-    // hole a boot keyboard simply does not have. The caller MUST then take the old
-    // road, otherwise the key disappears without a trace.
+    // Returns false when nothing was sent — no keyboard attached, or a key a boot
+    // keyboard simply does not have. The caller MUST then fall back to the Android
+    // keycode path, or the key disappears without a trace.
     bool handle_raw_key(int action, uint32_t scancode, bool extended);
 
-    // Ugg! Window loses focus with Shift still down. Let go of everything, or the
-    // phone keeps shouting in capitals long after cave man walked away.
+    // Called when the window loses focus with modifiers still held. Releases
+    // everything, or the phone keeps typing in capitals long after focus is gone.
     void release_all_keys();
 
-    // Hangs a real USB keyboard on the phone (asks first whether the phone even
-    // allows it — see ScrcpyClient::device_supports_uhid). Returns false when the
-    // phone said no, and then nothing changes: text input keeps working.
+    // Attaches a virtual USB keyboard to the device (probing first whether the device
+    // allows it at all — see ScrcpyClient::device_supports_uhid). Returns false if the
+    // device refused, in which case nothing changes and text input keeps working.
     bool enable_uhid_keyboard();
 
     // Unplugs it again and goes back to inject_text.
     void disable_uhid_keyboard();
 
-    // Forgets the keyboard without talking to the phone — for a new session,
-    // where the old control socket is long gone.
+    // Drops the keyboard state without sending anything — for a new session, where the
+    // old control socket is already gone.
     void reset_uhid_keyboard();
 
 private:

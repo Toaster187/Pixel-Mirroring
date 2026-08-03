@@ -25,8 +25,8 @@ namespace pm::adb {
 
 namespace {
 
-// Ugg! GUI app has no console. Words to stderr fall in deep hole and are lost forever.
-// So carve ADB words into stone tablet next to stream.log, where human can read them.
+// A GUI app has no console, so anything written to stderr is lost. adb's output goes
+// into a log file next to stream.log instead, where it can actually be read.
 void log_adb_event(const std::string& message) {
     std::cerr << message << std::endl;
 
@@ -51,7 +51,7 @@ void log_adb_event(const std::string& message) {
     }
 }
 
-// Cave man rubs whitespace off both ends of stone.
+// Strips whitespace from both ends.
 std::string trim(const std::string& text) {
     const auto first = text.find_first_not_of(" \t\r\n");
     if (first == std::string::npos) return {};
@@ -59,9 +59,9 @@ std::string trim(const std::string& text) {
     return text.substr(first, last - first + 1);
 }
 
-// Ugg! Magic rune engine (std::regex) is fat and slow, and cave man calls it every
-// half heartbeat while waiting for phone. Plain stone-by-stone reading is faster.
-// Grabs the word right after marker, up to the next whitespace.
+// Deliberately not std::regex: it is heavy and slow, and this runs twice a second
+// while waiting for the device. Plain scanning is faster. Returns the token right
+// after marker, up to the next whitespace.
 std::string value_after(const std::string& text, const std::string& marker) {
     const auto pos = text.find(marker);
     if (pos == std::string::npos) return {};
@@ -70,7 +70,7 @@ std::string value_after(const std::string& text, const std::string& marker) {
     return end == std::string::npos ? text.substr(start) : text.substr(start, end - start);
 }
 
-// Cave man picks the first four-dot number stone after marker, e.g. "src 192.168.1.5".
+// Returns the first dotted-quad after marker, e.g. "src 192.168.1.5" -> "192.168.1.5".
 std::string ipv4_after(const std::string& text, const std::string& marker) {
     size_t search = 0;
     while ((search = text.find(marker, search)) != std::string::npos) {
@@ -109,17 +109,16 @@ std::string shell_quote(const std::string& text) {
 
 std::string get_executable_dir() {
 #ifdef _WIN32
-    // Ugg! The A-flavour used to ask for the cave's own path in the tribe's OLD
-    // letter-table. A home cave whose name that table cannot spell (Cyrillic, CJK,
-    // an emoji in the folder name) came back full of "?", and then the app found
-    // none of its own tools. Wide stones in, UTF-8 out — the shape every other
-    // string in this cave has.
+    // GetModuleFileNameW, not the A variant: the latter returns the path in the ANSI
+    // code page, so an install directory it cannot represent (Cyrillic, CJK, an emoji
+    // in a folder name) came back full of "?" and the app then found none of its own
+    // bundled tools. Wide in, UTF-8 out — the same shape as every other string here.
     std::vector<wchar_t> path(MAX_PATH);
     for (;;) {
         const DWORD len = GetModuleFileNameW(NULL, path.data(),
                                              static_cast<DWORD>(path.size()));
         if (len == 0) return ".";
-        // Full bucket means the name was cut off. Fetch a bigger bucket.
+        // A full buffer means the path was truncated — retry with a larger one.
         if (len < path.size()) {
             path.resize(len);
             break;
@@ -140,8 +139,8 @@ std::string get_executable_dir() {
 }
 
 std::string get_adb_path() {
-    // Comes back UTF-8 and leaves UTF-8 — path::string() is the old letter-table and
-    // would break every cave whose name it cannot spell.
+    // UTF-8 in, UTF-8 out. path::string() would return the ANSI code page and break
+    // every path it cannot represent.
     const std::filesystem::path exe_dir = pm::util::path_from_utf8(get_executable_dir());
 #ifdef _WIN32
     const std::string adb_filename = "adb.exe";
@@ -152,7 +151,7 @@ std::string get_adb_path() {
     if (std::filesystem::exists(local_adb)) {
         return pm::util::path_to_utf8(local_adb);
     }
-    // Check scrcpy_download folder relative to exe
+    // Check the scrcpy_download folder relative to the executable.
     std::filesystem::path sibling_adb = exe_dir / ".." / "scrcpy_download" / adb_filename;
     if (std::filesystem::exists(sibling_adb)) {
         return pm::util::path_to_utf8(sibling_adb);
@@ -172,7 +171,7 @@ std::string get_adb_path() {
         }
     }
 
-    return "adb"; // developer fallback only
+    return "adb"; // developer fallback: rely on PATH
 }
 
 #ifdef _WIN32
@@ -199,10 +198,10 @@ bool AdbClient::run_command_windows(const std::string& cmdline, const std::funct
 
     PROCESS_INFORMATION pi = {0};
 
-    // Ugg! The A-flavour reads this line with the tribe's old letter-table, so every
-    // rock-name outside it turned into "?" on the way to adb — the phone then got a
-    // file called "??????.pdf" or none at all. The line is UTF-8 all the way in and
-    // gets turned into wide stones HERE, the one place the tribe understands.
+    // CreateProcessW, not the A variant: the latter parses the command line in the ANSI
+    // code page, so every file name outside it turned into "?" on the way to adb and the
+    // device ended up with "??????.pdf" or nothing at all. The command line is UTF-8 all
+    // the way in and is widened HERE, at the single boundary to Win32.
     const std::wstring wide_cmdline = pm::util::utf8_to_wide(cmdline);
     std::vector<wchar_t> cmdline_buf(wide_cmdline.begin(), wide_cmdline.end());
     cmdline_buf.push_back(L'\0');
@@ -265,7 +264,7 @@ bool ShellProcess::start(const std::string& device_id, const std::string& comman
 
     PROCESS_INFORMATION pi = {};
     std::string cmdline = "\"" + adb_path + "\" -s " + device_id + " shell " + command;
-    // Same road as run_command_windows: UTF-8 in, wide stones handed to the tribe.
+    // Same rule as run_command_windows: UTF-8 in, widened once for Win32.
     const std::wstring wide_cmdline = pm::util::utf8_to_wide(cmdline);
     std::vector<wchar_t> cmd_buf(wide_cmdline.begin(), wide_cmdline.end());
     cmd_buf.push_back(L'\0');
@@ -350,7 +349,8 @@ bool ShellProcess::start(const std::string& device_id, const std::string& comman
 
 void ShellProcess::stop() {
 #ifdef _WIN32
-    // Ugg! Kill child first so its pipe end closes and reader thread stops waiting.
+    // Kill the child first so its end of the pipe closes and the reader thread
+    // stops blocking on read.
     HANDLE process = static_cast<HANDLE>(m_process_handle.exchange(nullptr));
     if (process) {
         TerminateProcess(process, 0);
@@ -371,7 +371,7 @@ void ShellProcess::stop() {
 }
 
 bool Device::is_usb() const {
-    // ADB over TCP/IP usually contains an IP address format, USB does not
+    // A TCP/IP device id looks like "192.168.1.5:5555"; a USB serial does not.
     return id.find('.') == std::string::npos;
 }
 
@@ -386,7 +386,7 @@ AdbClient::~AdbClient() {
 }
 
 bool AdbClient::init() {
-    // Start ADB server just in case
+    // Make sure the adb server is running before anything else.
     run_adb_command({"start-server"});
     return true;
 }
@@ -396,7 +396,7 @@ std::string AdbClient::run_adb_command(const std::vector<std::string>& args) {
     std::string result;
 
 #ifdef _WIN32
-    // Build command line for Windows
+    // Build the command line for CreateProcessW.
     std::string cmdline = "\"" + adb_path + "\"";
     for (const auto& arg : args) {
         cmdline += " ";
@@ -438,12 +438,12 @@ std::string AdbClient::run_adb_command(const std::vector<std::string>& args) {
 
     if (pid == 0) {
         // Child process
-        close(pipefd[0]); // Close read end
+        close(pipefd[0]); // close the read end
         dup2(pipefd[1], STDOUT_FILENO);
         dup2(pipefd[1], STDERR_FILENO);
         close(pipefd[1]);
 
-        // Build argv
+        // Build argv for execvp.
         std::vector<const char*> argv;
         argv.push_back(adb_path.c_str());
         for (const auto& arg : args) {
@@ -452,10 +452,10 @@ std::string AdbClient::run_adb_command(const std::vector<std::string>& args) {
         argv.push_back(nullptr);
 
         execvp(adb_path.c_str(), const_cast<char* const*>(argv.data()));
-        _exit(127); // exec failed
+        _exit(127); // exec failed — same convention the shell uses
     } else {
         // Parent process
-        close(pipefd[1]); // Close write end
+        close(pipefd[1]); // close the write end
 
         char buffer[4096];
         ssize_t bytesRead;
@@ -496,7 +496,7 @@ std::vector<Device> AdbClient::get_devices() {
             dev.id = id;
             dev.state = state;
 
-            // Cave man read model mark from adb stone.
+            // Pull the model name out of the adb device line.
             dev.model = value_after(line, "model:");
 
             devices.push_back(std::move(dev));
@@ -524,7 +524,7 @@ bool AdbClient::connect_device(const std::string& ip, int port) {
     std::string target = ip + ":" + std::to_string(port);
     std::cout << "[ADB] Connecting to " << target << "..." << std::endl;
     
-    // Add retry loop to handle daemon startup delay
+    // Retry: the adb daemon may still be starting up on the device.
     int max_retries = 10;
     for (int i = 0; i < max_retries; ++i) {
         try {
@@ -564,16 +564,17 @@ bool AdbClient::enable_tcpip(const std::string& device_id, int port) {
 bool AdbClient::install_app(const std::string& device_id, const std::string& apk_path) {
     m_last_install_error.clear();
 
-    // apk_path is UTF-8 (see the note at the top of adb_client.h) — handing it to the
-    // file tools raw would make them read it with the tribe's old letter-table.
+    // apk_path is UTF-8 (see the note at the top of adb_client.h), so it has to go
+    // through path_from_utf8 before std::filesystem sees it.
     if (!std::filesystem::exists(pm::util::path_from_utf8(apk_path))) {
         m_last_install_error = "APK nicht gefunden: " + apk_path;
         log_adb_event("[ADB] APK not found: " + apk_path);
         return false;
     }
 
-    // Cave man ask phone who sit in front of it. Then install ONLY into that cave.
-    // Without --user, phone would smear app over every user, also private space. NO!
+    // Ask which user profile is in the foreground and install ONLY into that one.
+    // Without --user, Android installs the app for every profile including the
+    // private space.
     std::string user = get_current_user(device_id);
 
     std::vector<std::string> args = {"-s", device_id, "install"};
@@ -602,7 +603,7 @@ bool AdbClient::install_app(const std::string& device_id, const std::string& apk
 bool AdbClient::install_pushed_app(const std::string& device_id, const std::string& remote_apk_path) {
     m_last_install_error.clear();
 
-    // Same rule as install_app: ONLY the cave whose human sits at the fire right now.
+    // Same rule as install_app: only the user profile that is currently in the foreground.
     const std::string user = get_current_user(device_id);
 
     std::string command = "pm install";
@@ -611,13 +612,13 @@ bool AdbClient::install_pushed_app(const std::string& device_id, const std::stri
     } else {
         log_adb_event("[ADB] Could not read current user, installing pushed APK without --user");
     }
-    // Ugg! NO -g here, unlike install_app. -g means "hand this app every key to the
-    // cave at once" — camera, ear, where the human stands — without the phone ever
-    // asking. For OUR OWN app the human already said yes by setting the thing up. A
-    // rock somebody dragged into the window is a stranger: it gets installed, and then
-    // it asks for its keys the normal way, like every app from the store does.
-    // -t (test builds) and -d (older version) stay: those hand out nothing, they only
-    // stop the phone from refusing an APK the human clearly meant to install.
+    // NO -g here, unlike install_app. -g pre-grants every runtime permission — camera,
+    // microphone, location — without the phone ever asking. That is defensible for our
+    // own APK, which the user installed on purpose; an APK dragged into the window is
+    // an unknown app and must request its permissions the normal way, like anything
+    // installed from a store.
+    // -t (test builds) and -d (downgrade) stay: they grant nothing, they only stop the
+    // device from refusing an APK the user clearly meant to install.
     command += " -t -r -d " + shell_quote(remote_apk_path);
 
     const std::string output = execute_shell_command(device_id, command);
@@ -635,7 +636,7 @@ bool AdbClient::install_pushed_app(const std::string& device_id, const std::stri
 std::string AdbClient::get_current_user(const std::string& device_id) {
     std::string output = trim(execute_shell_command(device_id, "am get-current-user"));
 
-    // Phone must answer with plain number. Anything else = cave man does not trust it.
+    // The device must answer with a plain number; anything else is not trusted.
     if (output.empty() || output.find_first_not_of("0123456789") != std::string::npos) {
         return {};
     }
@@ -645,7 +646,7 @@ std::string AdbClient::get_current_user(const std::string& device_id) {
 std::vector<std::string> AdbClient::users_with_app(const std::string& device_id, const std::string& package_name) {
     std::vector<std::string> users;
 
-    // "pm list users" spits lines like: UserInfo{0:Friedrich:4c13} running
+    // "pm list users" prints lines like: UserInfo{0:Friedrich:4c13} running
     const std::string user_list = execute_shell_command(device_id, "pm list users");
     const std::string marker = "UserInfo{";
 
@@ -708,12 +709,13 @@ bool AdbClient::push_file_paced(const std::string& device_id, const std::string&
                                const std::string& remote_path,
                                const std::function<void(uint64_t, uint64_t)>& on_progress,
                                const std::atomic<bool>* cancel) {
-    // One piece per throw. Big enough that starting the adb helper does not eat the
-    // whole trip, small enough that the stream only ever loses the air for a blink.
+    // Chunk size: large enough that spawning an adb process per chunk is not the
+    // dominant cost, small enough that the stream only loses airtime briefly.
     constexpr uint64_t CHUNK_BYTES = 1024 * 1024;
 
-    // local_path is UTF-8. The file tools want a real path, not a narrow string they
-    // would read with the tribe's old letter-table — "Größe.pdf" would not be found.
+    // local_path is UTF-8, so it must be converted with path_from_utf8. Constructing a
+    // path from the narrow string directly would read it in the ANSI code page and
+    // "Größe.pdf" would not be found.
     const std::filesystem::path local_file = pm::util::path_from_utf8(local_path);
 
     std::error_code ec;
@@ -723,7 +725,7 @@ bool AdbClient::push_file_paced(const std::string& device_id, const std::string&
         return false;
     }
 
-    // Small rock fits in one hand. No point in slicing it.
+    // A file smaller than one chunk: no point in pacing it.
     if (total <= CHUNK_BYTES) {
         const bool ok = push_file(device_id, local_path, remote_path);
         if (ok && on_progress) on_progress(total, total);
@@ -736,26 +738,26 @@ bool AdbClient::push_file_paced(const std::string& device_id, const std::string&
         return false;
     }
 
-    // Ugg! The old code handed this the error stone from file_size() and then never
-    // looked at it again. With no temp cave the path came out empty and the piece
-    // file grew in whatever hole the app happened to stand in. Ask, and fall back to
-    // the exe cave if the tribe has no temp cave at all.
+    // Use a fresh error_code and actually check it. Reusing the one from file_size()
+    // and ignoring the result meant that when temp_directory_path() failed, the path
+    // came out empty and the chunk file was written into the current working
+    // directory. Fall back to the executable's directory if there is no temp dir.
     std::filesystem::path temp_dir = std::filesystem::temp_directory_path(ec);
     if (ec || temp_dir.empty()) {
-        log_adb_event("[ADB] No temp cave for paced push, using the exe cave instead");
+        log_adb_event("[ADB] No temp directory for paced push, using the executable directory instead");
         temp_dir = pm::util::path_from_utf8(get_executable_dir());
     }
     const std::filesystem::path chunk_path = temp_dir /
         ("pixelmirroring-push-" + std::to_string(
             std::chrono::steady_clock::now().time_since_epoch().count()) + ".part");
-    // The rock grows under a side name and only takes the real one once it is whole.
+    // The file grows under a temporary name and is renamed only once it is complete.
     const std::string remote_part = remote_path + ".pmpart";
     const std::string remote_glue = remote_path + ".pmglue";
 
-    // A client that was killed mid-throw leaves its half rocks lying in the phone's
-    // Download hole, where they show up in the file list forever — the tidy-up at the
-    // bottom only runs when the trip ENDS, not when the whole cave falls over. Nobody
-    // else ever sweeps them, so cave man sweeps before he starts.
+    // A client killed mid-transfer leaves partial files in the device's Download
+    // folder, where they stay visible in the file manager forever: the cleanup at the
+    // bottom only runs when the transfer ENDS, not when the process dies. Nothing else
+    // ever removes them, so sweep before starting.
     execute_shell_command(device_id,
         "rm -f " + shell_quote(remote_part) + " " + shell_quote(remote_glue));
 
@@ -788,8 +790,9 @@ bool AdbClient::push_file_paced(const std::string& device_id, const std::string&
 
         const auto throw_start = std::chrono::steady_clock::now();
 
-        // Every piece grows a side-rock, never the real name. An older rock of the same
-        // name stays whole until the very last moment — a broken trip must not eat it.
+        // Every chunk is appended to the temporary name, never the real one. An existing
+        // file of the same name stays intact until the very last step, so an aborted
+        // transfer cannot destroy it.
         const bool first_piece = (sent == 0);
         if (!push_file(device_id, pm::util::path_to_utf8(chunk_path),
                        first_piece ? remote_part : remote_glue)) {
@@ -797,8 +800,8 @@ bool AdbClient::push_file_paced(const std::string& device_id, const std::string&
             break;
         }
         if (!first_piece) {
-            // Ugg! Silence is a bad sign to trust — some phones mutter warnings even
-            // when all went well. Cave man asks for a word he can actually look for.
+            // Empty output is not a reliable success signal — some devices print
+            // warnings even when everything worked. Ask for an explicit marker instead.
             const std::string answer = execute_shell_command(device_id,
                 "cat " + shell_quote(remote_glue) + " >> " + shell_quote(remote_part) +
                 " && rm -f " + shell_quote(remote_glue) + " && echo PM_PIECE_OK");
@@ -813,8 +816,8 @@ bool AdbClient::push_file_paced(const std::string& device_id, const std::string&
         if (on_progress) on_progress(sent, total);
         if (sent >= total) break;
 
-        // Ugg! Picture-river first. Cave man rests as long as the throw took, so no
-        // matter how fast or slow the air is today, at most half of it is ours.
+        // The video stream comes first: sleep for as long as the chunk took, so no
+        // matter how fast the WLAN is, this transfer never takes more than half of it.
         auto rest = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - throw_start);
         rest = std::clamp(rest, std::chrono::milliseconds(20), std::chrono::milliseconds(2000));
@@ -824,18 +827,18 @@ bool AdbClient::push_file_paced(const std::string& device_id, const std::string&
     input.close();
     std::filesystem::remove(chunk_path, ec);
 
-    // Whole at last — now it may take the real name. Only here does an older rock of
-    // the same name give way.
+    // Complete: only now does it take the real name, and only now is an existing file
+    // of the same name replaced.
     if (ok) {
         const std::string answer = execute_shell_command(device_id,
             "mv -f " + shell_quote(remote_part) + " " + shell_quote(remote_path) + " && echo PM_MOVE_OK");
         if (answer.find("PM_MOVE_OK") == std::string::npos) {
-            log_adb_event("[ADB] Paced push could not give the rock its name: " + answer);
+            log_adb_event("[ADB] Paced push could not rename the finished file: " + answer);
             ok = false;
         }
     }
 
-    // Half a rock on the phone helps nobody — and would grow further on the next try.
+    // A partial file is useless and would be appended to again on the next attempt.
     if (!ok) {
         execute_shell_command(device_id,
             "rm -f " + shell_quote(remote_part) + " " + shell_quote(remote_glue));
@@ -895,7 +898,7 @@ bool AdbClient::grant_secure_settings(const std::string& device_id) {
         "pm grant dev.pixelmirroring.app android.permission.WRITE_SECURE_SETTINGS"
     );
 
-    // Usually ADB returns empty on success for pm grant.
+    // "pm grant" normally prints nothing on success.
     if (output.find("Exception") != std::string::npos || output.find("Error") != std::string::npos) {
         std::cerr << "Failed to grant permission: " << output << std::endl;
         return false;
@@ -906,8 +909,9 @@ bool AdbClient::grant_secure_settings(const std::string& device_id) {
 }
 
 bool AdbClient::is_app_installed(const std::string& device_id, const std::string& package_name) {
-    // Cave man peek at app list of user who sit at phone NOW. Was hardcoded to user 0
-    // before, so phone with second user or private space told lies.
+    // Query the package list of the user profile that is in the foreground. This used
+    // to be hardcoded to user 0, which gave wrong answers on devices with a second
+    // user or a private space.
     std::string user = get_current_user(device_id);
     if (user.empty()) user = "0";
 
@@ -916,7 +920,7 @@ bool AdbClient::is_app_installed(const std::string& device_id, const std::string
 }
 
 bool AdbClient::has_permission(const std::string& device_id, const std::string& package_name, const std::string& permission) {
-    // Cave man dig through permission stones. Look for "granted=true".
+    // Scan the dumped permission list for "granted=true".
     std::string output = execute_shell_command(device_id, "dumpsys package " + package_name);
     std::string search = permission + ": granted=true";
     return output.find(search) != std::string::npos;

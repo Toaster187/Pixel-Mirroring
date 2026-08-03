@@ -26,7 +26,7 @@ bool Win32Tray::create(const std::string& tooltip, std::function<void()> on_clic
     m_on_click = std::move(on_click);
     HINSTANCE hinst = GetModuleHandle(nullptr);
 
-    // Cave man register message-only window class
+    // Message-only window class — it exists purely to receive the tray callbacks.
     WNDCLASSEXW wc = { sizeof(wc) };
     wc.lpfnWndProc = Win32Tray::window_proc;
     wc.hInstance = hinst;
@@ -46,8 +46,8 @@ bool Win32Tray::create(const std::string& tooltip, std::function<void()> on_clic
     m_nid.uID = 1;
     m_nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     m_nid.uCallbackMessage = WM_TRAYICON;
-    // Ugg! Our own rock painting in tray, small size. Fall back to boring
-    // system icon only if resource missing.
+    // Our own icon in the small tray size. Falls back to the generic system icon
+    // only if the resource is missing.
     m_nid.hIcon = (HICON)LoadImageW(hinst, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
         GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR);
     if (!m_nid.hIcon) m_nid.hIcon = LoadIcon(nullptr, IDI_APPLICATION);

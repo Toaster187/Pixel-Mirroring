@@ -73,18 +73,18 @@ void InputHandler::handle_key_up(int keycode) {
 }
 
 void InputHandler::handle_scroll(int x, int y, int ww, int wh, float hscroll, float vscroll) {
-    // scroll convert window to device. cave man spin wheel.
+    // Convert window coordinates to device coordinates before forwarding the scroll.
     int dx, dy;
     window_to_device(x, y, ww, wh, &dx, &dy);
     client_->inject_scroll(static_cast<float>(dx), static_cast<float>(dy), m_device_width, m_device_height, hscroll, vscroll);
 }
 
 void InputHandler::handle_text(const std::string& text) {
-    // Ugg! With the USB keyboard hanging on the phone the key itself already flew
-    // over. Writing the letter a second time would type everything twice.
+    // With the USB keyboard attached the key press itself was already sent, so
+    // injecting the resulting text on top of it would type everything twice.
     if (m_uhid_active.load()) return;
 
-    // text inject. cave man send string.
+    // No UHID keyboard: send the characters as text instead.
     client_->inject_text(text);
 }
 
@@ -123,8 +123,8 @@ bool InputHandler::enable_uhid_keyboard() {
         return false;
     }
 
-    // Fresh board, no key held. Set the flag LAST — until it is true nobody else
-    // looks at the state above.
+    // Fresh keyboard state, nothing held. Set the flag LAST: until it is true, no
+    // other thread reads the state initialised above.
     m_hid_keyboard = HidKeyboard();
     m_uhid_active.store(true);
     return true;
