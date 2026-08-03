@@ -957,6 +957,17 @@ bool start_stream(
     scrcpy.set_frame_callback([&](AVFrame* frame) {
         renderer.render_frame(frame);
     });
+
+    // Server 4.x says out loud when the picture changes shape mid-stream. Without this
+    // the mouse keeps aiming at the old ruler and the window keeps the old proportions
+    // — a turned display would put every poke in the wrong place.
+    scrcpy.set_resolution_callback([&window, &input](int new_w, int new_h) {
+        input.set_device_size(new_w, new_h);
+        window.post_task([&window, new_w, new_h]() {
+            window.set_aspect_ratio((double)new_w / (double)new_h);
+            window.set_orientation(new_w > new_h);
+        });
+    });
     window.set_render_callback([&](SDL_Renderer* renderer_ptr, int x, int y, int w, int h) {
         renderer.paint(renderer_ptr, x, y, w, h);
     });
@@ -985,10 +996,15 @@ bool start_stream(
 
     // The control socket only exists once the stream is up, so the phone's light is
     // dealt with here and not next to the brightness dance above. The "else" is not
-    // dead weight: it catches a session whose light-back-on word never arrived — and
-    // it must run even with a display of our own, or a panel that an earlier mirroring
-    // session left dark stays dark forever.
-    if (settings.m_screen_off && !own_display) {
+    // dead weight: it catches a session whose light-back-on word never arrived.
+    //
+    // With a display of our own this switch is not a nicety, it is THE way to keep the
+    // phone dark. Measured on a Pixel 9 with Android 17: the moment the phone itself
+    // falls asleep, WindowManager puts our display to sleep with it and the picture
+    // stops — server 4.x's keep_active only pokes it awake every four seconds and
+    // cannot hold it. Turning the PANEL off instead leaves the phone awake (and our
+    // display alive) while its screen is black, which is what the human wanted anyway.
+    if (settings.m_screen_off) {
         scrcpy.inject_screen_power_mode(false);
     } else if (scrcpy.screen_forced_off()) {
         scrcpy.inject_screen_power_mode(true);

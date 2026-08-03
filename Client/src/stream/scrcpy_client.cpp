@@ -65,7 +65,7 @@ constexpr int AUDIO_CHANNELS = 2;
 // Which server jar lies next to the exe. The server compares this word against its own
 // and refuses to start on any mismatch, so it may only ever be changed together with
 // Client/scrcpy-server.jar — and with every wire format that moved in between.
-constexpr const char* SERVER_VERSION = "3.3.4";
+constexpr const char* SERVER_VERSION = "4.1";
 
 // Control message types of the scrcpy protocol we speak beyond the old handful.
 constexpr uint8_t MSG_UHID_CREATE = 12;
@@ -178,6 +178,10 @@ void ScrcpyClient::set_device_clipboard_callback(ClipboardCallback cb) {
 
 void ScrcpyClient::set_control_lost_callback(ControlLostCallback cb) {
     control_lost_cb_ = std::move(cb);
+}
+
+void ScrcpyClient::set_resolution_callback(ResolutionCallback cb) {
+    resolution_cb_ = std::move(cb);
 }
 
 bool ScrcpyClient::start(const Config& config) {
@@ -425,7 +429,9 @@ bool ScrcpyClient::start_server_process() {
     cmd += "clipboard_autosync=true ";
     cmd += "send_dummy_byte=false ";
     cmd += "send_device_meta=false ";
-    cmd += "send_codec_meta=true ";
+    // Renamed in server 4.0. It now covers the codec id AND the session packets that
+    // carry the picture size, which used to sit in a fixed header (see read_metadata).
+    cmd += "send_stream_meta=true ";
     cmd += "send_frame_meta=true ";
     cmd += "tunnel_forward=" + std::string(config_.tunnel_forward ? "true" : "false") + " ";
 
@@ -447,6 +453,17 @@ bool ScrcpyClient::start_server_process() {
         // into the PC — on a phone that is supposed to stay dark and locked, nobody ever
         // finds it again. "local" nails the board onto OUR display.
         cmd += "display_ime_policy=local ";
+
+        // Ugg! A display of our own follows the PHONE to sleep. The moment the human
+        // locks the phone, WindowManager hangs a "Display-off" stone on our display
+        // too, the launcher stops painting and every poke lands in the dark — the very
+        // thing this mode exists to avoid. Verified on a Pixel 9 with Android 17:
+        //   Add SleepToken: tag=Display-off, displayId=0   (phone locked)
+        //   Add SleepToken: tag=Display-off, displayId=17  (ours, 200 ms later)
+        // FLAG_ALWAYS_UNLOCKED only walks past the lock screen, not past sleep. This is
+        // what keep_active is for: the server pokes PowerManager.userActivity() on OUR
+        // display alone. It only exists since server 4.x — the reason we are on 4.1.
+        cmd += "keep_active=true ";
     }
 
     log_stream_event("[Scrcpy] Executing server: " + cmd);
@@ -605,26 +622,49 @@ bool ScrcpyClient::connect_sockets() {
 }
 
 bool ScrcpyClient::read_metadata() {
-    // Read codec info (12 bytes: id, width, height)
-    uint8_t codec_meta[12];
-    int total_bytes_read = 0;
-    while (total_bytes_read < 12) {
-        int bytes_read = recv(video_socket_, (char*)codec_meta + total_bytes_read, 12 - total_bytes_read, 0);
-        if (bytes_read == 0) {
-            std::cerr << "[Scrcpy] Connection closed while reading codec meta" << std::endl;
-            return false;
+    // Ugg! No threads are alive yet, so running_ is still false and recv_all() would
+    // refuse every byte. This one reads on its own until the pile is full.
+    auto read_blocking = [this](uint8_t* out, int length, const char* what) {
+        int total = 0;
+        while (total < length) {
+            const int got = recv(video_socket_, (char*)out + total, length - total, 0);
+            if (got <= 0) {
+                std::cerr << "[Scrcpy] Failed to read " << what << std::endl;
+                return false;
+            }
+            total += got;
         }
-        if (bytes_read < 0) {
-            std::cerr << "[Scrcpy] Failed to read codec meta" << std::endl;
-            return false;
-        }
-        total_bytes_read += bytes_read;
+        return true;
+    };
+
+    // Since server 4.0 the video header is the codec id ALONE. The picture size used to
+    // sit right behind it in the same header; now it rides in the stream as a session
+    // packet — the first one arrives before any picture, and a new one after every
+    // rotation or resize (see video_thread_loop).
+    uint8_t codec_id_buf[4];
+    if (!read_blocking(codec_id_buf, 4, "video codec id")) {
+        return false;
     }
-    
-    video_codec_id_ = (codec_meta[0] << 24) | (codec_meta[1] << 16) | (codec_meta[2] << 8) | codec_meta[3];
-    initial_width_ = (codec_meta[4] << 24) | (codec_meta[5] << 16) | (codec_meta[6] << 8) | codec_meta[7];
-    initial_height_ = (codec_meta[8] << 24) | (codec_meta[9] << 16) | (codec_meta[10] << 8) | codec_meta[11];
-    
+    video_codec_id_ = (codec_id_buf[0] << 24) | (codec_id_buf[1] << 16)
+                    | (codec_id_buf[2] << 8) | codec_id_buf[3];
+
+    uint8_t session_meta[12];
+    if (!read_blocking(session_meta, 12, "session meta")) {
+        return false;
+    }
+    // The top bit says "this is a session packet, not a picture". If it is missing we
+    // are reading a picture header as if it were a size and everything after is rubbish
+    // — that is exactly what a wrong server version looks like, so say so and stop.
+    if ((session_meta[0] & 0x80) == 0) {
+        std::cerr << "[Scrcpy] Expected a session packet, got something else — "
+                     "server/client version mismatch?" << std::endl;
+        return false;
+    }
+    initial_width_ = (session_meta[4] << 24) | (session_meta[5] << 16)
+                   | (session_meta[6] << 8) | session_meta[7];
+    initial_height_ = (session_meta[8] << 24) | (session_meta[9] << 16)
+                    | (session_meta[10] << 8) | session_meta[11];
+
     {
         std::ostringstream oss;
         oss << "[Scrcpy] Metadata codec=" << video_codec_id_
@@ -735,6 +775,36 @@ void ScrcpyClient::video_thread_loop() {
 
         uint64_t pts = 0;
         for (int i = 0; i < 8; ++i) pts = (pts << 8) | header[i];
+
+        // Ugg! Server 4.0 pushed both old flags down one bit and took the top one for
+        // itself. Reading the old places makes every picture look like a config packet.
+        constexpr uint64_t SC_PACKET_FLAG_SESSION = 1ULL << 63;
+        constexpr uint64_t SC_PACKET_FLAG_CONFIG = 1ULL << 62;
+
+        if ((pts & SC_PACKET_FLAG_SESSION) != 0) {
+            // A session packet IS the whole message — no picture follows it. The twelve
+            // stones are flags, width, height. It arrives once before the first picture
+            // and again whenever the display turns or is resized under us.
+            const uint32_t new_width = (header[4] << 24) | (header[5] << 16)
+                                     | (header[6] << 8) | header[7];
+            const uint32_t new_height = (header[8] << 24) | (header[9] << 16)
+                                      | (header[10] << 8) | header[11];
+            if (new_width > 0 && new_height > 0 &&
+                (new_width != initial_width_ || new_height != initial_height_)) {
+                initial_width_ = new_width;
+                initial_height_ = new_height;
+                std::ostringstream oss;
+                oss << "[Scrcpy] Display resized to " << new_width << "x" << new_height;
+                log_stream_event(oss.str());
+                // Whoever maps mouse pokes onto the phone is now working with the wrong
+                // ruler until they hear this.
+                if (resolution_cb_) {
+                    resolution_cb_(static_cast<int>(new_width), static_cast<int>(new_height));
+                }
+            }
+            continue;
+        }
+
         uint32_t size = (header[8] << 24) | (header[9] << 16) | (header[10] << 8) | header[11];
 
         // Validate packet size
@@ -743,7 +813,6 @@ void ScrcpyClient::video_thread_loop() {
             break;
         }
 
-        constexpr uint64_t SC_PACKET_FLAG_CONFIG = 1ULL << 63;
         bool is_config = (pts & SC_PACKET_FLAG_CONFIG) != 0;
 
         packet_data.resize(size);

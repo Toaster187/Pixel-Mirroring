@@ -70,9 +70,14 @@ public:
     using DisconnectCallback = std::function<void()>;
     using ClipboardCallback = std::function<void(const std::string& text)>;
     using ControlLostCallback = std::function<void()>;
+    // Fires from the video thread when the phone changes the picture size mid-stream
+    // (rotation, or a resize we asked for). Server 4.x announces this in the stream;
+    // before that the size was fixed for the whole session.
+    using ResolutionCallback = std::function<void(int width, int height)>;
     void set_frame_callback(FrameCallback cb);
     void set_disconnect_callback(DisconnectCallback cb);
     void set_device_clipboard_callback(ClipboardCallback cb);
+    void set_resolution_callback(ResolutionCallback cb);
 
     // Fires when the phone's control thread falls over. The picture keeps running
     // but nothing listens any more — no keys, no mouse, no clipboard.
@@ -180,6 +185,7 @@ private:
     DisconnectCallback disconnect_cb_;
     ClipboardCallback clipboard_cb_;
     ControlLostCallback control_lost_cb_;
+    ResolutionCallback resolution_cb_;
 
     // Device Info
     std::string device_name_;
