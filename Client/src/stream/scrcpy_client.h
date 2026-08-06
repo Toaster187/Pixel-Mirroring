@@ -51,18 +51,18 @@ public:
         // How long the PHONE may stay untouched before it falls asleep, in ms. 0 = do
         // not touch the setting.
         //
-        // Ugg! Turning the panel off does NOT stop the phone's own idle clock: Android
-        // still believes its screen is on (we went past it through SurfaceControl) and
-        // dozes off after its usual minute — taking the PC's display with it. The
-        // server writes this value and its own cleanup process puts the old one back,
-        // even if the server is killed. Doing it ourselves would leave a phone that
-        // never sleeps again whenever this client dies badly.
+        // Turning the panel off does NOT stop the phone's own idle timer: Android still
+        // believes its screen is on (SET_DISPLAY_POWER goes past it through
+        // SurfaceControl) and dozes off after its usual minute, taking the PC's display
+        // with it. The server writes this value and its own cleanup process restores the
+        // old one even if the server is killed. Writing it from here instead would leave
+        // a phone that never sleeps again whenever this client dies badly.
         int screen_off_timeout_ms = 0;
     };
 
-    // Biggest HID report this client will carry to the phone. A keyboard report
-    // is 8 bytes; the cap only exists so the hot send path can use a stone from
-    // the stack instead of digging in the heap on every keystroke.
+    // Largest HID report this client will send. A keyboard report is 8 bytes; the cap
+    // only exists so the hot send path can use a stack buffer instead of allocating on
+    // every keystroke.
     static constexpr size_t UHID_MAX_REPORT_SIZE = 64;
 
     ScrcpyClient();
@@ -95,8 +95,8 @@ public:
     void set_device_clipboard_callback(ClipboardCallback cb);
     void set_resolution_callback(ResolutionCallback cb);
 
-    // Fires when the phone's control thread falls over. The picture keeps running
-    // but nothing listens any more — no keys, no mouse, no clipboard.
+    // Fires when the server's control thread dies. Video keeps running but nothing
+    // listens any more — no keys, no mouse, no clipboard.
     void set_control_lost_callback(ControlLostCallback cb);
 
     // Input Injection
@@ -107,40 +107,40 @@ public:
     void inject_set_clipboard(const std::string& text);
     void inject_get_clipboard(uint8_t copy_key = 0);
 
-    // Cave man pulls the phone's top curtains down or shoves them back up.
-    // Message types 5, 6 and 7 — one bare byte each.
+    // Opens and closes the phone's pull-down panels. Message types 5, 6 and 7 — a
+    // single byte each.
     void inject_expand_notification_panel();
     void inject_expand_settings_panel();
     void inject_collapse_panels();
 
-    // Type 10 (SET_DISPLAY_POWER since server 3.0): the phone's light itself, not just
-    // its brightness. false = panel dark, true = panel back to normal. The phone stays
-    // awake and steerable either way. Always aims at the phone's OWN panel, also while
-    // the picture comes from a display of our own.
+    // Type 10 (SET_DISPLAY_POWER since server 3.0): the panel power mode itself, not
+    // just brightness. false = panel off, true = back to normal. The phone stays awake
+    // and controllable either way. Always targets the phone's OWN panel, including
+    // while the picture comes from a display of our own.
     void inject_screen_power_mode(bool on);
 
-    // Type 16, server 3.x only: puts an app onto the display. Cave man only needs this
-    // when the phone hangs no launcher into a second display — then the new display
-    // would stay black forever and nothing could ever be started on it.
+    // Type 16, server 3.x and later: starts an app on the display. Needed when the
+    // phone puts no usable launcher on a secondary display — without it the new
+    // display stays black and nothing can ever be started on it.
     void start_app(const std::string& package_name);
 
-    // True while WE hold the phone's light down. Stays true across stop() when the
-    // "light back on" word never reached the phone — then somebody else must fix it.
+    // True while WE are holding the panel off. Stays true across stop() if the "panel
+    // back on" message never reached the phone, so a later session can still fix it.
     bool screen_forced_off() const { return screen_forced_off_.load(); }
 
     // Virtual USB devices (scrcpy UHID protocol).
     //
-    // Ugg! ASK FIRST. If the phone refuses /dev/uhid and we tell the server to
-    // build a keyboard anyway, the server's whole control thread dies with it —
-    // keys, mouse, touch and clipboard all go quiet while the picture happily
-    // keeps running. device_supports_uhid() is what stops that from happening.
+    // PROBE FIRST. If the device refuses /dev/uhid and UHID_CREATE is sent anyway, the
+    // exception escapes the server's handleEvent() and takes its entire control thread
+    // down — keys, mouse, touch and clipboard all go silent while video keeps running.
+    // device_supports_uhid() exists to prevent exactly that.
     bool device_supports_uhid();
     bool uhid_create(uint16_t id, const std::string& name,
                      const uint8_t* report_desc, size_t desc_size);
     void uhid_input(uint16_t id, const uint8_t* data, size_t size);
     void uhid_destroy(uint16_t id);
 
-    // Opens the phone's physical-keyboard settings, where the German layout is
+    // Opens the phone's physical-keyboard settings, where the German layout has to be
     // assigned to the virtual keyboard.
     void open_hard_keyboard_settings();
 
@@ -150,13 +150,13 @@ private:
     bool connect_sockets();
     bool read_metadata();
 
-    // Ugg! Two hunters used to shout into the same control hole at once and the
-    // words got mixed. Now every message goes through here, one at a time, and
-    // keeps pushing until the whole message is out.
+    // The UI thread and the screen-poll thread both send on the control socket, so
+    // every message goes through here: serialised by a mutex, and looping until the
+    // whole message has actually been written.
     bool send_control(const uint8_t* data, size_t length);
 
-    // Reads exactly len bytes, riding out the recv timeouts, and gives up when the
-    // session ends or the socket really dies. Shared by all three stream loops.
+    // Reads exactly len bytes, tolerating recv timeouts, and gives up when the session
+    // ends or the socket really dies. Shared by all three stream loops.
     bool recv_all(SOCKET socket_handle, char* buffer, int length);
 
     // Tears down whatever start() managed to build before it hit a wall.
@@ -175,7 +175,7 @@ private:
     SOCKET control_socket_;
     std::mutex control_mutex_;
 
-    // The "adb shell app_process ..." that carries the server. Killed in stop().
+    // The "adb shell app_process ..." that hosts the server. Killed in stop().
     pm::adb::ShellProcess server_process_;
 
     std::thread video_thread_;
@@ -183,17 +183,17 @@ private:
     std::thread control_thread_;
     std::atomic<bool> running_{false};
 
-    // Deliberately NOT reset in start(): if the phone's light is still down from a
-    // session whose socket died, the next session has to know and put it back.
+    // Deliberately NOT reset in start(): if the panel is still off from a session
+    // whose socket died, the next session has to know and turn it back on.
     std::atomic<bool> screen_forced_off_{false};
 
-    // What each phone once answered about /dev/uhid. A phone does not change its
-    // mind while the cave is open, so the adb child only has to run once per phone.
+    // Cached /dev/uhid probe result per device. A device does not change its answer
+    // while the app is running, so the adb child only has to run once per device.
     // Written from the connection thread, read from the UI thread on a menu click.
     std::mutex uhid_probe_mutex_;
     std::unordered_map<std::string, bool> uhid_probe_cache_;
 
-    // Turns false when the phone says it cannot capture sound. Video must not care.
+    // Turns false when the device reports it cannot capture audio. Video must not care.
     bool audio_available_{false};
     AudioPlayer audio_player_;
 

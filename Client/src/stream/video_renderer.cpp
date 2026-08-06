@@ -18,7 +18,7 @@ namespace pm::stream {
 
 namespace {
 #ifdef _WIN32
-// Cave man signal main thread: new frame ready, paint now
+// Signals the UI thread that a new frame is ready to be painted.
 constexpr UINT WM_VIDEO_RENDER = WM_APP + 2;
 #endif
 }
@@ -40,7 +40,7 @@ bool VideoRenderer::init(void* native_window_handle) {
             return false;
         }
     }
-    // Cave man forget old picture on reconnect, else stale phone screen flashes up.
+    // Drop the last frame on reconnect, or a stale phone screen flashes up first.
     av_frame_unref(m_frame);
     m_has_frame = false;
     m_frame_width = 0;
@@ -60,8 +60,7 @@ void VideoRenderer::render_frame(void* frame) {
         return;
     }
 
-    // Cave man only handle YUV420P or YUVJ420P — that what scrcpy send
-    // Other formats = no good, skip
+    // scrcpy only ever sends YUV420P or YUVJ420P; anything else is skipped.
     if (av_frame->format != 0 /* AV_PIX_FMT_YUV420P */ && av_frame->format != 12 /* AV_PIX_FMT_YUVJ420P */) {
         std::cerr << "[Renderer] Unsupported pixel format: " << av_frame->format << std::endl;
         return;
@@ -73,19 +72,19 @@ void VideoRenderer::render_frame(void* frame) {
             return;
         }
 
-        // Resize if frame size changed
+        // Rebuild the texture when the frame size changed (rotation, quality switch).
         if (width != m_frame_width || height != m_frame_height) {
             m_frame_width = width;
             m_frame_height = height;
-            // Destroy old texture — size wrong now
+            // The old texture has the wrong size now.
             if (m_texture) {
                 SDL_DestroyTexture(m_texture);
                 m_texture = nullptr;
             }
         }
 
-        // Cave man just points at the picture instead of carrying it. FFmpeg counts
-        // the pointers, so the decoder cannot recycle it while the GPU still reads.
+        // Reference the frame rather than copying it. FFmpeg refcounts its buffers, so
+        // the decoder cannot reuse this one while the GPU is still reading from it.
         av_frame_unref(m_frame);
         if (av_frame_ref(m_frame, av_frame) < 0) {
             m_has_frame = false;
@@ -95,14 +94,15 @@ void VideoRenderer::render_frame(void* frame) {
         m_has_frame = true;
     }
 
-    // Cave man save same ADB stream frame, never press phone screenshot button.
+    // Screenshots come from the decoded stream frame, not from a screenshot
+    // command run on the phone.
     m_capture.on_frame(av_frame);
 
     request_render();
 }
 
 void VideoRenderer::paint(SDL_Renderer* renderer, int x, int y, int width, int height) {
-    // Cave man UI is ready now. New frame after this must wake it again.
+    // The UI has caught up; the next frame has to signal it again.
     m_render_requested.store(false, std::memory_order_release);
 
     if (!renderer || width <= 0 || height <= 0) {
@@ -114,12 +114,12 @@ void VideoRenderer::paint(SDL_Renderer* renderer, int x, int y, int width, int h
         return;
     }
 
-    // Create YUV texture if needed — GPU handle color conversion
+    // Create the YUV texture on demand — the GPU does the colour conversion.
     if (!m_texture || m_cached_renderer != renderer) {
         if (m_texture) {
             SDL_DestroyTexture(m_texture);
         }
-        // Cave man set best scaling quality before make texture
+        // The scaling hint has to be set before the texture is created.
         SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "best");
         m_texture = SDL_CreateTexture(
             renderer,
@@ -133,11 +133,11 @@ void VideoRenderer::paint(SDL_Renderer* renderer, int x, int y, int width, int h
             std::cerr << "[Renderer] Could not create YUV texture: " << SDL_GetError() << std::endl;
             return;
         }
-        // Cave man set scale mode to best so big screen look nice
+        // Best scaling mode, so an upscaled picture stays smooth.
         SDL_SetTextureScaleMode(m_texture, SDL_ScaleModeBest);
     }
 
-    // Upload YUV planes straight from the decoded frame — no CPU copy, no conversion
+    // Upload the YUV planes straight from the decoded frame — no CPU copy, no conversion.
     SDL_UpdateYUVTexture(
         m_texture,
         nullptr,
@@ -146,7 +146,7 @@ void VideoRenderer::paint(SDL_Renderer* renderer, int x, int y, int width, int h
         m_frame->data[2], m_frame->linesize[2]
     );
 
-    // Calculate aspect-ratio-preserving destination rect
+    // Destination rectangle that preserves the source aspect ratio.
     double src_aspect = static_cast<double>(m_frame_width) / m_frame_height;
     double dst_aspect = static_cast<double>(width) / height;
 
@@ -164,7 +164,7 @@ void VideoRenderer::paint(SDL_Renderer* renderer, int x, int y, int width, int h
 
     SDL_Rect dst_rect = { offset_x, offset_y, target_w, target_h };
 
-    // GPU do scaling and YUV->RGB — cave man just copy and blit
+    // The GPU does the scaling and the YUV->RGB conversion.
     SDL_RenderCopy(renderer, m_texture, nullptr, &dst_rect);
 }
 
@@ -195,8 +195,9 @@ void VideoRenderer::shutdown() {
 void VideoRenderer::request_render() {
 #ifdef _WIN32
     HWND hwnd = static_cast<HWND>(m_native_window_handle);
-    // Cave man keep only one render knock queued. At 60 FPS, slow UI no make
-    // 60 stale full-frame uploads per second; it paints newest frame once.
+    // Keep at most one repaint request queued. Otherwise a UI thread that falls behind
+    // at 60 FPS would work through 60 stale full-frame uploads a second instead of
+    // painting the newest frame once.
     if (hwnd && !m_render_requested.exchange(true, std::memory_order_acq_rel)) {
         if (!PostMessage(hwnd, WM_VIDEO_RENDER, 0, 0)) {
             m_render_requested.store(false, std::memory_order_release);

@@ -21,7 +21,7 @@ class AdbWifiManager(private val context: Context) {
      */
     suspend fun enableAdbWifi(): Boolean {
         return try {
-            // First turn it off to ensure daemon restarts when we turn it back on
+            // Turn it off first, so adbd actually restarts when it is turned back on.
             Settings.Global.putInt(
                 context.contentResolver,
                 ADB_WIFI_ENABLED,
@@ -79,7 +79,7 @@ class AdbWifiManager(private val context: Context) {
             nsdManager.discoverServices("_adb-tls-connect._tcp.", NsdManager.PROTOCOL_DNS_SD, listener)
             listenerRegistered = true
 
-            // Wait up to 3 seconds for port to be discovered
+            // Wait up to 3 seconds for the mDNS-advertised port to appear.
             for (i in 0..30) {
                 if (discoveredPort.get() != -1) break
                 kotlinx.coroutines.delay(100)
@@ -104,7 +104,7 @@ class AdbWifiManager(private val context: Context) {
      */
     suspend fun enableAdbTcpIp(port: Int = 5555): Boolean {
         return try {
-            // Set to -1 first to trigger change observer
+            // Write -1 first so the settings observer fires even if the value is unchanged.
             Settings.Global.putString(
                 context.contentResolver,
                 ADB_TCP_PORT,
@@ -171,7 +171,7 @@ class AdbWifiManager(private val context: Context) {
     }
 
     /**
-     * Deaktiviert ADB over WiFi wieder. Cave man close the wifi door.
+     * Deaktiviert ADB over WiFi wieder und schließt damit die Angriffsfläche.
      */
     fun disableAdbWifi(): Boolean {
         return try {

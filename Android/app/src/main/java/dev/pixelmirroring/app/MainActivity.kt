@@ -25,7 +25,7 @@ class MainActivity : ComponentActivity() {
         
         adbWifiManager = AdbWifiManager(this)
 
-        // Start Foreground Service
+        // The discovery server lives in the foreground service, not in the Activity.
         if (adbWifiManager.hasSecureSettingsPermission()) {
             val serviceIntent = Intent(this, MirroringService::class.java)
             startForegroundService(serviceIntent)

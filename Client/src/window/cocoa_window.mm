@@ -71,9 +71,9 @@ CocoaWindow::CocoaWindow(int width, int height, const std::string& title)
 }
 
 CocoaWindow::~CocoaWindow() {
-    // We should release the window if we retained it, but we rely on ARC if enabled, 
-    // or manual memory management for the NSWindow.
-    // For simplicity, we just close it.
+    // Only closed, not released: the NSWindow is held through a __bridge void*, so
+    // its lifetime is left to whichever memory model the file is compiled under.
+    // (macOS is not a buildable target today — see CLAUDE.md.)
     if (window_) {
         NSWindow* win = (__bridge NSWindow*)window_;
         [win close];

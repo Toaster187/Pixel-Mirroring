@@ -48,8 +48,9 @@ add_executable(PixelMirroring
 )
 
 if(MSVC)
-    # Ugg! Compiler eat source as cp1252 -> Ä Ö Ü turn to gibberish rocks.
-    # /utf-8 = source AND execution charset UTF-8. NEVER remove, umlauts die again!
+    # Without this MSVC reads UTF-8 sources as cp1252 and corrupts every "..." and
+    # L"..." literal, which is what broke the German UI in release 3.67.
+    # /utf-8 sets source AND execution charset to UTF-8. NEVER remove it.
     target_compile_options(PixelMirroring PRIVATE /EHsc /utf-8)
 endif()
 
@@ -58,10 +59,10 @@ if(PM_PORTABLE_BUILD)
 endif()
 
 # --- Self-checks ---
-# Ugg! No test tribe moved in here. This is one small cave with its own main() and a
-# hand-carved check(): it only needs hid_keyboard.cpp, so it builds in a blink and
-# drags in neither FFmpeg nor SDL. It is NOT installed and NOT packaged.
-# Run it with "ctest --test-dir build --output-on-failure" or start the exe directly.
+# No test framework here on purpose. This is a standalone main() with a hand-written
+# check(): it needs only hid_keyboard.cpp, so it builds quickly and pulls in neither
+# FFmpeg nor SDL. It is NOT installed and NOT packaged.
+# Run it with "ctest --test-dir build --output-on-failure", or start the exe directly.
 if(PM_BUILD_TESTS)
     enable_testing()
 
@@ -95,7 +96,8 @@ add_custom_command(TARGET PixelMirroring POST_BUILD
 )
 
 # --- Bootstrap Android Platform-Tools (ADB) ---
-# Cave man need ADB to talk to fire-box phone. If no ADB, cave man go get it!
+# The client ships its own adb, so users never need an Android SDK. If the bundled
+# platform-tools are missing, download them from Google at configure time.
 if(WIN32)
     set(PM_ADB_EXPECTED_FILE "adb.exe")
     set(PM_PLATFORM_TOOLS_URL "https://dl.google.com/android/repository/platform-tools-latest-windows.zip")
@@ -110,25 +112,25 @@ endif()
 set(PM_PLATFORM_TOOLS_DIR "${CMAKE_SOURCE_DIR}/vendor/platform-tools")
 
 if(NOT EXISTS "${PM_PLATFORM_TOOLS_DIR}/${PM_ADB_EXPECTED_FILE}")
-    message(STATUS "Ugg! ADB not found at ${PM_PLATFORM_TOOLS_DIR}/${PM_ADB_EXPECTED_FILE}. Downloading from Google...")
+    message(STATUS "ADB not found at ${PM_PLATFORM_TOOLS_DIR}/${PM_ADB_EXPECTED_FILE}. Downloading from Google...")
     set(PM_TEMP_ZIP "${CMAKE_CURRENT_BINARY_DIR}/platform-tools.zip")
     
     file(DOWNLOAD "${PM_PLATFORM_TOOLS_URL}" "${PM_TEMP_ZIP}" SHOW_PROGRESS STATUS PM_DOWNLOAD_STATUS)
     list(GET PM_DOWNLOAD_STATUS 0 PM_DOWNLOAD_ERR)
     if(NOT PM_DOWNLOAD_ERR EQUAL 0)
         list(GET PM_DOWNLOAD_STATUS 1 PM_DOWNLOAD_MSG)
-        message(FATAL_ERROR "Ugg! Failed to download ADB: ${PM_DOWNLOAD_MSG}")
+        message(FATAL_ERROR "Failed to download ADB: ${PM_DOWNLOAD_MSG}")
     endif()
 
-    message(STATUS "Ugg! Extracting ADB...")
+    message(STATUS "Extracting ADB...")
     file(ARCHIVE_EXTRACT INPUT "${PM_TEMP_ZIP}" DESTINATION "${CMAKE_SOURCE_DIR}/vendor")
     file(REMOVE "${PM_TEMP_ZIP}")
     
-    # On POSIX, make ADB executable
+    # The zip does not preserve the executable bit on POSIX.
     if(NOT WIN32)
         execute_process(COMMAND chmod +x "${PM_PLATFORM_TOOLS_DIR}/adb")
     endif()
-    message(STATUS "Ugg! ADB bootstrap finished successfully!")
+    message(STATUS "ADB bootstrap finished successfully")
 endif()
 
 # --- Fossify Launcher for the virtual-display experiment ---
@@ -196,7 +198,8 @@ foreach(PM_ADB_RUNTIME_FILE IN LISTS PM_ADB_RUNTIME_FILES)
 endforeach()
 
 # --- Copy scrcpy-server.jar ---
-# Cave man need scrcpy server to throw pictures from phone to PC.
+# The scrcpy server jar is pushed to the device at runtime, so it has to sit next to
+# the executable.
 set(PM_SCRCPY_SERVER_CANDIDATES
     "${CMAKE_SOURCE_DIR}/../scrcpy_download/scrcpy-server.jar"
     "${CMAKE_SOURCE_DIR}/scrcpy-server.jar"
@@ -218,7 +221,7 @@ if(PM_SCRCPY_SERVER_PATH)
         COMMENT "Copy scrcpy-server.jar next to desktop client"
     )
 else()
-    message(WARNING "Ugg! scrcpy-server.jar not found anywhere!")
+    message(WARNING "scrcpy-server.jar not found in any of the expected locations")
 endif()
 
 target_include_directories(PixelMirroring PRIVATE ${FFMPEG_INCLUDE_DIRS})
@@ -239,11 +242,11 @@ add_custom_command(TARGET PixelMirroring POST_BUILD
 )
 
 # --- Runtime DLLs we actually load ---
-# Ugg! Cave man used to drag the WHOLE vcpkg cave next to the app: debug stones
-# (.pdb), the build-tool pkgconf, and avfilter/avdevice which nothing ever opens.
-# That was ~4 MB of dead weight in every installer. Now only what the EXE (and the
-# FFmpeg libs themselves) really pull in gets copied. Patterns, not fixed names,
-# so a version bump (avcodec-62 -> avcodec-63) does not silently drop a library.
+# Copying the whole vcpkg bin directory shipped debug symbols (.pdb), the build tool
+# pkgconf, and avfilter/avdevice which nothing ever loads — about 4 MB of dead weight
+# in every installer. Only what the EXE (and the FFmpeg libs themselves) actually
+# import is copied. Patterns rather than fixed names, so a version bump
+# (avcodec-62 -> avcodec-63) does not silently drop a library.
 set(PM_RUNTIME_DLL_PATTERNS
     "avcodec-*.dll"     # H.264/H.265/AV1 decode + BMP/x264 encode
     "avformat-*.dll"    # MP4 muxing for screen recordings
@@ -274,7 +277,7 @@ if(DEFINED VCPKG_TARGET_TRIPLET)
             COMMENT "Copy required vcpkg DLLs next to desktop client"
         )
     else()
-        message(WARNING "Ugg! No vcpkg runtime DLLs matched in ${PM_VCPKG_BIN}")
+        message(WARNING "No vcpkg runtime DLLs matched in ${PM_VCPKG_BIN}")
     endif()
 endif()
 
@@ -282,7 +285,7 @@ if(WIN32)
     # Required for custom window frame and GDI drawing on Windows.
     # shell32 brings DragAcceptFiles/DragQueryFileW for files dropped onto the window.
     target_link_libraries(PixelMirroring PRIVATE dwmapi uxtheme gdi32 gdiplus user32 shell32)
-    # No console window — we are GUI cave people
+    # GUI subsystem: no console window.
     set_target_properties(PixelMirroring PROPERTIES WIN32_EXECUTABLE TRUE)
 elseif(APPLE)
     # Required for native Cocoa window
@@ -353,9 +356,9 @@ set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/Toaster187/Pixel-Mirroring")
 set(CPACK_PACKAGE_CONTACT "https://github.com/Toaster187/Pixel-Mirroring/issues")
 set(CPACK_PACKAGE_INSTALL_DIRECTORY "Pixel Mirroring")
 
-# Ugg! The installer used to greet people with CMake's placeholder text ("This is an
-# installer created using CPack ... No license provided") and showed NO licence at all.
-# Point every page at the real texts instead.
+# Without these, CPack's placeholder text shows up in the installer ("This is an
+# installer created using CPack ... No license provided") and no licence at all.
+# Point every page at the real texts.
 set(PM_LICENSE_FOR_INSTALLER "${CMAKE_CURRENT_BINARY_DIR}/installer/License.txt")
 
 # The repo LICENSE is UTF-8 and full of German umlauts (the FFmpeg LGPL statement).
@@ -374,7 +377,7 @@ if(WIN32)
     if(PM_LICENSE_RC EQUAL 0 AND EXISTS "${PM_LICENSE_FOR_INSTALLER}")
         set(PM_LICENSE_TRANSCODED TRUE)
     else()
-        message(WARNING "Ugg! Could not transcode LICENSE to cp1252 — installer may show broken umlauts.")
+        message(WARNING "Could not transcode LICENSE to cp1252 - installer may show broken umlauts.")
     endif()
 endif()
 
@@ -390,8 +393,8 @@ set(CPACK_PACKAGE_DESCRIPTION_FILE "${CMAKE_CURRENT_SOURCE_DIR}/installer/Descri
 if(WIN32)
     set(CPACK_GENERATOR "ZIP;NSIS;WIX")
 
-    # Ugg! Squeeze the bundle harder. LZMA in solid mode packs all files as one
-    # block, which pays off a lot because the APK and the FFmpeg libs sit together.
+    # LZMA in solid mode compresses all files as a single block, which pays off here
+    # because the APK and the FFmpeg libraries compress well together.
     set(CPACK_NSIS_COMPRESSOR "/SOLID lzma")
     set(CPACK_ARCHIVE_THREADS 0)
 
@@ -420,9 +423,9 @@ if(WIN32)
     set(CPACK_NSIS_WELCOME_TITLE "Pixel Mirroring installieren")
     set(CPACK_NSIS_FINISH_TITLE "Pixel Mirroring ist installiert")
 
-    # Ugg! This value travels through two fires before NSIS sees it: CPack copies it
-    # into CPackConfig.cmake WITHOUT escaping, and CMake then re-parses that file.
-    # So everything has to be escaped for the SECOND pass:
+    # This value passes through two parsers before NSIS sees it: CPack writes it into
+    # CPackConfig.cmake WITHOUT escaping, and CMake then re-parses that file. So
+    # everything has to be escaped for the SECOND pass:
     #   \\\"     -> lands as \" in CPackConfig -> becomes " in the .nsi
     #   $\\\\r   -> lands as $\\r             -> becomes $\r in the .nsi (NSIS newline)
     # Do not "simplify" the backslashes here without repackaging and looking at the

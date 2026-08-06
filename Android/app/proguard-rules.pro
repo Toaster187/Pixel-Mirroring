@@ -1,5 +1,5 @@
-# Ugg! R8 throws away every stone nobody points at. Some stones are only named in
-# the manifest or picked up by name at runtime, so cave man marks them by hand.
+# R8 removes everything nothing references. Classes that are only named in the
+# manifest or looked up reflectively at runtime have to be kept by hand.
 
 # Components named in AndroidManifest.xml. AGP keeps these on its own, but being
 # explicit means a rename in the manifest can never silently kill them.
@@ -18,6 +18,6 @@
 }
 -keep,includedescriptorclasses class dev.pixelmirroring.app.network.**$$serializer { *; }
 
-# Cave man wants readable crash stones from the field.
+# Keep line numbers so crash reports from the field stay readable.
 -keepattributes SourceFile,LineNumberTable
 -renamesourcefileattribute SourceFile

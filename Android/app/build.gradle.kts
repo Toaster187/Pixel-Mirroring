@@ -23,9 +23,9 @@ android {
     }
 
     buildTypes {
-        // Ugg! The DEBUG apk is the one that ships — the desktop client installs it
-        // and CI publishes it. So it gets shrunk like a release build, otherwise the
-        // tribe carries 60 MB of unused Compose tooling and icon stones around.
+        // The DEBUG apk is the one that ships — the desktop client installs it and CI
+        // publishes it. So it is shrunk like a release build; without that it is ~60 MB
+        // of unused Compose tooling and icons instead of ~4 MB.
         debug {
             isMinifyEnabled = true
             isShrinkResources = true
@@ -40,7 +40,7 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
-        // Ugg! Sources always UTF-8, no matter what fire the build machine sit at.
+        // Sources are always UTF-8, whatever the build machine's default encoding is.
         encoding = "UTF-8"
     }
     kotlinOptions {
@@ -56,15 +56,15 @@ android {
     }
 }
 
-// Ugg! Same UTF-8 rule for every javac fire, also test ones.
+// The same UTF-8 rule for every javac task, including the test ones.
 tasks.withType<JavaCompile>().configureEach {
     options.encoding = "UTF-8"
 }
 
 dependencies {
     // Core & Compose
-    // Ugg! Cave man dragged home many tools he never picked up. Every one of them
-    // slept inside the shipped apk. Only what the app really touches stays.
+    // Only dependencies the app actually uses. Unused ones still end up in the
+    // shipped apk, and apk size is a feature here.
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
     implementation("androidx.activity:activity-compose:1.8.2")

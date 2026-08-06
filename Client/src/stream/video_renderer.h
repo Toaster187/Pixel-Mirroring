@@ -12,7 +12,7 @@ struct AVFrame;
 
 namespace pm::stream {
 
-// Cave man render frame on GPU — no CPU scaling, no double convert
+// Renders decoded frames on the GPU — no CPU scaling, no extra colour conversion.
 class VideoRenderer {
 public:
     VideoRenderer() = default;
@@ -36,9 +36,9 @@ private:
     SDL_Renderer* m_cached_renderer{nullptr};
     std::mutex m_frame_mutex;
 
-    // Ugg! Old cave man carried every picture across the cave by hand (three big
-    // memcpy per frame, ~180 MB every second at 1080p60). Now he just holds on to
-    // the picture FFmpeg already made (av_frame_ref) and the GPU reads it directly.
+    // A reference to the decoded frame, not a copy. Copying meant three plane memcpys
+    // per frame, roughly 180 MB/s at 1080p60; av_frame_ref lets SDL upload straight
+    // from FFmpeg's own buffers.
     AVFrame* m_frame{nullptr};
 
     int m_frame_width{0};

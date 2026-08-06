@@ -102,15 +102,15 @@ private:
     // the key was dealt with and must not walk down the Android-keycode path too.
     bool send_raw_key(bool pressed, LPARAM lparam);
 
-    // Holes the fake keyboard actually took, as scancode plus the extended bit.
-    // Only needed for auto-repeat: a repeat carves no new stone, so nobody asks
-    // the fake keyboard again — and without this shelf we would not know whether
-    // to swallow the repeat or let it walk the Android-keycode path.
+    // Keys the HID keyboard actually accepted, as scancode plus the extended bit.
+    // Only needed for auto-repeat: a repeat sends no new report, so the HID keyboard
+    // is not asked again — without this set there would be no way to tell whether to
+    // swallow the repeat or let it take the Android keycode path.
     std::unordered_set<uint32_t> hid_held_keys_;
 
-    // Virtual keys whose PRESS was eaten by a cave shortcut (Strg+U, Strg+L).
-    // Their release has to be eaten as well, or the fake keyboard tells the phone
-    // to let go of a key the phone never saw being pressed.
+    // Virtual keys whose PRESS was swallowed by a client shortcut (Ctrl+U, Ctrl+L).
+    // Their release has to be swallowed too, or the phone is told to release a key it
+    // never saw pressed.
     std::unordered_set<UINT> swallowed_shortcuts_;
 
     HWND hwnd_{nullptr};
@@ -122,9 +122,9 @@ private:
     int height_;
     std::string title_;
 
-    // Ugg! Cave man used to carve fresh letter-stones on every single paint, sixty
-    // times a heartbeat. Now he carves them once and keeps them on the shelf.
-    // Raw pointers, because they MUST die before GdiplusShutdown (release_fonts).
+    // Fonts are created once and cached instead of being rebuilt on every paint at
+    // 60 Hz. Raw pointers, because they MUST be released before GdiplusShutdown
+    // (see release_fonts).
     Gdiplus::FontFamily* font_family_ui_{nullptr};
     Gdiplus::FontFamily* font_family_icons_{nullptr};
     Gdiplus::Font* font_icon_{nullptr};
@@ -173,11 +173,11 @@ private:
     std::function<void()> m_restore_cb_;
     std::function<void(bool)> m_minimize_cb_;
 
-    // Ugg! WM_SIZE shouts SIZE_RESTORED for every drag of the window edge too. Only
-    // a real fold-down or fold-up is worth telling anybody about.
+    // WM_SIZE reports SIZE_RESTORED on every resize drag too, so only a real
+    // minimize/restore edge is worth reporting to the callback.
     bool minimized_{false};
     int quality_preset_{1};        // 0 = Akku, 1 = Ausgewogen, 2 = Maximal
-    bool quality_expanded_{false}; // Cave man folded the quality stones open?
+    bool quality_expanded_{false}; // are the three quality presets expanded?
     bool compatibility_mode_{false};
     bool lowest_brightness_{true};
     bool screen_off_{false};

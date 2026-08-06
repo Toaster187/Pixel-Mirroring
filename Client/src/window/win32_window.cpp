@@ -24,8 +24,8 @@ namespace {
     const int TRANSFER_BUBBLE_W = 132;
     const int TRANSFER_RING_ONLY_W = 40;
     const UINT WM_VIDEO_RENDER = WM_APP + 2;
-    // Cave man does not open talking-stone while the drag hand still holds the rock.
-    // Drop is handed back to ourselves first, so Explorer is free again.
+    // Never open a modal dialog from inside WM_DROPFILES — Explorer stays blocked
+    // until the drop handler returns. The drop is posted back to ourselves first.
     const UINT WM_FILES_DROPPED = WM_APP + 4;
     const wchar_t* ICON_DRAG = L"\uE700";
     const wchar_t* ICON_MINIMIZE = L"\uE921";
@@ -47,7 +47,6 @@ namespace {
     }
 
     std::string wchar_to_utf8(wchar_t wch) {
-        // convert character. cave man talk utf8.
         wchar_t wstr[2] = { wch, 0 };
         char buf[8] = { 0 };
         int len = WideCharToMultiByte(CP_UTF8, 0, wstr, 1, buf, sizeof(buf) - 1, nullptr, nullptr);
@@ -75,9 +74,9 @@ namespace {
         return wstr;
     }
 
-    // Ugg! Phone has three big cave buttons at the bottom. PC keyboard has none, so
-    // Alt + letter stands in for them. Alt (not Ctrl) because Ctrl+C/Ctrl+V already
-    // carry the clipboard back and forth, and Ctrl+U/Ctrl+L unlock and lock.
+    // Android's three navigation buttons have no equivalent on a PC keyboard, so
+    // Alt + letter stands in for them. Alt rather than Ctrl, because Ctrl+C/Ctrl+V
+    // carry the clipboard and Ctrl+U/Ctrl+L unlock and lock the phone.
     int alt_shortcut_to_android_keycode(WPARAM wparam) {
         switch (wparam) {
         case 'B': return 4;   // AKEYCODE_BACK
@@ -87,8 +86,8 @@ namespace {
         }
     }
 
+    // Virtual key -> Android keycode, for the keys that have no printable character.
     int vk_to_android_keycode(WPARAM wparam) {
-        // map VK to android key. cave man press buttons.
         switch (wparam) {
         case VK_RETURN:   return 66;  // AKEYCODE_ENTER
         case VK_BACK:     return 67;  // AKEYCODE_DEL
@@ -123,7 +122,7 @@ Win32Window::~Win32Window() {
     if (m_sdl_window) SDL_DestroyWindow(m_sdl_window);
     SDL_QuitSubSystem(SDL_INIT_VIDEO);
     if (icon_font_) DeleteObject(icon_font_);
-    // Cave man destroy child window before parent
+    // The child window has to go before its parent.
     if (hwnd_child_) DestroyWindow(hwnd_child_);
     if (hwnd_) {
         RemoveClipboardFormatListener(hwnd_);
@@ -158,13 +157,13 @@ void Win32Window::release_fonts() {
     delete font_family_icons_; font_family_icons_ = nullptr;
 }
 
-// Ugg! Spinner only turns while cave man waits. When the phone picture is live, or
-// the window sleeps in the tray, a 60-times-a-heartbeat repaint burns fire for nothing.
+// The spinner only animates while the user is waiting. Once the video is live, or
+// while the window sits in the tray, a 60 Hz repaint costs CPU for nothing.
 void Win32Window::update_animation_timer() {
     if (!hwnd_) return;
 
-    // Timers belong to the thread that owns the window. Some callers live on the
-    // connection thread, so hand the job over instead of poking from outside.
+    // Timers belong to the thread that owns the window. Some callers run on the
+    // connection thread, so hand the work over instead of calling in from outside.
     if (GetCurrentThreadId() != GetWindowThreadProcessId(hwnd_, nullptr)) {
         post_task([this]() { update_animation_timer(); });
         return;
@@ -183,7 +182,7 @@ void Win32Window::update_animation_timer() {
 
 void Win32Window::set_app_state(AppState s) {
     app_state_ = s;
-    // Cave man toggle child window visibility based on streaming state
+    // The SDL child window only exists to show video, so hide it when there is none.
     if (hwnd_child_) {
         ShowWindow(hwnd_child_, s == AppState::STREAMING ? SW_SHOW : SW_HIDE);
     }
@@ -194,15 +193,15 @@ void Win32Window::set_status_text(const std::string& t) { status_text_ = t; if (
 
 bool Win32Window::create() {
     HINSTANCE hi = GetModuleHandle(nullptr);
-    // Ugg! Class must be Unicode. An ANSI class hands us cp1252 bytes in WM_CHAR,
-    // so anything past the old Latin alphabet (€, emoji) arrives as broken rocks.
+    // The window class must be Unicode. An ANSI class delivers cp1252 bytes in
+    // WM_CHAR, so anything outside Latin-1 (€, emoji) arrives corrupted.
     WNDCLASSEXW wc = {sizeof(wc)};
     wc.style = CS_HREDRAW | CS_VREDRAW | CS_DROPSHADOW;
     wc.lpfnWndProc = Win32Window::window_proc;
     wc.hInstance = hi;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
-    // Ugg! Our own rock painting for taskbar + alt-tab, big and small size.
+    // Our own icon for the taskbar and Alt-Tab, in both sizes Windows asks for.
     wc.hIcon = (HICON)LoadImageW(hi, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
         GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR);
     wc.hIconSm = (HICON)LoadImageW(hi, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
@@ -219,22 +218,23 @@ bool Win32Window::create() {
 
     AddClipboardFormatListener(hwnd_);
 
-    // Cave man opens window for rocks thrown in from the file cave. The SDL child is
-    // WS_DISABLED, so WindowFromPoint walks past it and every drop lands right here.
+    // Accept files dragged onto the window. The SDL child is WS_DISABLED, so
+    // WindowFromPoint skips past it and every drop lands on this window.
     DragAcceptFiles(hwnd_, TRUE);
-    // Ugg! If our fire burns higher than Explorer's, Windows eats the drop messages
-    // in silence. Let them through explicitly. 0x0049 = WM_COPYGLOBALDATA.
+    // If this process runs at a higher integrity level than Explorer, UIPI drops the
+    // drag-and-drop messages silently. Allow them through explicitly.
+    // 0x0049 = WM_COPYGLOBALDATA.
     ChangeWindowMessageFilterEx(hwnd_, WM_DROPFILES, MSGFLT_ALLOW, nullptr);
     ChangeWindowMessageFilterEx(hwnd_, WM_COPYDATA, MSGFLT_ALLOW, nullptr);
     ChangeWindowMessageFilterEx(hwnd_, 0x0049, MSGFLT_ALLOW, nullptr);
 
-    // MEOW. REMOVE WINDOW 11 BORDER AND CORNER ARTIFACTS.
+    // Suppress the Windows 11 border and rounded-corner artifacts on our custom frame.
     COLORREF border_color = 0xFFFFFFFE; // DWM_COLOR_DONT_DRAW
     DwmSetWindowAttribute(hwnd_, 34, &border_color, sizeof(border_color)); // 34 = DWMWA_BORDER_COLOR
     DWORD corner_preference = 1; // DWMWCP_DONOTROUND
     DwmSetWindowAttribute(hwnd_, 33, &corner_preference, sizeof(corner_preference)); // 33 = DWMWA_WINDOW_CORNER_PREFERENCE
 
-    // Cave man register child window class
+    // Window class for the SDL video child.
     WNDCLASSEXW child_wc = {sizeof(child_wc)};
     child_wc.style = CS_HREDRAW | CS_VREDRAW;
     child_wc.lpfnWndProc = DefWindowProcW;
@@ -244,7 +244,7 @@ bool Win32Window::create() {
     child_wc.lpszClassName = L"PixelMirroringChildWindowClass";
     RegisterClassExW(&child_wc);
 
-    // Cave man create child window for SDL video, ignore input so it fall through to parent
+    // WS_DISABLED so mouse input falls through to the parent, which does the hit-testing.
     hwnd_child_ = CreateWindowExW(0, child_wc.lpszClassName, nullptr,
         WS_CHILD | WS_DISABLED | WS_CLIPSIBLINGS,
         0, 0, 0, 0,
@@ -255,7 +255,7 @@ bool Win32Window::create() {
         DEFAULT_PITCH | FF_DONTCARE, L"Segoe MDL2 Assets");
 
     SDL_Init(SDL_INIT_VIDEO);
-    // Cave man bind SDL to child window, no draw over main window buttons!
+    // Bind SDL to the child window so it cannot paint over the title bar buttons.
     m_sdl_window = SDL_CreateWindowFrom(hwnd_child_);
     if (m_sdl_window) {
         m_sdl_renderer = SDL_CreateRenderer(m_sdl_window, -1, SDL_RENDERER_ACCELERATED);
@@ -272,7 +272,7 @@ void Win32Window::show() {
     UpdateWindow(hwnd_);
     visible_ = true;
     update_animation_timer();
-    // Cave man force redraw of SDL frame when window shown
+    // Force one repaint of the last video frame, or the window comes up black.
     PostMessage(hwnd_, WM_VIDEO_RENDER, 0, 0);
 }
 void Win32Window::hide() {
@@ -294,12 +294,12 @@ void Win32Window::process_messages() {
     MSG msg;
     // GetMessage returns -1 on error. Treating that as "true" spins forever.
     //
-    // Ugg! The W ending is not decoration. TranslateMessage builds WM_CHAR in the
-    // flavour of whoever FETCHED the message, not of the window class. With the
-    // plain (= ...A) pair every typed letter takes a detour through cp1252, and
-    // everything cp1252 cannot hold comes out as "?". Umlauts happen to survive
-    // that detour by luck — cp1252 maps them onto the same numbers as Unicode —
-    // but nothing else does. Fetch wide, stay wide.
+    // The W suffix is not decoration. TranslateMessage builds WM_CHAR in the flavour
+    // of whoever FETCHED the message, not of the window class. With the suffix-less
+    // (= ...A) pair every typed character takes a detour through cp1252, and anything
+    // cp1252 cannot represent arrives as "?". Umlauts survive that detour only by
+    // coincidence — cp1252 maps them onto the same code points as Unicode — but
+    // nothing else does. Fetch wide, stay wide.
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
@@ -371,8 +371,8 @@ void Win32Window::recalc_layout() {
         rect_screenshot_bubble_ = {0,0,0,0};
     }
 
-    // Transfer bubble always sits at the far left end of the row — second bubble on a
-    // quiet day, third one while the phone is being filmed or photographed.
+    // The transfer bubble always sits at the far left of the row: second bubble
+    // normally, third one while a recording or screenshot bubble is also showing.
     if (transfer_state_ != TransferState::IDLE) {
         int t_right = rect_bubble_.left;
         if (screenshot_flash_)  t_right = rect_screenshot_bubble_.left;
@@ -392,14 +392,14 @@ void Win32Window::recalc_layout() {
     int py = rect_phone_.top + (rect_phone_.bottom - rect_phone_.top) * 2 / 3;
     rect_start_btn_ = {px - sbw/2, py - sbh/2, px + sbw/2, py + sbh/2};
 
-    // Cave man position child window to phone rect
+    // Keep the SDL child window aligned with the phone rectangle.
     if (hwnd_child_) {
         int child_w = rect_phone_.right - rect_phone_.left;
         int child_h = rect_phone_.bottom - rect_phone_.top;
         SetWindowPos(hwnd_child_, nullptr, rect_phone_.left, rect_phone_.top,
             child_w, child_h,
             SWP_NOZORDER | SWP_NOACTIVATE);
-        // Cave man tell SDL window has new size, so backbuffer resize too!
+        // SDL has to be told as well, or the backbuffer keeps the old size.
         if (m_sdl_window) {
             SDL_SetWindowSize(m_sdl_window, child_w, child_h);
         }
@@ -417,8 +417,9 @@ void Win32Window::update_region() {
         rect_bubble_.right+1, rect_bubble_.bottom+1, BUBBLE_CORNER_RADIUS*2, BUBBLE_CORNER_RADIUS*2);
     HRGN pr = CreateRoundRectRgn(rect_phone_.left, rect_phone_.top,
         rect_phone_.right+1, rect_phone_.bottom+1, PHONE_CORNER_RADIUS*2, PHONE_CORNER_RADIUS*2);
-    // Ugg! There was a third region stone here that nobody used and nobody threw
-    // away. Every resize left one behind until Windows ran out of stones.
+    // Exactly two temporary regions plus the accumulator, and both are deleted at the
+    // end. An unused third one used to be created here and never freed, leaking a GDI
+    // region on every single resize.
     HRGN rgn = CreateRectRgn(0,0,0,0);
     CombineRgn(rgn, br, pr, RGN_OR);
     
@@ -470,33 +471,33 @@ void Win32Window::send_pointer_event(PointerAction action, int x, int y) {
 bool Win32Window::send_raw_key(bool pressed, LPARAM lparam) {
     if (!m_raw_key_cb_) return false;
 
-    // Ugg! The number Windows shouts first is the LETTER its own layout painted on
-    // the key — exactly what the phone must not inherit. The hardware number of
-    // the hole sits in the upper stones of lparam, with one extra bit for the keys
-    // the small old keyboards never had (arrows, right Alt, keypad Enter, ...).
+    // wParam carries the virtual key, i.e. the character the PC's own layout assigns
+    // to that key — exactly what the phone must not inherit. The physical key position
+    // lives in the upper bits of lParam, plus one extended bit for the keys the
+    // original AT keyboard did not have (arrows, right Alt, keypad Enter, ...).
     const uint32_t scancode = static_cast<uint32_t>((lparam >> 16) & 0xFF);
     if (scancode == 0) return false;
 
     const bool extended = (lparam & (1 << 24)) != 0;
-    const uint32_t hole = scancode | (extended ? 0x100u : 0u);
+    const uint32_t key_id = scancode | (extended ? 0x100u : 0u);
 
-    // A held key repeats by itself on the phone, the same way a cabled keyboard
-    // works. Cave man does not carve the same stone sixty times a heartbeat — but
-    // he still swallows the message, or the key would be typed twice. Only for the
-    // holes the fake keyboard really took: one it refused walks the old road on
-    // every repeat too, exactly like it did on the first press.
+    // A held key repeats on the phone by itself, exactly like a wired keyboard, so
+    // auto-repeats are not resent. The message still has to be swallowed here or the
+    // key would be typed twice. Only for keys the HID keyboard actually accepted: one
+    // it refused takes the Android keycode path on every repeat too, just as it did on
+    // the first press.
     if (pressed && (lparam & (1 << 30)) != 0) {
-        return hid_held_keys_.count(hole) != 0;
+        return hid_held_keys_.count(key_id) != 0;
     }
 
-    // Ugg! "No" means no. A boot keyboard has no volume and no media buttons, and
-    // a key the fake keyboard hands back must NOT be eaten here — the Android
-    // keycode path below is the whole reason it says no in the first place.
+    // A boot keyboard has no volume or media keys. When the HID keyboard refuses one,
+    // it must NOT be swallowed here — falling back to the Android keycode path is the
+    // entire reason it reports the refusal.
     const bool taken = m_raw_key_cb_(pressed ? 0 : 1, scancode, extended);
     if (pressed && taken) {
-        hid_held_keys_.insert(hole);
+        hid_held_keys_.insert(key_id);
     } else {
-        hid_held_keys_.erase(hole);
+        hid_held_keys_.erase(key_id);
     }
     return taken;
 }
@@ -610,7 +611,7 @@ void Win32Window::handle_paint() {
             g.ResetClip();
         }
 
-        // Button icons — fonts come from the shelf, not freshly carved
+        // Button icons — fonts come from the cached set, never created per paint.
         Gdiplus::StringFormat sfmt;
         sfmt.SetAlignment(Gdiplus::StringAlignmentCenter);
         sfmt.SetLineAlignment(Gdiplus::StringAlignmentCenter);
@@ -714,7 +715,7 @@ void Win32Window::handle_paint() {
     EndPaint(hwnd_, &ps);
 }
 
-// Ugg! Rock is on its way to the phone. Ring fills up, name says which rock.
+// Progress indicator for a file transfer: a filling ring plus the file name.
 void Win32Window::draw_transfer_bubble(Gdiplus::Graphics& g) {
     if (transfer_state_ == TransferState::IDLE) return;
 
@@ -740,8 +741,8 @@ void Win32Window::draw_transfer_bubble(Gdiplus::Graphics& g) {
     centred.SetAlignment(Gdiplus::StringAlignmentCenter);
     centred.SetLineAlignment(Gdiplus::StringAlignmentCenter);
 
-    // Wide bubble: ring hugs the right end, name sits left of it. Narrow bubble has
-    // no room for a name, so the ring moves to the middle.
+    // Wide bubble: the ring sits at the right end with the name to its left. A narrow
+    // bubble has no room for a name, so the ring is centred instead.
     const float ring_d = 20.0f;
     const bool has_room_for_name =
         (rect_transfer_bubble_.right - rect_transfer_bubble_.left) > TRANSFER_RING_ONLY_W;
@@ -936,7 +937,7 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
         int bubble_req = BUBBLE_W + BUBBLE_GAP * 2; // ~200
         if (recording_) bubble_req += 100 + BUBBLE_GAP;
         if (screenshot_flash_) bubble_req += 40 + BUBBLE_GAP;
-        // Only the ring is non-negotiable — the file name gives way on narrow windows.
+        // Only the ring has to fit — the file name is dropped on narrow windows.
         if (transfer_state_ != TransferState::IDLE) bubble_req += TRANSFER_RING_ONLY_W + BUBBLE_GAP;
 
         if (bubble_req > min_w) {
@@ -988,7 +989,8 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_NCCALCSIZE:
-        // Cave man remove window frame — no border artifacts
+        // Returning 0 for wp == TRUE makes the client area cover the whole window,
+        // which is what removes the standard frame from this borderless window.
         if (wp == TRUE) return 0;
         break;
     case WM_TIMER:
@@ -1009,8 +1011,8 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         if (wp == 4) {
-            // Only runs while the bubble rests on a tick or a bang — the travelling
-            // ring is repainted by the progress shouts themselves.
+            // Only relevant once the bubble has settled on the success or failure
+            // state — while a transfer runs, the progress callbacks repaint the ring.
             if (transfer_state_ == TransferState::DONE || transfer_state_ == TransferState::FAILED) {
                 const auto rested = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now() - transfer_settled_at_).count();
@@ -1028,8 +1030,8 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_SIZE: {
-        // Ugg! This shouts on every drag of the window edge as well, so cave man
-        // only passes the word on when the window really went down or came back up.
+        // WM_SIZE also fires on every resize drag, so only report the actual
+        // minimize/restore edge to the callback.
         const bool now_minimized = (wp == SIZE_MINIMIZED);
         if (now_minimized != minimized_) {
             minimized_ = now_minimized;
@@ -1040,7 +1042,7 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
         if (!now_minimized) {
             recalc_layout();
             update_region();
-            // Cave man trigger render now so live resize look smooth
+            // Repaint immediately so a live resize drag stays smooth.
             PostMessage(hwnd_, WM_VIDEO_RENDER, 0, 0);
         }
         return 0;
@@ -1076,17 +1078,17 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
             send_pointer_event(PointerAction::DOWN, pt.x - rect_phone_.left, pt.y - rect_phone_.top);
         }
         else if (is_start_button_hit(pt) && start_cb_) {
-            // Visual feedback — immediately change state
+            // Visual feedback — switch state before the callback runs.
             app_state_ = AppState::SCANNING;
             status_text_ = "Starte...";
             InvalidateRect(hwnd_, nullptr, FALSE);
-            // Post message to self so callback runs after repaint
+            // Post to self so the callback runs after the repaint, not before it.
             PostMessage(hwnd_, WM_APP + 1, 0, 0);
         }
         return 0;
     }
     case WM_APP + 1:
-        // Deferred start callback — cave man wait for paint, then go
+        // Deferred start callback: the repaint above has happened by now.
         if (start_cb_) start_cb_();
         return 0;
     case WM_DROPFILES:
@@ -1156,7 +1158,7 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_SETFOCUS:
     case WM_ACTIVATE:
         if (LOWORD(wp) != WA_INACTIVE && m_focus_cb_ && app_state_ == AppState::STREAMING) {
-            // focus get. cave man fetch clipboard.
+            // Window gained focus — pull the phone's clipboard.
             m_focus_cb_();
         }
         break;
@@ -1164,7 +1166,7 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_KEYUP: {
         if (msg == WM_KEYDOWN && app_state_ == AppState::STREAMING) {
             if (wp == 'C' && (GetKeyState(VK_CONTROL) & 0x8000)) {
-                // ctrl+c press. cave man fetch clipboard.
+                // Ctrl+C on the phone: fetch what it just copied.
                 if (m_focus_cb_) {
                     m_focus_cb_();
                 }
@@ -1177,7 +1179,7 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
                 return 0;
             }
             if (wp == 'L' && (GetKeyState(VK_CONTROL) & 0x8000)) {
-                // Cave man lock screen and turn off light
+                // Ctrl+L locks the phone and turns its screen off.
                 swallowed_shortcuts_.insert(static_cast<UINT>(wp));
                 if (menu_cb_) {
                     menu_cb_(MenuAction::LOCK_DEVICE);
@@ -1185,17 +1187,16 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
                 return 0;
             }
         }
-        // Ugg! Cave man ate the press, so as far as the phone is concerned that key
-        // never went down — and a "let go" for a key nobody pressed is a word the
-        // phone did not need to hear. Eat the release of the same key too.
+        // The press was swallowed by a shortcut, so as far as the phone is concerned
+        // that key never went down. Swallow its release too, or the phone gets a key-up
+        // for a key it never saw pressed.
         if (msg == WM_KEYUP && swallowed_shortcuts_.erase(static_cast<UINT>(wp)) > 0) {
             return 0;
         }
-        // With the virtual USB keyboard hanging on the phone every key travels as
-        // a real key press instead. Volume keys stay behind: a boot keyboard has
-        // no such button, so they keep riding the Android keycode path below.
-        // (send_raw_key would hand them back anyway now — this only spares the
-        // fake keyboard a question whose answer is already known.)
+        // While the virtual USB keyboard is attached, every key travels as a real HID
+        // key press instead. Volume keys are excluded: a boot keyboard has no such
+        // button, so they keep using the Android keycode path below. (send_raw_key
+        // would refuse them anyway — this just skips a question with a known answer.)
         if (uhid_keyboard_ && app_state_ == AppState::STREAMING &&
             wp != VK_VOLUME_UP && wp != VK_VOLUME_DOWN && wp != VK_VOLUME_MUTE) {
             if (send_raw_key(msg == WM_KEYDOWN, lp)) {
@@ -1213,28 +1214,27 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_SYSKEYDOWN:
     case WM_SYSKEYUP: {
-        // Ugg! While Alt is pressed Windows sends SYS messages instead of the normal
-        // ones. Everything we do not claim falls through to DefWindowProc, so Alt+F4
-        // and friends keep working.
+        // While Alt is held, Windows sends WM_SYSKEY* instead of WM_KEY*. Everything we
+        // do not claim falls through to DefWindowProc, so Alt+F4 and friends still work.
         //
-        // AltGr is NOT Alt: the tribe sends it as Ctrl+Alt together. On a German
-        // keyboard AltGr+Q is how a human writes "@". Claiming it here would eat that
-        // letter before it ever reaches the phone, so Ctrl must be off the stone.
+        // AltGr is NOT Alt: Windows reports it as Ctrl+Alt together. On a German layout
+        // AltGr+Q is how "@" is typed, so claiming it here would swallow that character
+        // before it ever reached the phone — hence the requirement that Ctrl is up.
         const bool alt_alone = (GetKeyState(VK_MENU) & 0x8000) != 0 &&
                                (GetKeyState(VK_CONTROL) & 0x8000) == 0;
         if (app_state_ == AppState::STREAMING && alt_alone) {
-            // The phone's top curtains are not keys — they ride the menu path, the
-            // same way Strg+U/L do. Alt+Down pulls them down like a thumb on the
-            // phone would, Alt+Up shoves them back. Down, up and every repeat in
-            // between get eaten here, otherwise DefWindowProc hears a lonely Alt and
-            // beeps at a menu bar that does not exist.
+            // The notification and quick-settings panels are not keycodes but scrcpy
+            // control messages, so they take the menu path, the same way Ctrl+U/L do.
+            // The press, the release and every auto-repeat in between must be
+            // swallowed here, otherwise DefWindowProc sees a lone Alt and beeps at a
+            // menu bar that does not exist.
             if (wp == VK_DOWN || wp == VK_UP) {
                 const bool first_press = (msg == WM_SYSKEYDOWN) && !(lp & (1 << 30));
                 if (first_press && menu_cb_) {
                     if (wp == VK_UP) {
                         menu_cb_(MenuAction::COLLAPSE_PANELS);
                     } else {
-                        // One thumb-pull opens the messages, a harder one the switches.
+                        // Alt+Down opens notifications, Alt+Shift+Down quick settings.
                         menu_cb_((GetKeyState(VK_SHIFT) & 0x8000)
                             ? MenuAction::EXPAND_SETTINGS_PANEL
                             : MenuAction::EXPAND_NOTIFICATION_PANEL);
@@ -1250,9 +1250,9 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
                 }
             }
         }
-        // The USB keyboard needs the Alt key itself, otherwise the phone never
-        // learns Alt went down and every Alt combo arrives naked. Alt+F4 stays
-        // with the tribe so cave man can still close the cave.
+        // The USB keyboard needs the Alt key itself, otherwise the phone never learns
+        // Alt went down and every Alt combination arrives without its modifier. Alt+F4
+        // is left to Windows so the window can still be closed.
         if (uhid_keyboard_ && app_state_ == AppState::STREAMING && wp != VK_F4) {
             if (send_raw_key(msg == WM_SYSKEYDOWN, lp)) {
                 return 0;
@@ -1261,7 +1261,7 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
         break;
     }
     case WM_KILLFOCUS: {
-        // Cave man walks away mid-word. Everything he still held goes up now.
+        // Focus lost mid-keystroke: release everything that was still held.
         hid_held_keys_.clear();
         swallowed_shortcuts_.clear();
         if (m_focus_lost_cb_) {
@@ -1270,8 +1270,8 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
         break;
     }
     case WM_CHAR: {
-        // In USB keyboard mode the key itself already flew over — typing the
-        // letter on top of it would double every single character.
+        // In USB keyboard mode the key press itself was already sent, so injecting the
+        // resulting character on top of it would double every keystroke.
         if (app_state_ == AppState::STREAMING && m_text_cb_ && !uhid_keyboard_) {
             wchar_t wch = static_cast<wchar_t>(wp);
             if (wch >= 32) {
@@ -1308,7 +1308,7 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
         break;
     }
     case WM_VIDEO_RENDER:
-        // Cave man render direct on child window — coordinates relative to child!
+        // Renders into the SDL child window, so the coordinates are child-relative.
         if (app_state_ == AppState::STREAMING && m_render_cb_ && m_sdl_renderer) {
             int w = rect_phone_.right - rect_phone_.left;
             int h = rect_phone_.bottom - rect_phone_.top;
@@ -1322,7 +1322,7 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_APP + 3: {
-        // Cave man run task on UI thread
+        // Runs a task posted from another thread on the UI thread.
         auto* task = reinterpret_cast<std::function<void()>*>(lp);
         if (task) {
             (*task)();
@@ -1383,8 +1383,8 @@ void Win32Window::handle_sizing(WPARAM edge, LPARAM lp) {
 
 void Win32Window::post_task(std::function<void()> task) {
     if (!hwnd_ || !task) return;
-    // Cave man allocate task on heap, UI thread delete after run.
-    // If the message never reaches the queue, cave man cleans up himself.
+    // The task is heap-allocated and deleted by the UI thread after it ran. If the
+    // message never made it into the queue, delete it here instead.
     auto* heap_task = new std::function<void()>(std::move(task));
     if (!PostMessage(hwnd_, WM_APP + 3, 0, reinterpret_cast<LPARAM>(heap_task))) {
         delete heap_task;
@@ -1393,7 +1393,7 @@ void Win32Window::post_task(std::function<void()> task) {
 
 namespace {
     constexpr UINT ID_FACTORY_RESET = 1001;
-    constexpr UINT ID_QUALITY_HEADER = 1002; // folds the three quality stones open
+    constexpr UINT ID_QUALITY_HEADER = 1002; // expands the three quality presets
     constexpr UINT ID_QUALITY_BATTERY  = 1010;
     constexpr UINT ID_QUALITY_BALANCED = 1011;
     constexpr UINT ID_QUALITY_MAXIMUM  = 1012;
@@ -1404,9 +1404,9 @@ namespace {
     constexpr UINT ID_LOCK_DEVICE   = 1008;
     constexpr UINT ID_TOGGLE_AUDIO  = 1009;
     constexpr UINT ID_TOGGLE_SCREEN_OFF = 1013;
-    // Ugg! 1010 already belongs to the battery preset since the quality stones
-    // arrived. Two menu rows with the same number means one of them fires the
-    // other's action, so the rotation switch moved out of the way.
+    // NOT 1010 — that id belongs to the battery preset. Two menu rows sharing an id
+    // means one of them triggers the other's action, which is why the rotation toggle
+    // was moved out of the way.
     constexpr UINT ID_TOGGLE_AUTO_ROTATE = 1016;
     constexpr UINT ID_TOGGLE_UHID_KEYBOARD = 1014;
     constexpr UINT ID_OPEN_KEYBOARD_SETTINGS = 1015;
@@ -1423,11 +1423,11 @@ namespace {
         bool has_toggle;
         bool is_toggled;
         bool is_separator;
-        // Ugg! A row that only tells, never listens. No hover, no click.
+        // A row that only displays text: no hover highlight, not clickable.
         bool is_info = false;
-        // Row that folds its children open instead of doing something.
+        // A row that expands its children instead of triggering an action.
         bool is_expander = false;
-        // One of the folded-out children. Only one of them wears the dot.
+        // One of the expanded children; exactly one of them carries the dot.
         bool is_radio = false;
         bool is_selected = false;
     };
@@ -1446,8 +1446,8 @@ namespace {
         return height;
     }
 
-    // Ugg! Menu must not hang off the edge of the cave wall — especially once it
-    // grows by three rows while it is already open.
+    // Keep the menu inside the monitor's work area — it can grow by three rows while
+    // it is already open, so this has to be re-checked on every resize.
     void clamp_menu_to_monitor(POINT& pt, int height) {
         HMONITOR monitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
         MONITORINFO mi = {sizeof(MONITORINFO)};
@@ -1462,7 +1462,7 @@ namespace {
         if (pt.x < mi.rcWork.left) pt.x = mi.rcWork.left;
     }
 
-    // Menu grew or shrank. New stone size, new round corners, fresh paint.
+    // The item list changed: resize the window, rebuild the rounded region, repaint.
     void resize_menu_window(HWND hMenu) {
         const int height = menu_height_for_items();
         RECT wr = {0};
@@ -1538,7 +1538,7 @@ namespace {
                     }
 
                     if (item.is_radio) {
-                        // Dot on the left, text pushed in — reads as "pick one of these".
+                        // Radio dot on the left with indented text — reads as "pick one".
                         const float cx = 26.0f;
                         const float cy = (float)y + 15.0f;
                         const Gdiplus::Color accent(255, 76, 175, 80);
@@ -1560,7 +1560,7 @@ namespace {
                     }
 
                     if (item.is_expander) {
-                        // Little arrow instead of a switch: points down while folded open.
+                        // An arrow instead of a toggle: points down while expanded.
                         const float ax = (float)rc.right - 35.0f;
                         const float ay = (float)y + 15.0f;
                         Gdiplus::PointF tri[3];
@@ -1625,7 +1625,7 @@ namespace {
                         continue;
                     }
                     if (g_menu_items[i].is_info) {
-                        y += 30; // takes up space, but cannot be picked
+                        y += 30; // occupies a row but is not selectable
                         continue;
                     }
                     RECT item_rc = {0, y, 320, y + 30};
@@ -1656,7 +1656,7 @@ namespace {
                 if (g_hovered_item >= 0 && g_hovered_item < (int)g_menu_items.size()) {
                     const auto& item = g_menu_items[g_hovered_item];
                     if (item.is_expander) {
-                        // Folding happens where the window state lives — just tell it.
+                        // Expanding is decided by Win32Window, which owns the state.
                         const UINT id = item.id;
                         PostMessage(hwnd, WM_APP + 5, id, 0);
                     } else if (item.has_toggle) {
@@ -1684,8 +1684,8 @@ namespace {
     }
 }
 
-// Cave man carves the whole settings menu again — also while it stays open, because
-// folding the quality stones out changes how many rows there are.
+// Rebuilds the whole settings menu, including while it is open — expanding the
+// quality presets changes the number of rows.
 void Win32Window::build_settings_menu_items() {
     static const wchar_t* const QUALITY_NAMES[3] = {L"Akku sparen", L"Ausgewogen", L"Maximal"};
     const int quality = (quality_preset_ >= 0 && quality_preset_ <= 2) ? quality_preset_ : 1;
@@ -1729,8 +1729,8 @@ void Win32Window::build_settings_menu_items() {
         if (app_state_ == AppState::STREAMING) {
             g_menu_items.push_back({ID_OPEN_KEYBOARD_SETTINGS, L"Tastaturlayout am Handy einstellen", false, false, false});
         }
-        // Without a German layout on the phone side the whole point is lost, and
-        // nobody guesses that on their own. One line, or it does not fit the row.
+        // Without a German layout set on the phone the feature is useless, and nobody
+        // guesses that on their own. Has to stay one line to fit the row.
         g_menu_items.push_back({0, L"Layout am Handy muss auf Deutsch stehen", false, false, false, true});
     }
     g_menu_items.push_back({0, L"", false, false, true});
@@ -1739,7 +1739,7 @@ void Win32Window::build_settings_menu_items() {
         g_menu_items.push_back({ID_TOGGLE_AUTO_ROTATE, L"Automatische Bildschirmdrehung (Handy)", true, auto_rotate_enabled_, false});
         g_menu_items.push_back({ID_UNLOCK_DEVICE, L"Handy entsperren (Strg+U)", false, false, false});
         g_menu_items.push_back({ID_LOCK_DEVICE, L"Handy sperren & Bildschirm aus (Strg+L)", false, false, false});
-        // Two hint rows for the key shortcuts — otherwise nobody finds them.
+        // Hint rows for the keyboard shortcuts — otherwise nobody finds them.
         g_menu_items.push_back({0, L"Alt+B Zurück · Alt+H Start · Alt+S Übersicht", false, false, false, true});
         g_menu_items.push_back({0, L"Alt+↓ Benachrichtigungen · Alt+Umschalt+↓ Schnelleinstellungen", false, false, false, true});
         g_menu_items.push_back({0, L"Alt+↑ schließt sie wieder", false, false, false, true});
@@ -1750,7 +1750,7 @@ void Win32Window::build_settings_menu_items() {
 
 void Win32Window::show_context_menu(POINT pt) {
 
-    quality_expanded_ = false; // Every fresh menu starts folded.
+    quality_expanded_ = false; // every freshly opened menu starts collapsed
     build_settings_menu_items();
     const int height = menu_height_for_items();
 
@@ -1787,8 +1787,8 @@ void Win32Window::show_context_menu(POINT pt) {
     while (true) {
         const BOOL got = GetMessageW(&msg, nullptr, 0, 0);
         if (got == 0) {
-            // Ugg! Tribe shouted "leave cave" while menu still hangs open. Old cave
-            // man ate that shout and the app kept breathing invisibly. Pass it on!
+            // WM_QUIT arrived while the menu owns the loop. Re-post it, or the app
+            // keeps running invisibly after its window is gone.
             PostQuitMessage(static_cast<int>(msg.wParam));
             break;
         }
@@ -1797,7 +1797,7 @@ void Win32Window::show_context_menu(POINT pt) {
         if (msg.hwnd == hMenu && msg.message == WM_APP + 5) {
             UINT action_id = static_cast<UINT>(msg.wParam);
             if (action_id == ID_QUALITY_HEADER) {
-                // Fold the three stones in or out and grow the menu around them.
+                // Expand or collapse the three presets and resize the menu around them.
                 quality_expanded_ = !quality_expanded_;
                 build_settings_menu_items();
                 resize_menu_window(hMenu);
@@ -1963,8 +1963,8 @@ void Win32Window::handle_dropped_files(WPARAM wparam) {
         if (DragQueryFileW(drop, i, path.data(), chars + 1) == 0) continue;
         paths.push_back(wstring_to_utf8(path));
     }
-    // Ugg! Hand the rock back to Explorer FIRST. Whatever we do next — even open a
-    // talking-stone the human must answer — must not freeze the cave we took it from.
+    // Release the drop handle FIRST. Whatever happens next — including a modal dialog
+    // waiting on the user — must not keep Explorer blocked.
     DragFinish(drop);
 
     if (paths.empty() || !m_file_drop_cb_) return;
@@ -1977,7 +1977,7 @@ void Win32Window::handle_dropped_files(WPARAM wparam) {
 void Win32Window::set_transfer_status(TransferState state, float progress, const std::string& label) {
     if (!hwnd_) return;
 
-    // Rock carriers live on their own thread. Bubbles belong to the window thread.
+    // File transfers run on their own thread; the bubble belongs to the window thread.
     if (GetCurrentThreadId() != GetWindowThreadProcessId(hwnd_, nullptr)) {
         post_task([this, state, progress, label]() { set_transfer_status(state, progress, label); });
         return;
