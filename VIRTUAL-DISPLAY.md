@@ -111,9 +111,12 @@ und `RESIZE_DISPLAY`.
 
 Das Handy-Display ist nicht mehr das Bild, also darf auch niemand mehr daran ziehen:
 
-* **Kein Entsperren.** `unlock_device_if_needed()` steigt sofort aus, außer die Person
-  hat „Handy entsperren" selbst angeklickt. Sonst würde die PIN-Eingabe genau das
-  rückgängig machen, wofür der Schalter da ist.
+* **Entsperrt wird sehr wohl** — anders als hier zuerst gebaut. Ein gesperrtes Handy
+  lässt die Oberfläche auf dem neuen Display taub werden (siehe „Nachgemessen"), also
+  entsperrt der Client selbst, und zwar **vor** dem Aufbau des Displays statt parallel
+  dazu: das Entsperren weckt das Handy-Panel, und `m_screen_off` muss danach kommen,
+  sonst bleibt das Handy hell. Was übrig bleibt, ist ein **dunkles**, nicht ein
+  gesperrtes Handy — eine schwächere Zusage als die aus dem Issue.
 * **Keine Helligkeitsverstellung.** `SET_DISPLAY_POWER` dagegen bleibt aktiv und ist in
   diesem Modus sogar der empfohlene Begleiter — siehe „Nachgemessen".
 * **Kein Bildschirm-Watchdog.** Der Poll-Thread wertet „Handy-Display ist aus" sonst
@@ -135,7 +138,7 @@ Erster Lauf am 3.8.2026, `new_display=` mit `display_ime_policy=local`:
   `FLAG_DESTROY_CONTENT_ON_REMOVAL`, `FLAG_PRESENTATION`, `FLAG_TOUCH_FEEDBACK_DISABLED`.
 * **Der Pixel-Launcher erscheint von selbst**, als
   `com.google.android.apps.nexuslauncher/com.android.launcher3.secondarydisplay.SecondaryDisplayLauncher`
-  und als `topResumedActivity`. `start_app()` wird auf diesem Gerät also nicht gebraucht.
+  und als `topResumedActivity` — **er ist aber unbrauchbar**, siehe unten.
 * Video (H.264, 1080x2424) und Ton (Roh-PCM) laufen beide.
 
 ### Das virtuelle Display schläft mit dem Handy ein
@@ -169,6 +172,61 @@ Handy-Panel physisch dunkel. Deshalb ist `m_screen_off` in diesem Modus ausdrüc
 Bleibt die Lücke: drückt jemand die Seitentaste, schläft das Gerät und das virtuelle
 Display mit ihm. Dagegen gibt es auf dieser Android-Version keinen Hebel im Client.
 
+### Der Launcher für Zweitdisplays ist eine Ruine — Apps direkt starten
+
+Der `SecondaryDisplayLauncher` erscheint zwar, taugt auf dem Pixel 9 unter Android 17
+aber nichts:
+
+* Der Startbildschirm ist **leer**. Der UI-Abzug zeigt das `workspace_grid`
+  (`[56,56][1024,2204]`) **ohne ein einziges Kindelement**.
+* Die App-Übersicht lässt sich öffnen und listet ~78 Apps.
+* Ein Tippen auf ein App-Symbol löst **keinen Startversuch** aus — im Logcat steht
+  dazu nichts, nicht einmal eine Ablehnung. Die Übersicht bleibt einfach offen.
+* An der Eingabe liegt es nicht: `dumpsys input` meldet `FocusedDisplayId=<unser>`, das
+  Launcher-Fenster als fokussiert und die Zustellung mit `result='OK'`; Tasten (HOME,
+  BACK) wirken.
+
+Genauer nachgemessen, nachdem der erste Verdacht (Sperre) sich nur halb bestätigt hat:
+
+* **Bei gesperrtem Handy nimmt der Launcher gar nichts an** — ein Tippen auf den
+  Übersicht-Knopf bewirkt nichts.
+* **Bei entsperrtem Handy geht die Übersicht auf** (UI-Abzug wächst von 2081 auf ~25000
+  Bytes) und listet ~78 Apps. Fingereingaben kommen also an.
+* **Ein Tippen auf einen App-Eintrag startet trotzdem nichts**, auch entsperrt nicht,
+  auch auf exakt die anklickbaren Knotengrenzen gezielt. Kein Logeintrag, keine
+  Ablehnung, der Launcher bleibt oben.
+* Der leere Startbildschirm ist dagegen **Absicht**: dieser Launcher hat keine Symbole
+  auf der Arbeitsfläche, alles liegt hinter dem Übersicht-Knopf.
+
+Dass Fingereingaben grundsätzlich funktionieren, ist unabhängig belegt: in der per
+`START_APP` gestarteten Einstellungen-App springt ein Tap auf „Apps" sauber in die
+Unterseite (`SubSettings`).
+
+**Was funktioniert:** `vd_system_decorations=false` plus Steuernachricht 16
+(`START_APP`) — also die ganze Systemmöblierung weglassen und genau eine App auf das
+Display setzen. Damit läuft `com.android.settings` nachweislich dort
+(`topResumedActivity=com.android.settings/.SubSettings`, Bild kommt an, bedienbar).
+
+**Desktop-Modus ist keine Alternative.** Mit
+`force_desktop_mode_on_external_displays=1` prüft Android 17 unser Display, lehnt es
+aber ab: erst `keyguardLocked=true; aborting`, nach dem Entsperren dann
+`shouldCreateOrWarmUpDesk skipping reason: desktop ineligible`. Vermutlich wegen
+`VIRTUAL_DISPLAY_FLAG_OWN_DISPLAY_GROUP`, das der Server setzt — änderbar nur in der
+JAR, die unverändert bleiben muss.
+
+**Der volle Pixel-Launcher lässt sich nicht dorthin starten.** `START_APP` mit
+`com.google.android.apps.nexuslauncher` lässt das Display schwarz; Android reserviert
+Zweitdisplays für die Kategorie `SECONDARY_HOME`, und dafür ist auf diesem Gerät nur
+der eine, untaugliche Launcher registriert.
+
+Bemerkenswert: `adb shell am start --display <id>` wird auf Android 17 mit
+`SecurityException: Permission Denial ... with launchDisplayId=` abgelehnt, der
+`START_APP`-Weg des Servers aber **nicht**. Die Ablehnung betrifft also nur fremde
+Shell-Prozesse, nicht den Server, der das Display selbst angelegt hat.
+
+Gesteuert wird das über `Settings::m_virtual_display_app` (`virtual_display_app=` in
+`settings.txt`, ohne Menüpunkt). Leer = Launcher des Handys, Paketname = nur diese App.
+
 ## Offen
 
 * **`force_resizable_activities`** steht auf dem Testgerät jetzt auf 1 (vorher 0),
@@ -179,12 +237,12 @@ Display mit ihm. Dagegen gibt es auf dieser Android-Version keinen Hebel im Clie
   dem Schlafproblem geändert. Zurück mit `settings put global
   force_resizable_activities 0`. Falls es nötig bleibt, muss der Client es selbst setzen
   und beim Beenden zurückstellen, so wie er es mit der Helligkeit tut.
-* `adb shell am start --display <id>` scheitert auf Android 17 mit
-  `SecurityException: Permission Denial ... with launchDisplayId=`. Betrifft alles, was
-  aus der Shell heraus auf das Display starten will — also auch
-  `ScrcpyClient::start_app()`, das damit auf diesem Gerät vermutlich wirkungslos ist.
-* Auf Geräten ohne Launcher für Zweitdisplays bleibt das Display schwarz. Dafür gibt es
-  `ScrcpyClient::start_app()` — implementiert, aber siehe den Punkt darüber.
+* **Mit `virtual_display_app` gibt es keine Navigationsleiste** (die gehört zu den
+  abgeschalteten Systemdekorationen). Zurück und Start müssen über Alt+B / Alt+H laufen
+  — ungeprüft, ob Alt+H ohne Launcher etwas Sinnvolles tut oder die App wegräumt.
+* Es läuft immer nur **eine** App auf dem Display, und sie wird über einen von Hand in
+  `settings.txt` eingetragenen Paketnamen gewählt. Ein Menüpunkt fehlt, eine Liste der
+  installierten Apps (Server-Option `list=apps`) wäre der nächste Schritt.
 * Fenstergröße und Punktdichte des virtuellen Displays sind nicht einstellbar
   (`Config::new_display_width/height/dpi` existieren, werden aber nicht gesetzt).
 * Aufnahme, Dateiablage per Ziehen und die Alt-Tastenkürzel sind in diesem Modus nicht

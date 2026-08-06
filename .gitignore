@@ -65,3 +65,7 @@ local.properties
 Thumbs.db
 desktop.ini
 $RECYCLE.BIN/
+
+# EXPERIMENT: Startbildschirm fuer das virtuelle Display. Wird beim Bauen von
+# F-Droid geladen (siehe Client/CMakeLists.txt), muss also nicht ins Repo.
+Client/vendor/FossifyLauncher.apk

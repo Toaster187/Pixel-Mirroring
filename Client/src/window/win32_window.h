@@ -26,6 +26,7 @@ public:
     bool create() override;
     void show() override;
     void hide() override;
+    void minimize() override;
     bool is_visible() const override;
     void process_messages() override;
     

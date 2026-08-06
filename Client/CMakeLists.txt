@@ -131,6 +131,45 @@ if(NOT EXISTS "${PM_PLATFORM_TOOLS_DIR}/${PM_ADB_EXPECTED_FILE}")
     message(STATUS "Ugg! ADB bootstrap finished successfully!")
 endif()
 
+# --- Fossify Launcher for the virtual-display experiment ---
+# EXPERIMENT. A display of our own needs a home screen, and the phone's own launcher for
+# second displays is useless on a Pixel (see VIRTUAL-DISPLAY.md): its app drawer opens
+# but tapping an app starts nothing. This one works, so it travels with the client and
+# gets pushed onto the phone when the mode is switched on.
+#
+# Fetched at BUILD time, exactly like ADB above, so the repository stays free of a 5 MB
+# binary. Two things to know before this leaves the experiment:
+#   - it adds ~5 MB to an installer whose small size is a deliberate feature, and
+#   - Fossify Launcher is GPL-3.0; shipping it inside the installer brings that
+#     licence's obligations along.
+set(PM_FOSSIFY_APK "${CMAKE_SOURCE_DIR}/vendor/FossifyLauncher.apk")
+set(PM_FOSSIFY_URL "https://f-droid.org/repo/org.fossify.home_16.apk")
+set(PM_FOSSIFY_SHA256 "a603d3d510482feafd73d52a93a1ea9baefd2ca0aae329a14cbf0e21f43638e3")
+
+if(NOT EXISTS "${PM_FOSSIFY_APK}")
+    message(STATUS "Ugg! Fossify Launcher not found. Downloading from F-Droid...")
+    file(DOWNLOAD "${PM_FOSSIFY_URL}" "${PM_FOSSIFY_APK}"
+         SHOW_PROGRESS
+         EXPECTED_HASH SHA256=${PM_FOSSIFY_SHA256}
+         STATUS PM_FOSSIFY_STATUS)
+    list(GET PM_FOSSIFY_STATUS 0 PM_FOSSIFY_ERR)
+    if(NOT PM_FOSSIFY_ERR EQUAL 0)
+        list(GET PM_FOSSIFY_STATUS 1 PM_FOSSIFY_MSG)
+        # Not fatal: everything except the virtual-display experiment works without it.
+        file(REMOVE "${PM_FOSSIFY_APK}")
+        message(WARNING "Ugg! Could not download Fossify Launcher: ${PM_FOSSIFY_MSG}")
+    endif()
+endif()
+
+if(EXISTS "${PM_FOSSIFY_APK}")
+    add_custom_command(TARGET PixelMirroring POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${PM_FOSSIFY_APK}"
+            "$<TARGET_FILE_DIR:PixelMirroring>/FossifyLauncher.apk"
+        COMMENT "Copy Fossify Launcher next to desktop client"
+    )
+endif()
+
 if(WIN32)
     set(PM_ADB_RUNTIME_FILES
         adb.exe
@@ -278,6 +317,12 @@ install(FILES "$<TARGET_FILE_DIR:PixelMirroring>/PixelMirroring.apk"
 
 # Install scrcpy-server.jar from build target dir if it exists
 install(FILES "$<TARGET_FILE_DIR:PixelMirroring>/scrcpy-server.jar"
+    DESTINATION .
+    OPTIONAL
+)
+
+# The home screen for the virtual-display experiment (see above).
+install(FILES "$<TARGET_FILE_DIR:PixelMirroring>/FossifyLauncher.apk"
     DESTINATION .
     OPTIONAL
 )

@@ -435,6 +435,10 @@ bool ScrcpyClient::start_server_process() {
     cmd += "send_frame_meta=true ";
     cmd += "tunnel_forward=" + std::string(config_.tunnel_forward ? "true" : "false") + " ";
 
+    if (config_.screen_off_timeout_ms > 0) {
+        cmd += "screen_off_timeout=" + std::to_string(config_.screen_off_timeout_ms) + " ";
+    }
+
     if (config_.new_display) {
         // An empty value means "same size and same density as the phone's own display",
         // which is the only shape whose picture the rest of this cave already knows how
@@ -464,6 +468,16 @@ bool ScrcpyClient::start_server_process() {
         // what keep_active is for: the server pokes PowerManager.userActivity() on OUR
         // display alone. It only exists since server 4.x — the reason we are on 4.1.
         cmd += "keep_active=true ";
+
+        // Ugg! A Pixel 9 on Android 17 DOES hang its launcher for second displays into
+        // the new display, but that launcher is a ruin: the home screen stays empty and
+        // tapping an app in its drawer starts nothing — not even a refusal reaches the
+        // log. When cave man names an app, the whole broken furniture is left out and
+        // that one app gets the display to itself. This is the way upstream documents
+        // for phones whose second-display launcher is no good.
+        if (!config_.new_display_app.empty()) {
+            cmd += "vd_system_decorations=false ";
+        }
     }
 
     log_stream_event("[Scrcpy] Executing server: " + cmd);

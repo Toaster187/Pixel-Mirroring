@@ -12,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <utility>
 #include <vector>
@@ -503,6 +504,54 @@ std::optional<std::filesystem::path> find_android_apk() {
     return std::nullopt;
 }
 
+// EXPERIMENT. The home screen for a display of our own. The phone's own launcher for
+// second displays looks right and does nothing (VIRTUAL-DISPLAY.md), so this one is
+// carried along and pushed over when the mode needs it.
+const char* const FOSSIFY_PACKAGE = "org.fossify.home";
+
+std::optional<std::filesystem::path> find_fossify_apk() {
+    std::filesystem::path current = path_from_utf8(pm::adb::get_executable_dir());
+    for (int i = 0; i < 4; ++i) {
+        const std::filesystem::path candidate = current / "FossifyLauncher.apk";
+        if (path_exists(candidate)) {
+            return candidate;
+        }
+        const std::filesystem::path vendored = current / "vendor" / "FossifyLauncher.apk";
+        if (path_exists(vendored)) {
+            return vendored;
+        }
+        current = current.parent_path();
+        if (current.empty()) break;
+    }
+    return std::nullopt;
+}
+
+// Puts the launcher on the phone if it is not there yet. Answers whether the phone has
+// it afterwards — a "no" is not fatal anywhere, it only means the new display will show
+// whatever the phone itself hangs into it.
+//
+// Deliberately WITHOUT the "-g" that the companion app gets: our own app is one the
+// human installed on purpose, a launcher fetched from a repository is a stranger and may
+// ask the phone for its permissions like anybody else.
+bool ensure_fossify_installed(pm::adb::AdbClient& adb, const std::string& device_id) {
+    if (adb.is_app_installed(device_id, FOSSIFY_PACKAGE)) {
+        return true;
+    }
+
+    const auto apk = find_fossify_apk();
+    if (!apk) {
+        return false;
+    }
+
+    const std::string remote = "/data/local/tmp/FossifyLauncher.apk";
+    if (!adb.push_file(device_id, path_to_utf8(*apk), remote)) {
+        return false;
+    }
+    const bool installed = adb.install_pushed_app(device_id, remote);
+    adb.execute_shell_command(device_id, "rm -f " + remote);
+    return installed;
+}
+
 // ADB babbles many lines ("Performing Streamed Install" first!). Dig out the one
 // line that says what actually broke, else last line with words on it.
 std::string extract_adb_reason(const std::string& output) {
@@ -915,6 +964,31 @@ bool start_stream(
     config.lowest_brightness = settings.m_lowest_brightness;
     config.audio = settings.m_audio_enabled;
     config.new_display = settings.m_virtual_display;
+    config.new_display_app = settings.m_virtual_display_app;
+
+    // EXPERIMENT. A display of our own is worthless without a home screen on it, and the
+    // one the phone brings does not work (VIRTUAL-DISPLAY.md). So the mode brings its
+    // own: put it on the phone if it is missing, and aim at it unless the human has
+    // named a different app by hand.
+    bool fossify_freshly_installed = false;
+    if (settings.m_virtual_display) {
+        pm::adb::AdbClient launcher_adb;
+        const bool had_it = launcher_adb.is_app_installed(device_id, FOSSIFY_PACKAGE);
+        if (!had_it) {
+            window.post_task([&window]() {
+                window.set_status_text("Startbildschirm für den PC wird installiert...");
+            });
+        }
+        if (ensure_fossify_installed(launcher_adb, device_id)) {
+            fossify_freshly_installed = !had_it;
+            if (config.new_display_app.empty()) {
+                config.new_display_app = FOSSIFY_PACKAGE;
+                pm::Settings stored = pm::load_settings();
+                stored.m_virtual_display_app = FOSSIFY_PACKAGE;
+                pm::save_settings(stored);
+            }
+        }
+    }
 
     // EXPERIMENT. With a display of our own the phone's OWN panel is none of our
     // business any more: it stays dark and locked, and a second human may be holding
@@ -922,16 +996,42 @@ bool start_stream(
     // whether it went dark — has to stay down while this is on.
     const bool own_display = config.new_display;
 
-    if (settings.m_lowest_brightness && !own_display) {
+    // One hour of the phone lying untouched. Long enough that nobody trips over it in a
+    // session, short enough that a cleanup that never ran does not leave a phone which
+    // refuses to sleep forever. Only in this mode: while the phone's own picture is
+    // being mirrored, its sleep is the human's business and none of ours.
+    if (own_display) {
+        config.screen_off_timeout_ms = 60 * 60 * 1000;
+    }
+
+
+    // Also runs with a display of our own, and on purpose: turning the panel off goes
+    // past Android's own idea of the screen, so anything that lights it again — the
+    // lock screen after a poke, a notification — comes back at full brightness. The
+    // dimming underneath makes that moment harmless instead of blinding.
+    if (settings.m_lowest_brightness) {
         // CAVE MAN DECREASE SUN SHINE SO SMARTPHONE SCREEN IS DARKEST SHADE OF GREY
         std::string dev_id = device_id;
-        tasks.run([dev_id, out_saved_brightness]() {
+        auto dim_now = [dev_id, out_saved_brightness]() {
             pm::adb::AdbClient adb;
             if (out_saved_brightness && out_saved_brightness->brightness < 0) {
                 *out_saved_brightness = read_brightness(adb, dev_id);
             }
             adb.execute_shell_command(dev_id, "settings put system screen_brightness_mode 0; settings put system screen_brightness 0");
-        });
+        };
+
+        // Ugg! The two of them fight. Writing a brightness makes Android look at the
+        // panel again and hand it a fresh power mode — which switches back ON the panel
+        // that SET_DISPLAY_POWER had just darkened past Android's back. As a background
+        // job this lands whenever it feels like it, and every second start came up with
+        // a bright phone. With a display of our own the dimming therefore happens HERE,
+        // before the stream exists, so the darkening further down always has the last
+        // word. While mirroring, nothing turns the panel off, so the old road stays.
+        if (own_display) {
+            dim_now();
+        } else {
+            tasks.run(dim_now);
+        }
     }
 
     // Cave man read phone's rotation switch, never sets it — the menu toggle
@@ -1026,6 +1126,28 @@ bool start_stream(
             window.post_task([&window]() {
                 window.set_status_text("Dieses Handy erlaubt keine USB-Tastatur. Texteingabe bleibt aktiv.");
             });
+        }
+    }
+
+    // With the phone's own launcher switched off, nothing would ever appear on the new
+    // display — the app has to be pushed onto it by hand, and only once the control
+    // hole is open. Without decorations and without an app there is no picture at all.
+    // Reads the CONFIG, not the settings from further up: the launcher may have been
+    // filled in only a moment ago, after those were read.
+    if (own_display && !config.new_display_app.empty()) {
+        scrcpy.start_app(config.new_display_app);
+
+        // Ugg! On its very first run the launcher asks whether it may become the phone's
+        // ONE home screen — a question about the whole phone, which nobody answered here
+        // and which would sit on the display blocking everything. "Back" is that dialog's
+        // "no". It only fires right after a fresh install: on a home screen a back-poke
+        // does nothing, so a wrong guess costs nothing, but sending it every session
+        // would still be poking at something we cannot see.
+        if (fossify_freshly_installed) {
+            constexpr int ANDROID_KEYCODE_BACK = 4;
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+            scrcpy.inject_keycode(0, ANDROID_KEYCODE_BACK);
+            scrcpy.inject_keycode(1, ANDROID_KEYCODE_BACK);
         }
     }
 
@@ -1150,10 +1272,11 @@ bool unlock_device_if_needed(const std::string& device_id, pm::window::IWindow* 
     pm::Settings settings = pm::load_settings();
     if (settings.m_pin.empty()) return true;
 
-    // EXPERIMENT. With a display of our own the phone's own panel is not the picture
-    // any more. Waking it and hammering a PIN into it would undo the one thing the
-    // human switched this on for: a phone that stays locked. A human who clicks
-    // "Handy entsperren" by hand still gets exactly that.
+    // EXPERIMENT. With a display of our own the client keeps its hands off the phone's
+    // lock. Cave man DID build the automatic unlock once, because a locked phone leaves
+    // the launcher on the new display deaf — but it proved unreliable in practice, and
+    // hammering a PIN into a phone nobody is looking at is the wrong kind of clever.
+    // A human who clicks "Handy entsperren" still gets exactly that.
     if (settings.m_virtual_display && !user_requested) return true;
 
     pm::adb::AdbClient adb;
@@ -1871,6 +1994,21 @@ static int app_main() {
         input.handle_pointer(action, x, y, w, h);
     });
     window->set_key_callback([&](int action, int keycode) {
+        constexpr int ANDROID_KEYCODE_HOME = 3;
+
+        // Ugg! On a display of our own with the system furniture switched off there is
+        // no home screen registered — the phone answers the HOME key with nothing at
+        // all, and whoever opened an app is stuck in it forever. So the key does here
+        // what it means: put the launcher back on the display. Only the press, or the
+        // launcher gets fetched twice per tap.
+        if (action == 0 && keycode == ANDROID_KEYCODE_HOME && scrcpy.uses_new_display()) {
+            const pm::Settings current = pm::load_settings();
+            if (!current.m_virtual_display_app.empty()) {
+                scrcpy.start_app(current.m_virtual_display_app);
+                return;
+            }
+        }
+
         // key down/up. cave man click keys.
         if (action == 0) {
             input.handle_key_down(keycode);
@@ -2112,12 +2250,16 @@ static int app_main() {
                 bool screen_on = true; // assume on unless check confirms off
                 bool phone_answered = false;
 
-                // EXPERIMENT. A dark phone panel means "human put the phone away" only
-                // as long as the phone's panel IS the picture. With a display of our
-                // own it means nothing at all — the panel is supposed to be dark, and
-                // the watchdog below would tear down a perfectly healthy stream and
-                // fold the window into the tray. Only the clipboard question survives.
-                const bool watch_phone_screen = !scrcpy.uses_new_display();
+                // Cave man watches the phone's screen in EVERY mode, including with a
+                // display of our own — that is what a human means when they press the
+                // side button: "I am done, put it away."
+                //
+                // This does not misfire on the panel WE darken: SET_DISPLAY_POWER goes
+                // straight to SurfaceControl, so Android keeps calling the phone
+                // interactive and the check below stays quiet. Only a phone that really
+                // fell asleep reads as not interactive — and then the display of our own
+                // is dead anyway, so there is nothing left to keep alive.
+                const bool watch_phone_screen = true;
 
                 if (scrcpy.is_running()) {
                     clip_poll_counter++;
@@ -2172,11 +2314,24 @@ static int app_main() {
                             saved_brightness = {}; // Cave man forget — already restored
                         }
                         
-                        window->post_task([&]() {
+                        const bool own_display_session = scrcpy.uses_new_display();
+                        window->post_task([&, own_display_session]() {
                             // Cave man hide window to tray when phone screen off — no black screen!
+                            //
+                            // With a display of our own the window is folded down to the
+                            // taskbar instead. The tray road exists because a mirrored
+                            // picture without a phone screen is a black hole nobody wants
+                            // staring at them — but this window carried a desktop of its
+                            // own, and a human who switches the phone off expects to find
+                            // it where every other window goes, not hidden behind a tray
+                            // icon they have to remember.
                             if (window->is_visible()) {
-                                window->hide();
-                                if (tray) tray->show();
+                                if (own_display_session) {
+                                    window->minimize();
+                                } else {
+                                    window->hide();
+                                    if (tray) tray->show();
+                                }
                             }
                             window->set_app_state(pm::window::AppState::SETUP);
                         });

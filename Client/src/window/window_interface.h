@@ -72,6 +72,10 @@ public:
     
     // Hides the window on screen.
     virtual void hide() = 0;
+
+    // Folds the window down to the taskbar, the way the minimize button does. Unlike
+    // hide() it leaves the window where the human can find it again without the tray.
+    virtual void minimize() = 0;
     
     // Checks if the window is currently visible.
     virtual bool is_visible() const = 0;

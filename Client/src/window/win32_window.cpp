@@ -280,6 +280,14 @@ void Win32Window::hide() {
     visible_ = false;
     update_animation_timer();
 }
+void Win32Window::minimize() {
+    // Deliberately NOT touching visible_: a folded-down window is still a window the
+    // human owns, and the tray path (hide()) must stay the only thing that says
+    // "gone". SW_MINIMIZE also fires the SIZE_MINIMIZED edge, so the auto-pause hand
+    // hears about this exactly as if the human had clicked the minimize button.
+    ShowWindow(hwnd_, SW_MINIMIZE);
+}
+
 bool Win32Window::is_visible() const { return visible_; }
 
 void Win32Window::process_messages() {

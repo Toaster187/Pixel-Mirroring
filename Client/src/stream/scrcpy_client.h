@@ -42,6 +42,22 @@ public:
         int new_display_width = 0;   // 0 x 0 = same shape as the phone's own display
         int new_display_height = 0;
         int new_display_dpi = 0;     // 0 = scaled from the phone's own density
+        // Empty = let the phone hang its own launcher into the display. A package name
+        // switches the launcher (and the whole system furniture) off and puts that one
+        // app on it instead — see Settings::m_virtual_display_app.
+        std::string new_display_app;
+
+
+        // How long the PHONE may stay untouched before it falls asleep, in ms. 0 = do
+        // not touch the setting.
+        //
+        // Ugg! Turning the panel off does NOT stop the phone's own idle clock: Android
+        // still believes its screen is on (we went past it through SurfaceControl) and
+        // dozes off after its usual minute — taking the PC's display with it. The
+        // server writes this value and its own cleanup process puts the old one back,
+        // even if the server is killed. Doing it ourselves would leave a phone that
+        // never sleeps again whenever this client dies badly.
+        int screen_off_timeout_ms = 0;
     };
 
     // Biggest HID report this client will carry to the phone. A keyboard report
