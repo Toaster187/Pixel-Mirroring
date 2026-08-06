@@ -1,15 +1,26 @@
 # Virtual Display (experimentell)
 
-Status: **Experiment auf `virtual-display-dev-`, nicht für `main`.**
+Status: **Experiment auf `virtual-display-dev-`.**
 
-Statt den Handybildschirm zu spiegeln, legt der Server auf dem Handy ein eigenes
-virtuelles Display an, das nur für diesen PC existiert. Das Handy bleibt gesperrt und
-parallel benutzbar, der PC bekommt seine eigene Android-Oberfläche.
+Statt den Handybildschirm zu spiegeln, legt der scrcpy-Server auf dem Handy ein eigenes
+virtuelles Display an, das nur für diesen PC existiert. Der PC bekommt eine eigene
+Android-Oberfläche, das Handy-Panel bleibt dunkel.
 
-Einschalten: Rechtsklick ins Fenster → **„Eigener PC-Bildschirm (experimentell)"**.
-Der Schalter liegt in `Settings::m_virtual_display` (`virtual_display=1` in
-`settings.txt`) und ist standardmäßig aus. Umschalten startet den Stream neu, weil der
-Server seine Optionen nur beim Start liest.
+Der Modus ist **standardmäßig an** (`Settings::m_virtual_display`) und lässt sich per
+Rechtsklick ins Fenster abschalten → „Eigener PC-Bildschirm (experimentell)". Umschalten
+startet den Stream neu, weil der Server seine Optionen nur beim Start liest.
+
+## Was der Modus mitbringt
+
+| Einstellung | Schlüssel in `settings.txt` | Standard |
+|---|---|---|
+| Modus an/aus | `virtual_display` | `1` |
+| App auf dem Display | `virtual_display_app` | wird auf `org.fossify.home` gesetzt |
+
+Beide Angaben gehen als Serveroptionen raus: `new_display=` (leer = Größe und
+Punktdichte des Handy-Displays), `display_ime_policy=local`, `keep_active=true`,
+`screen_off_timeout=3600000` und — sobald eine App benannt ist —
+`vd_system_decorations=false` plus Steuernachricht 16 (`START_APP`).
 
 ## Voraussetzung: Server-JAR 4.1
 
@@ -19,83 +30,121 @@ unveränderte Release-Artefakt `scrcpy-server-v4.1` von
 SHA-256 `deacb991ed2509715160ffdc7907e47b4160eb30d1566217e9047fd5b8850cae`).
 Vorher lag dort v2.7 (71.200 Bytes).
 
-Das Issue nannte 3.x als Ziel, und der Weg ging auch zuerst dorthin. 3.3.4 hat sich am
-Pixel 9 aber als unbrauchbar erwiesen (siehe „Nachgemessen"), weil ihm `keep_active`
-fehlt. Deshalb steht hier 4.1. Beide Sprünge sind unten aufgeschrieben — der Schritt
-2.7 → 3.3.4 betrifft den Steuerkanal, der Schritt 3.3.4 → 4.1 den Videostrom.
+Das Issue nannte 3.x als Ziel, und der Weg ging auch zuerst dorthin. 3.3.4 fehlt aber
+`keep_active`, weshalb hier 4.1 steht. Beide Sprünge sind unten aufgeschrieben — der
+Schritt 2.7 → 3.3.4 betrifft den Steuerkanal, der Schritt 3.3.4 → 4.1 den Videostrom.
 
 Die Versionszeichenkette in `scrcpy_client.cpp` (`SERVER_VERSION`) muss exakt zur JAR
 passen — der Server vergleicht sie mit seiner eigenen und startet sonst gar nicht.
 
-Serverseitige Mindestanforderung für `new_display` ist laut `Server.java` Android 10.
-Erst ab Android 14 setzt `NewDisplayCapture` aber `VIRTUAL_DISPLAY_FLAG_OWN_FOCUS` und
-`…_DEVICE_DISPLAY_GROUP`, und erst damit ist das virtuelle Display wirklich unabhängig
-vom Handy-Display (eigener Fokus, eigene Displaygruppe). Ab Android 13 kommen
-`…_TRUSTED` und `…_ALWAYS_UNLOCKED` dazu — Letzteres ist der Grund, warum das
-gesperrte Handy das virtuelle Display nicht mit ausblendet. Getestet wird auf einem
-Pixel 9 mit Android 17.
+## Der Launcher: warum ein fremder
 
-## Protokoll-Deltas 2.7 → 3.3.4
+Ein Pixel 9 unter Android 17 legt seinen eigenen Launcher für Zweitdisplays
+(`SecondaryDisplayLauncher`) sehr wohl auf das neue Display. Der ist dort aber
+unbrauchbar:
 
-Alles unten stammt aus einem Quelltextvergleich der beiden Tags, nicht aus dem
-Änderungsprotokoll.
+* Die App-Übersicht öffnet sich und listet alle Apps.
+* **Ein Tippen auf einen App-Eintrag startet nichts.** Kein Logeintrag, keine Ablehnung,
+  die Übersicht schließt sich nur wieder. Mehrfach reproduziert, auf die exakten
+  anklickbaren Knotengrenzen gezielt, mit Touch- und mit Maus-Ereignissen.
+* An der Eingabe liegt es nicht: `dumpsys input` meldet unser Display als
+  `FocusedDisplayId`, das Launcher-Fenster als fokussiert, Zustellung `result='OK'`.
+  Eine per `START_APP` gestartete App reagiert auf demselben Display einwandfrei auf
+  Fingereingaben.
 
-### Steuerkanal (PC → Handy)
+Deshalb bringt der Client **Fossify Launcher** mit (quelloffen, F-Droid). Er wird beim
+Bauen geladen (`Client/CMakeLists.txt`, mit Prüfsummenkontrolle), liegt neben der EXE
+und im Installationspaket, und der Client schiebt ihn bei der Ersteinrichtung über USB
+aufs Handy — später notfalls auch über WLAN. Aus Fossify heraus lassen sich Apps
+nachweislich starten (Chrome, verifiziert).
+
+Installiert wird **ohne `-g`**, über `push_file` + `install_pushed_app`: das
+Vorab-Erteilen aller Laufzeitberechtigungen ist für die eigene App vertretbar, für einen
+Launcher aus einem fremden Repository nicht.
+
+Beim allerersten Start fragt Fossify, ob es Standard-Launcher des ganzen Handys werden
+soll. Der Client schickt direkt nach einer frischen Installation einmal `BACK`, was dem
+„Abbrechen" entspricht — nur dann, nicht in jeder Sitzung.
+
+**Vor einem Release zu klären:** Fossify steht unter GPL-3.0, das Mitliefern bringt die
+Pflichten dieser Lizenz mit. Und die APK vergrößert das Installationspaket um gut 5 MB,
+was dem Grundsatz „die Größe der Auslieferung ist ein Feature" zuwiderläuft.
+
+## Schlaf, Sperre, Panel
+
+Drei Zustände des Handys wirken auf das virtuelle Display, und sie werden gern
+verwechselt:
+
+* **Panel aus** (`Settings::m_screen_off`, `SET_DISPLAY_POWER`): geht über SurfaceControl
+  an Androids Buchhaltung vorbei. Das Gerät bleibt wach, das virtuelle Display lebt, der
+  Handybildschirm ist schwarz. **Das ist der gewollte Zustand.** `dumpsys` meldet das
+  Panel dabei weiter als `ON` — der Zustand lässt sich von außen nicht messen.
+* **Gerät schläft** (Seitentaste oder Zeitüberschreitung): WindowManager hängt auch an
+  unser Display ein `Display-off`-Token, der Launcher hört auf zu zeichnen, jede Eingabe
+  verpufft. Nachgemessen:
+
+  ```
+  Going to sleep due to power_button
+  Add SleepToken: tag=Display-off, displayId=0
+  Add SleepToken: tag=Display-off, displayId=17   <- unseres, 200 ms später
+  ```
+
+  `keep_active` allein rettet das nicht: der Server weckt damit alle 4 Sekunden über
+  `PowerManager.userActivity()`, das ergibt einen Sägezahn, und nach 30 Sekunden ohne
+  Eingabe steht das Display auf `isSleeping=true`.
+
+  Weil das Abschalten des Panels Androids Untätigkeitsuhr **nicht** anhält (es glaubt
+  weiter, sein Bildschirm sei an), schlief das Gerät nach 60 Sekunden von selbst ein.
+  Dagegen setzt der Client `screen_off_timeout=3600000`; der Server stellt den alten
+  Wert über seinen eigenen Aufräumprozess zurück, auch nach einem Absturz.
+* **Gerät gesperrt:** `FLAG_ALWAYS_UNLOCKED` sorgt dafür, dass auf unserem Display kein
+  Sperrbildschirm erscheint. Ein automatisches Entsperren gab es hier zwischenzeitlich,
+  es ist wieder entfernt.
+
+**Reihenfolge ist wichtig:** die Helligkeitsabsenkung läuft in diesem Modus *vor* dem
+Stream. Das Schreiben von `screen_brightness` lässt Android den Displayzustand neu setzen
+und schaltet das gerade abgedunkelte Panel wieder ein; als Hintergrundaufgabe landete das
+mal vor, mal nach dem Abschalten.
+
+**Handy aus = Sitzung aus:** der Bildschirm-Watchdog ist in diesem Modus aktiv. Er
+verwechselt das nicht mit dem Panel, das der Client selbst abdunkelt, weil das Gerät
+dabei interaktiv bleibt. Das Fenster faltet sich dann in die Taskleiste statt in die
+Ablage — beim gewöhnlichen Spiegeln bleibt es beim Verstecken in die Ablage.
+
+## Protokoll-Deltas 2.7 → 3.3.4 (Steuerkanal)
+
+Alles aus einem Quelltextvergleich der beiden Tags, nicht aus dem Änderungsprotokoll.
 
 | Typ | 2.7 | 3.3.4 | Auswirkung auf den Client |
 |----|----|----|----|
-| 10 | `SET_SCREEN_POWER_MODE`, Nutzlast = Power-Mode-Zahl (0 aus, 2 normal) | `SET_DISPLAY_POWER`, Nutzlast = Boolean | Angepasst: sendet jetzt 1 statt 2. Die alte 2 wäre über `readBoolean()` zufällig auch „an" gewesen. |
+| 10 | `SET_SCREEN_POWER_MODE`, Nutzlast = Power-Mode-Zahl (0 aus, 2 normal) | `SET_DISPLAY_POWER`, Nutzlast = Boolean | Angepasst: sendet 1 statt 2. Die alte 2 wäre über `readBoolean()` zufällig auch „an" gewesen. |
 | 3 | `INJECT_SCROLL_EVENT`, Festkommawert im Bereich [-1, 1] | derselbe Wert, wird serverseitig **mal 16** genommen | Angepasst: Client skaliert mit 8192/16. Ohne das scrollt jede Radrastung 16-fach. |
-| 12 | `UHID_CREATE`: `typ(1) id(2) name_len(1) name rd_size(2) rd_data` | `typ(1) id(2) vendor(2) product(2) name_len(1) name rd_size(2) rd_data` | Angepasst: 4 Bytes eingefügt, beide 0 (genau wie scrcpy selbst es für Tastatur und Maus tut; nur Gamepads tragen echte IDs). Ohne das liest der Server die Namenslänge mitten aus der Report-Beschreibung und reißt beim Anlegen den kompletten Control-Thread mit — Tasten, Maus, Touch und Zwischenablage sind still, das Bild läuft weiter. |
-| 16 | – | `START_APP`, `typ(1) len(1) name` | Neu implementiert (`ScrcpyClient::start_app`), bisher nicht verdrahtet. Wird gebraucht, falls ein Gerät keinen Launcher auf ein zweites Display legt. |
+| 12 | `UHID_CREATE`: `typ(1) id(2) name_len(1) name rd_size(2) rd_data` | `typ(1) id(2) vendor(2) product(2) name_len(1) name rd_size(2) rd_data` | Angepasst: 4 Bytes eingefügt, beide 0 (wie scrcpy es für Tastatur und Maus tut; nur Gamepads tragen echte IDs). Ohne das liest der Server die Namenslänge mitten aus der Report-Beschreibung und reißt den kompletten Control-Thread mit — Tasten, Maus, Touch und Zwischenablage still, Bild läuft weiter. |
+| 16 | – | `START_APP`, `typ(1) len(1) name` | Implementiert, wird für den Launcher gebraucht. |
 | 17 | – | `RESET_VIDEO` | Nicht implementiert. |
 
 Alle übrigen Typen (0–9, 11, 13, 14, 15) sind unverändert. Die Geräte-Nachrichten
-Handy → PC (`CLIPBOARD` 0, `ACK_CLIPBOARD` 1, `UHID_OUTPUT` 2) sind byteweise
-identisch, `DeviceMessageWriter.java` ist zwischen beiden Tags unverändert.
+Handy → PC (`CLIPBOARD` 0, `ACK_CLIPBOARD` 1, `UHID_OUTPUT` 2) sind byteweise identisch.
 
-### Datenströme
+Entfallene Option: `lock_video_orientation` (ersetzt durch `capture_orientation`) — der
+Client hat sie nie gesendet. Unbekannte Optionen sind ab 3.x kein Startfehler mehr, der
+Server warnt nur; ein Tippfehler im Schlüssel fällt also nicht mehr sofort auf.
 
-`Streamer.java` ist zwischen 2.7 und 3.3.4 unverändert: Gerätename, Codec-Meta
-(12 Bytes) und Frame-Header (8 Byte PTS + 4 Byte Länge) bleiben, wie sie waren. Am
-Video-, Audio- und Kontrollsocket ändert sich nichts, auch die Reihenfolge nicht.
+## Protokoll-Deltas 3.3.4 → 4.1 (Videostrom)
 
-### Serveroptionen
+Hier sitzt die Änderung nicht im Steuerkanal. Wer nur die Versionszeichenkette hochzieht,
+bekommt ein Bild aus Müll.
 
-Entfallen: `lock_video_orientation` (ersetzt durch `capture_orientation`). Der Client
-hat sie nie gesendet.
-
-Neu und hier benutzt:
-
-* `new_display=` — leer bedeutet „Größe und Punktdichte des Handy-Displays". Sonst
-  `<breite>x<höhe>`, `/<dpi>` oder beides.
-* `display_ime_policy=local` — ohne das erscheint die Bildschirmtastatur auf dem
-  **Handy**, während am PC getippt wird. Auf einem Handy, das dunkel und gesperrt
-  bleiben soll, findet die niemand wieder.
-
-Neu und hier nicht benutzt: `vd_system_decorations`, `vd_destroy_content`, `angle`,
-`capture_orientation`, `screen_off_timeout`, `list_apps`.
-
-Unbekannte Optionen sind ab 3.x kein Startfehler mehr, der Server schreibt nur eine
-Warnung — ein falsch geschriebener Schlüssel fällt also nicht mehr sofort auf.
-
-## Protokoll-Deltas 3.3.4 → 4.1
-
-Hier sitzt die Änderung nicht im Steuerkanal, sondern im **Videostrom**. Wer nur die
-Versionszeichenkette hochzieht, bekommt ein Bild aus Müll.
-
-* **Der Videokopf schrumpft von 12 auf 4 Bytes.** Früher standen Codec-ID, Breite und
-  Höhe zusammen im Kopf. Ab 4.0 steht dort nur noch die Codec-ID.
-* **Die Bildgröße kommt stattdessen im Strom**, als „Session-Paket": zwölf Bytes aus
-  Flags, Breite, Höhe, erkennbar am gesetzten obersten Bit. Es kommt einmal vor dem
-  ersten Bild und danach erneut nach jeder Drehung oder Größenänderung. Ein
-  Session-Paket ist die ganze Nachricht — es folgt keine Nutzlast.
-* **Die Paketflags sind ein Bit nach unten gerutscht:** `SESSION` ist neu auf Bit 63,
-  `CONFIG` wanderte von 63 auf 62, `KEY_FRAME` von 62 auf 61. Wer weiter auf Bit 63
-  prüft, hält jedes Session-Paket für ein Konfigurationspaket.
+* **Der Videokopf schrumpft von 12 auf 4 Bytes** — nur noch die Codec-ID.
+* **Die Bildgröße kommt im Strom**, als „Session-Paket": zwölf Bytes aus Flags, Breite,
+  Höhe, erkennbar am gesetzten obersten Bit. Einmal vor dem ersten Bild, danach erneut
+  nach jeder Drehung oder Größenänderung. Ein Session-Paket ist die ganze Nachricht, es
+  folgt keine Nutzlast.
+* **Die Paketflags sind ein Bit nach unten gerutscht:** `SESSION` neu auf Bit 63,
+  `CONFIG` von 63 auf 62, `KEY_FRAME` von 62 auf 61.
 * `send_codec_meta` heißt jetzt `send_stream_meta` und deckt beides ab.
 * Neue Steuernachrichten 18–22 (Kamera-Zoom/Blitz, `RESIZE_DISPLAY`, `SCAN_FILE`) —
-  additiv, keine davon wird bisher benutzt.
+  additiv, keine wird benutzt.
 * `UHID_CREATE`, Scroll-Skalierung und `SET_DISPLAY_POWER` sind gegenüber 3.3.4
   unverändert.
 
@@ -104,148 +153,54 @@ Der Client liest das Session-Paket in `read_metadata()` (Anfangsgröße) und in
 `ScrcpyClient::set_resolution_callback` weiter, damit Mauszeiger-Umrechnung und
 Fensterseitenverhältnis nicht auf dem alten Maß hängenbleiben.
 
-Nicht benutzt, aber jetzt verfügbar: `flex_display` (Display folgt der Fenstergröße)
-und `RESIZE_DISPLAY`.
-
-## Was in diesem Modus bewusst ausgeschaltet ist
-
-Das Handy-Display ist nicht mehr das Bild, also darf auch niemand mehr daran ziehen:
-
-* **Entsperrt wird sehr wohl** — anders als hier zuerst gebaut. Ein gesperrtes Handy
-  lässt die Oberfläche auf dem neuen Display taub werden (siehe „Nachgemessen"), also
-  entsperrt der Client selbst, und zwar **vor** dem Aufbau des Displays statt parallel
-  dazu: das Entsperren weckt das Handy-Panel, und `m_screen_off` muss danach kommen,
-  sonst bleibt das Handy hell. Was übrig bleibt, ist ein **dunkles**, nicht ein
-  gesperrtes Handy — eine schwächere Zusage als die aus dem Issue.
-* **Keine Helligkeitsverstellung.** `SET_DISPLAY_POWER` dagegen bleibt aktiv und ist in
-  diesem Modus sogar der empfohlene Begleiter — siehe „Nachgemessen".
-* **Kein Bildschirm-Watchdog.** Der Poll-Thread wertet „Handy-Display ist aus" sonst
-  als „Mensch hat das Handy weggelegt", beendet den Stream und faltet das Fenster in
-  die Taskleiste. Die Zwischenablage-Abfrage im selben Thread läuft weiter.
-
-Der scrcpy-Server selbst weckt das Handy in diesem Modus ebenfalls nicht: sein
-`power_on`-Zweig greift nur bei `displayId == 0`.
+Nicht benutzt, aber verfügbar: `flex_display` (Display folgt der Fenstergröße) und
+`RESIZE_DISPLAY`.
 
 ## Nachgemessen auf dem Pixel 9 (Android 17, SDK 37)
 
-Erster Lauf am 3.8.2026, `new_display=` mit `display_ime_policy=local`:
-
-* Das Display entsteht als `displayId=14`, Name `scrcpy`, 1080x2424 bei 420 dpi — also
-  Größe und Punktdichte des Handy-Displays, wie beim leeren Optionswert erwartet.
-* `dumpsys display` zeigt genau den Flag-Satz, den `NewDisplayCapture` ab Android 14
-  setzt: `FLAG_ALWAYS_UNLOCKED`, `FLAG_OWN_FOCUS`, `FLAG_OWN_DISPLAY_GROUP`,
-  `FLAG_TRUSTED`, `FLAG_SHOULD_SHOW_SYSTEM_DECORATIONS`, `FLAG_OWN_CONTENT_ONLY`,
+* Das Display entsteht mit Größe und Punktdichte des Handy-Displays (1080x2424, 420 dpi).
+* `dumpsys display` zeigt den Flag-Satz, den `NewDisplayCapture` ab Android 14 setzt:
+  `FLAG_ALWAYS_UNLOCKED`, `FLAG_OWN_FOCUS`, `FLAG_OWN_DISPLAY_GROUP`, `FLAG_TRUSTED`,
+  `FLAG_SHOULD_SHOW_SYSTEM_DECORATIONS`, `FLAG_OWN_CONTENT_ONLY`,
   `FLAG_DESTROY_CONTENT_ON_REMOVAL`, `FLAG_PRESENTATION`, `FLAG_TOUCH_FEEDBACK_DISABLED`.
-* **Der Pixel-Launcher erscheint von selbst**, als
-  `com.google.android.apps.nexuslauncher/com.android.launcher3.secondarydisplay.SecondaryDisplayLauncher`
-  und als `topResumedActivity` — **er ist aber unbrauchbar**, siehe unten.
-* Video (H.264, 1080x2424) und Ton (Roh-PCM) laufen beide.
+* Video (H.264, 1080x2424) und Ton (Roh-PCM) laufen, stabil um 60 fps bei ~2 ms
+  Dekodierzeit.
+* Aus Fossify heraus gestartete Apps laufen und reagieren normal.
 
-### Das virtuelle Display schläft mit dem Handy ein
+## Sackgassen (damit sie niemand zweimal geht)
 
-Der wichtigste Befund, und der Grund für 4.1. Sobald das Handy selbst einschläft, hängt
-WindowManager auch an unser Display ein Schlaf-Token, der Launcher hört auf zu zeichnen
-und jede Eingabe verpufft:
-
-```
-09:36:21.120 PowerManagerService: Going to sleep due to power_button
-09:36:21.660 Add SleepToken: tag=Display-off, displayId=0
-09:36:21.868 Add SleepToken: tag=Display-off, displayId=17   <- unseres, 200 ms später
-09:36:21.891 VRI[SecondaryDisplayLauncher]: visibilityChanged true -> false
-```
-
-`FLAG_ALWAYS_UNLOCKED` geht nur am Sperrbildschirm vorbei, nicht am Schlaf.
-
-**`keep_active` allein reicht nicht.** Der Server weckt damit alle 4 Sekunden
-(`KEEP_ACTIVE_INTERVAL_MS`) über `PowerManager.userActivity()` — gemessen ergibt das
-einen Sägezahn (Token weg, 7 s später wieder da), und nach 30 Sekunden ohne Eingabe
-steht das Display auf `isSleeping=true` und liefert kein einziges Bild mehr.
-
-**Was wirklich hilft:** das Gerät wach lassen und nur sein *Panel* abschalten, also
-`Settings::m_screen_off` („Handy-Display komplett aus"). Das geht über
-`SET_DISPLAY_POWER` direkt an SurfaceControl vorbei an der Schlaflogik. Gemessen mit
-beiden Schaltern an: `mWakefulness=Awake`, virtuelles Display `isSleeping=false`,
-Launcher `topResumedActivity`, in 30 Sekunden **null** Schlaf-Token-Wechsel — und das
-Handy-Panel physisch dunkel. Deshalb ist `m_screen_off` in diesem Modus ausdrücklich
-**nicht** abgeschaltet, obwohl es das Handy-Panel anfasst.
-
-Bleibt die Lücke: drückt jemand die Seitentaste, schläft das Gerät und das virtuelle
-Display mit ihm. Dagegen gibt es auf dieser Android-Version keinen Hebel im Client.
-
-### Der Launcher für Zweitdisplays ist eine Ruine — Apps direkt starten
-
-Der `SecondaryDisplayLauncher` erscheint zwar, taugt auf dem Pixel 9 unter Android 17
-aber nichts:
-
-* Der Startbildschirm ist **leer**. Der UI-Abzug zeigt das `workspace_grid`
-  (`[56,56][1024,2204]`) **ohne ein einziges Kindelement**.
-* Die App-Übersicht lässt sich öffnen und listet ~78 Apps.
-* Ein Tippen auf ein App-Symbol löst **keinen Startversuch** aus — im Logcat steht
-  dazu nichts, nicht einmal eine Ablehnung. Die Übersicht bleibt einfach offen.
-* An der Eingabe liegt es nicht: `dumpsys input` meldet `FocusedDisplayId=<unser>`, das
-  Launcher-Fenster als fokussiert und die Zustellung mit `result='OK'`; Tasten (HOME,
-  BACK) wirken.
-
-Genauer nachgemessen, nachdem der erste Verdacht (Sperre) sich nur halb bestätigt hat:
-
-* **Bei gesperrtem Handy nimmt der Launcher gar nichts an** — ein Tippen auf den
-  Übersicht-Knopf bewirkt nichts.
-* **Bei entsperrtem Handy geht die Übersicht auf** (UI-Abzug wächst von 2081 auf ~25000
-  Bytes) und listet ~78 Apps. Fingereingaben kommen also an.
-* **Ein Tippen auf einen App-Eintrag startet trotzdem nichts**, auch entsperrt nicht,
-  auch auf exakt die anklickbaren Knotengrenzen gezielt. Kein Logeintrag, keine
-  Ablehnung, der Launcher bleibt oben.
-* Der leere Startbildschirm ist dagegen **Absicht**: dieser Launcher hat keine Symbole
-  auf der Arbeitsfläche, alles liegt hinter dem Übersicht-Knopf.
-
-Dass Fingereingaben grundsätzlich funktionieren, ist unabhängig belegt: in der per
-`START_APP` gestarteten Einstellungen-App springt ein Tap auf „Apps" sauber in die
-Unterseite (`SubSettings`).
-
-**Was funktioniert:** `vd_system_decorations=false` plus Steuernachricht 16
-(`START_APP`) — also die ganze Systemmöblierung weglassen und genau eine App auf das
-Display setzen. Damit läuft `com.android.settings` nachweislich dort
-(`topResumedActivity=com.android.settings/.SubSettings`, Bild kommt an, bedienbar).
-
-**Desktop-Modus ist keine Alternative.** Mit
-`force_desktop_mode_on_external_displays=1` prüft Android 17 unser Display, lehnt es
-aber ab: erst `keyguardLocked=true; aborting`, nach dem Entsperren dann
-`shouldCreateOrWarmUpDesk skipping reason: desktop ineligible`. Vermutlich wegen
-`VIRTUAL_DISPLAY_FLAG_OWN_DISPLAY_GROUP`, das der Server setzt — änderbar nur in der
-JAR, die unverändert bleiben muss.
-
-**Der volle Pixel-Launcher lässt sich nicht dorthin starten.** `START_APP` mit
-`com.google.android.apps.nexuslauncher` lässt das Display schwarz; Android reserviert
-Zweitdisplays für die Kategorie `SECONDARY_HOME`, und dafür ist auf diesem Gerät nur
-der eine, untaugliche Launcher registriert.
-
-Bemerkenswert: `adb shell am start --display <id>` wird auf Android 17 mit
-`SecurityException: Permission Denial ... with launchDisplayId=` abgelehnt, der
-`START_APP`-Weg des Servers aber **nicht**. Die Ablehnung betrifft also nur fremde
-Shell-Prozesse, nicht den Server, der das Display selbst angelegt hat.
-
-Gesteuert wird das über `Settings::m_virtual_display_app` (`virtual_display_app=` in
-`settings.txt`, ohne Menüpunkt). Leer = Launcher des Handys, Paketname = nur diese App.
+* **Voller Pixel-Launcher** (`START_APP` mit `com.google.android.apps.nexuslauncher`):
+  Display bleibt schwarz. Android reserviert Zweitdisplays für die Intent-Kategorie
+  `SECONDARY_HOME`.
+* **Desktop-Modus** (`force_desktop_mode_on_external_displays=1`): Android prüft unser
+  Display und lehnt ab — erst `keyguardLocked=true; aborting`, nach dem Entsperren dann
+  `shouldCreateOrWarmUpDesk skipping reason: desktop ineligible`. Vermutlich wegen
+  `FLAG_OWN_DISPLAY_GROUP`, das der Server setzt und das nur in der JAR änderbar wäre.
+* **Simuliertes Zweitdisplay** (`overlay_display_devices` + `display_id=`): Der
+  System-Launcher **funktioniert** dort, Apps starten. Aber dieses Display ist eine
+  Simulation, die auf den Handybildschirm gezeichnet wird — es rendert nur, solange das
+  Handy entsperrt und sein Bildschirm an ist, und trägt dauerhaft die Beschriftung
+  „Overlay-Nr. 1" im Bild. Damit fällt weg, wofür der Modus da ist. Code wieder entfernt.
+* **`adb shell am start --display <id>`** wird auf Android 17 mit
+  `SecurityException: Permission Denial ... with launchDisplayId=` abgelehnt. Der
+  `START_APP`-Weg des Servers **nicht** — die Sperre trifft nur fremde Shell-Prozesse,
+  nicht den Server, der das Display selbst angelegt hat.
+* **`force_resizable_activities=1`** wurde probiert und hat nichts geändert; auf dem
+  Testgerät wieder auf 0 gestellt.
 
 ## Offen
 
-* **`force_resizable_activities`** steht auf dem Testgerät jetzt auf 1 (vorher 0),
-  gesetzt per `adb shell settings put global force_resizable_activities 1`. Der
-  Launcher-Task auf dem virtuellen Display ist als `nonResizable` markiert, und die
-  Gemeinde berichtet, dass Apps sich sonst nicht auf ein Zweitdisplay starten lassen.
-  Ob das hier wirklich nötig war, ist **nicht sauber isoliert** — es wurde zusammen mit
-  dem Schlafproblem geändert. Zurück mit `settings put global
-  force_resizable_activities 0`. Falls es nötig bleibt, muss der Client es selbst setzen
-  und beim Beenden zurückstellen, so wie er es mit der Helligkeit tut.
-* **Mit `virtual_display_app` gibt es keine Navigationsleiste** (die gehört zu den
-  abgeschalteten Systemdekorationen). Zurück und Start müssen über Alt+B / Alt+H laufen
-  — ungeprüft, ob Alt+H ohne Launcher etwas Sinnvolles tut oder die App wegräumt.
-* Es läuft immer nur **eine** App auf dem Display, und sie wird über einen von Hand in
-  `settings.txt` eingetragenen Paketnamen gewählt. Ein Menüpunkt fehlt, eine Liste der
-  installierten Apps (Server-Option `list=apps`) wäre der nächste Schritt.
-* Fenstergröße und Punktdichte des virtuellen Displays sind nicht einstellbar
+* Keine Navigationsleiste, weil die Systemdekorationen aus sind. Zurück über Alt+B, die
+  Start-Taste (Alt+H) holt in diesem Modus den Launcher zurück auf das Display.
+* Die Wischgeste „von oben nach unten" im Launcher öffnet das Benachrichtigungsmenü auf
+  dem **Handy**, nicht auf unserem Display: `StatusBarManager` kennt keine Display-ID,
+  und ohne Systemdekorationen gibt es bei uns keine Statusleiste. Alt+Auf sollte es
+  wieder schließen (Steuernachricht 7), ungeprüft. Sauberer wäre, die Geste in Fossifys
+  Einstellungen abzuschalten.
+* Die Seitentaste beendet die Sitzung, siehe „Schlaf, Sperre, Panel". Dagegen wurde auf
+  dieser Android-Version kein Hebel gefunden.
+* Größe und Punktdichte des virtuellen Displays sind nicht einstellbar
   (`Config::new_display_width/height/dpi` existieren, werden aber nicht gesetzt).
-* Aufnahme, Dateiablage per Ziehen und die Alt-Tastenkürzel sind in diesem Modus nicht
-  durchgeprüft.
+* Aufnahme, Datei-Ziehen und die UHID-Tastatur sind in diesem Modus nicht durchgeprüft.
 * Der Menüpunkt „Automatische Bildschirmdrehung (Handy)" bezieht sich weiterhin auf das
   Handy-Display und ist hier ohne Wirkung.

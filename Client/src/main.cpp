@@ -814,21 +814,26 @@ bool run_first_time_setup(
             });
             return false;
         }
-    } else {
-        // App already installed, so no APK push — but it may still be paired to a
-        // DIFFERENT PC. The phone stores exactly one clientId and never drops it on
-        // its own; nothing in the app ever calls removePairedClient(). So once this
-        // PC's client_id.txt changes (the "Werkseinstellungen" menu deletes it), the
-        // phone answers every /connect with 403 and there is no way back.
-        //
-        // Running setup over USB means the user is physically holding the phone with
-        // a cable attached. That is enough proof of ownership to restart the pairing:
-        // clear the app's stored state so the new clientId is adopted on the next
-        // /connect. WRITE_SECURE_SETTINGS is re-granted just below, because clearing
-        // the app data revokes it too.
-        window.post_task([&window]() { window.set_status_text("Alte Kopplung wird gelöst..."); });
-        adb.execute_shell_command(usb_device->id, std::string("pm clear ") + ANDROID_PACKAGE);
     }
+
+    // The app may still be paired to a DIFFERENT PC. The phone stores exactly one
+    // clientId and never drops it on its own; nothing in the app ever calls
+    // removePairedClient(). So once this PC's client_id.txt changes (the
+    // "Werkseinstellungen" menu deletes it), the phone answers every /connect with 403
+    // and there is no way back.
+    //
+    // This runs after a FRESH install too, which it did not use to. A fresh install is
+    // not a blank app: Android's automatic backup restores the app's data, pairing and
+    // all, so a phone that was set up with this PC before comes back with a stale
+    // clientId and refuses every /connect with 403 — observed on a Pixel 9 after
+    // reinstalling the companion app.
+    //
+    // Running setup over USB means the user is physically holding the phone with a
+    // cable attached. That is enough proof of ownership to restart the pairing.
+    // WRITE_SECURE_SETTINGS is granted below, after this, because clearing the app data
+    // revokes it too.
+    window.post_task([&window]() { window.set_status_text("Alte Kopplung wird gelöst..."); });
+    adb.execute_shell_command(usb_device->id, std::string("pm clear ") + ANDROID_PACKAGE);
 
     // Skip the grant when the permission survived from an earlier setup.
     bool has_perm = adb.has_permission(usb_device->id, ANDROID_PACKAGE, "android.permission.WRITE_SECURE_SETTINGS");
@@ -845,6 +850,13 @@ bool run_first_time_setup(
     } else {
         // Permission already granted, skip.
     }
+
+    // EXPERIMENT. The home screen for the virtual display goes over here, while a cable
+    // is attached: it is 5 MB, and pushing that over WiFi at the start of the first
+    // session is a wait nobody asked for. A failure is not fatal — the mode installs it
+    // itself later if it has to (see ensure_fossify_installed).
+    window.post_task([&window]() { window.set_status_text("PC-Startbildschirm wird installiert..."); });
+    ensure_fossify_installed(adb, usb_device->id);
 
     window.post_task([&window]() { window.set_status_text("Android-App wird gestartet..."); });
     adb.start_app(usb_device->id, ANDROID_PACKAGE);

@@ -34,7 +34,9 @@ Pixel-Mirroring/
 |-- Client/               C++20 Desktop Client
 |   |-- CMakeLists.txt    Build-Config (CMake 3.25+, vcpkg-Toolchain)
 |   |-- vendor/platform-tools/  Gebündelte Android Platform Tools für das Desktop-Paket
-|   |-- scrcpy-server.jar Unveränderte scrcpy-Server-JAR, wird zur Laufzeit aufs Gerät gepusht
+|   |-- scrcpy-server.jar Unveränderte scrcpy-Server-JAR (v4.1), wird zur Laufzeit aufs Gerät gepusht
+|   |-- vendor/FossifyLauncher.apk  Startbildschirm für den Virtual-Display-Modus,
+|   |                     wird beim Bauen geladen, nicht eingecheckt
 |   |-- tests/            Eigenständige Selbsttests (nacktes main() + check(), kein Framework)
 |   |-- vcpkg/            Git-Submodul (kompletter vcpkg-Checkout) — riesig, aus Suchen ausklammern
 |   `-- src/
@@ -358,12 +360,38 @@ jedem Textfeld korrekt dargestellt werden. Damit das dauerhaft hält, gilt:
     Subshell ist nötig, weil ein fehlgeschlagenes `exec` die Shell beendet, in der es
     steht. Das Ergebnis wird pro `device_id` gemerkt, damit Neuverbindungen und
     Qualitäts-Neustarts keinen weiteren `adb`-Prozess kosten.
-  - **Das Wire-Format hängt an der Server-Version.** Der gebündelte Server 3.3.4 erwartet
+  - **Das Wire-Format hängt an der Server-Version.** Der gebündelte Server 4.1 erwartet
     `type(1) id(2 BE) vendor(2 BE) product(2 BE) name_len(1) name rd_size(2 BE) rd_data`;
     Vendor und Product sind bei Tastatur und Maus 0, echte IDs tragen nur Gamepads.
     Server 2.7 hatte die beiden Felder noch nicht, das `name`-Feld gibt es vor 2.7 gar
-    nicht. Vor Änderungen gegen die mitgelieferte JAR prüfen — der vollständige Vergleich
-    2.7 → 3.3.4 steht in `VIRTUAL-DISPLAY.md`.
+    nicht. Vor Änderungen gegen die mitgelieferte JAR prüfen — die vollständigen
+    Vergleiche 2.7 → 3.3.4 (Steuerkanal) und 3.3.4 → 4.1 (Videostrom) stehen in
+    `VIRTUAL-DISPLAY.md`.
+
+### Virtuelles Display (experimentell, standardmäßig an)
+
+Statt der Handy-Spiegelung legt der Server ein eigenes Display für den PC an
+(`Settings::m_virtual_display`, Branch `virtual-display-dev-`). Drei Punkte tragen das
+Ganze, alle drei teuer gelernt — die vollständige Aufzeichnung samt Messwerten steht in
+`VIRTUAL-DISPLAY.md`:
+
+- **Der Zweitdisplay-Launcher des Handys taugt nichts.** Auf einem Pixel 9 unter
+  Android 17 öffnet sich seine App-Übersicht, ein Tippen auf eine App startet aber
+  nichts — nicht einmal eine Ablehnung landet im Log. Deshalb liefert der Modus den
+  Fossify Launcher mit, startet ihn per `START_APP` mit `vd_system_decorations=false`
+  und installiert ihn bei der Ersteinrichtung über USB. Die Installation läuft über
+  `push_file` + `install_pushed_app`, bewusst **nicht** über `install_app` mit `-g`.
+- **Das Gerät darf nicht einschlafen.** Das Abschalten des Panels über
+  `SET_DISPLAY_POWER` hält Androids Untätigkeitsuhr nicht an, das Handy schlief nach
+  einer Minute ein und nahm das virtuelle Display mit; `keep_active` weckt es nur alle
+  4 s und kann es nicht halten. Erst `screen_off_timeout` löst das, und der Server setzt
+  den alten Wert selbst zurück. Die Helligkeitsabsenkung muss hier **vor** dem Stream
+  laufen, weil das Schreiben einer Helligkeit das gerade abgedunkelte Panel wieder
+  einschaltet.
+- **`pm clear` auf die Companion-App läuft auch nach einer frischen Installation.**
+  Androids automatische Datensicherung stellt die App-Daten samt Kopplung wieder her, so
+  dass eine neu installierte App mit veralteter `clientId` zurückkommt und jedes
+  `/connect` mit 403 beantwortet.
   - **Pro Taste darf genau ein Pfad feuern.** `Win32Window::uhid_keyboard_` schaltet um:
     ist er an, gehen `WM_KEYDOWN`/`WM_KEYUP`/`WM_SYSKEYDOWN`/`WM_SYSKEYUP` an
     `send_raw_key()` und `WM_CHAR` wird verworfen; ist er aus, bleibt alles wie vorher.

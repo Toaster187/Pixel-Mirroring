@@ -29,10 +29,12 @@ Android/app/proguard-rules.pro  R8 keep rules (manifest components, kotlinx-seri
 Client/                        C++20 desktop client
     CMakeLists.txt              build config (CMake 3.25+, vcpkg toolchain)
     vendor/platform-tools/      bundled Android platform-tools (adb.exe etc.), copied next to the EXE at build time
-    scrcpy-server.jar           unmodified upstream scrcpy server binary, pushed to the device at runtime
+    scrcpy-server.jar           unmodified upstream scrcpy server binary (v4.1), pushed to the device at runtime
+    vendor/FossifyLauncher.apk  home screen for the virtual-display mode; downloaded at build time, gitignored
     src/
         main.cpp                 entry point (WinMain on Windows, main on POSIX); drives ADB/scrcpy/window/tray/settings together
-        settings.{h,cpp}         pm::Settings — persisted user settings: quality preset (BATTERY/BALANCED/MAXIMUM,
+        settings.{h,cpp}         pm::Settings — persisted user settings: virtual display on/off plus its
+                                 launcher package, quality preset (BATTERY/BALANCED/MAXIMUM,
                                  which carries max_fps + max_size + bitrate together), encrypted PIN, compatibility
                                  mode, lowest brightness, screen off, send captures to phone, audio on/off,
                                  UHID keyboard, auto-pause while minimized
@@ -134,6 +136,11 @@ pinning.
 - **Windows window**: a custom borderless `Win32` window (`win32_window.cpp`) using `WS_THICKFRAME|WS_CAPTION` with a `WM_NCCALCSIZE` override, custom `WM_NCHITTEST` hit-testing (drag/resize, Win11 snap via `HTMAXBUTTON`), and `DwmExtendFrameIntoClientArea` for the native shadow — SDL2 renders inside a Win32 child window. macOS uses a standard Cocoa/AppKit window instead.
 - **Bundled tooling**: the Windows client ships its own `adb.exe`/`AdbWinApi.dll`/`AdbWinUsbApi.dll` under `Client/vendor/platform-tools/`, copied next to the EXE at build time (CMake post-build step also auto-downloads platform-tools from Google if missing). End users should never need Android Studio or an SDK install; ADB search always prefers the bundled copy.
 - **Interface/impl pattern**: platform-specific pieces (window, tray) are split into an `_interface.h` plus per-platform implementation, selected via CMake conditional compilation — not preprocessor branching within shared files.
+- **Virtual display is an experiment, and it is on by default** (`Settings::m_virtual_display`, branch `virtual-display-dev-`). The PC gets its own Android display instead of the phone's picture. Three things are load-bearing and each was learned the hard way — the full record with measurements is in `VIRTUAL-DISPLAY.md`:
+  - **The phone's own launcher for secondary displays is useless.** On a Pixel 9 / Android 17 its app drawer opens but tapping an app starts nothing, without even a refusal in the log. The mode therefore ships Fossify Launcher, starts it with `START_APP` and `vd_system_decorations=false`, and installs it during first-time setup over USB. Installing goes through `push_file` + `install_pushed_app`, deliberately **not** `install_app` with its `-g`.
+  - **The device must not fall asleep.** Turning the panel off with `SET_DISPLAY_POWER` does not stop Android's idle timer, so the phone dozed after a minute and took the virtual display with it; `keep_active` alone only wakes it every 4s and cannot hold it. `screen_off_timeout` is what actually fixes it, and the server restores the old value itself. The brightness dance has to run *before* the stream here, because writing a brightness relights the panel that `SET_DISPLAY_POWER` had just darkened.
+  - **`pm clear` on the companion app runs after a fresh install too.** Android's automatic backup restores the app's data, pairing included, so a reinstalled app can come back with a stale `clientId` and answer every `/connect` with 403.
+
 - **scrcpy socket order is fixed**: video → audio → control, opened in exactly that order in `connect_sockets()` and matching the server side. Audio is only opened when enabled. Getting this order wrong makes every stream read the wrong socket.
 - **Audio uses raw PCM, deliberately**: `audio_codec=raw` (48 kHz, stereo, s16) means no decoder, no codec-config/extradata handling and no extra FFmpeg dependency on the client; `AudioPlayer` just queues the bytes into SDL2. It costs ~1.5 Mbit/s next to ~20 Mbit/s of video. Do not "optimise" this to Opus without a reason — the config-packet handling is exactly the part that breaks silently.
 - **Audio must never take video down**: every failure (device cannot capture, codec id 0/-1, no PC sound device, unexpected codec) logs to `stream.log` and continues video-only. `Settings::m_audio_enabled` turning audio off reproduces the previous server command line exactly, which makes it a usable escape hatch.
@@ -206,7 +213,7 @@ The UI is German — every text field must render `ä ö ü Ä Ö Ü ß` correct
 
 - Never use browser tech (no Electron/WebView/CEF) for the desktop client.
 - Always preserve aspect ratio when rendering the mirrored screen.
-- Use the scrcpy protocol as-is for streaming — do not invent a replacement, and do not modify the vendored `scrcpy-server.jar`.
+- Use the scrcpy protocol as-is for streaming — do not invent a replacement, and do not modify the vendored `scrcpy-server.jar`. The bundled server is **4.1**; `SERVER_VERSION` in `scrcpy_client.cpp` must match the jar exactly or the server refuses to start, and both wire formats moved on the way there (see `VIRTUAL-DISPLAY.md`).
 - Don't introduce new frameworks, languages, or build systems into either component.
 - No third-party network requests beyond what's needed for ADB/scrcpy/device discovery.
 - Keep Android-side battery usage minimal (this is why ADB-over-WiFi and discovery use a lightweight foreground service and a tiny hand-rolled HTTP server rather than heavier alternatives). Concretely: don't add polling loops that spawn an `adb` process per tick, and keep network-callback handling debounced and WLAN-scoped.
