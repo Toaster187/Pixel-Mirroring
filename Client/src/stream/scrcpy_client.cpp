@@ -1,4 +1,5 @@
 #include "scrcpy_client.h"
+#include "control_messages.h"
 #include "../adb/adb_client.h"
 #include "../util/encoding.h"
 #include <algorithm>
@@ -31,6 +32,11 @@ extern "C" {
 #endif
 
 namespace pm::stream {
+
+// Message types, packet flags and the byte layouts that go with them live in the nested
+// namespace pm::stream::wire (control_messages.h). They are pinned by
+// pm_control_messages_test, which is the only thing standing between a wrong offset and
+// a silently dead control thread.
 
 namespace {
 void log_stream_event(const std::string& message) {
@@ -67,21 +73,6 @@ constexpr int AUDIO_CHANNELS = 2;
 // and refuses to start on any mismatch, so it may only ever be changed together with
 // Client/scrcpy-server.jar — and with every wire format that moved in between.
 constexpr const char* SERVER_VERSION = "4.1";
-
-// Control message types of the scrcpy protocol we speak beyond the old handful.
-constexpr uint8_t MSG_UHID_CREATE = 12;
-constexpr uint8_t MSG_UHID_INPUT = 13;
-constexpr uint8_t MSG_UHID_DESTROY = 14;
-constexpr uint8_t MSG_OPEN_HARD_KEYBOARD_SETTINGS = 15;
-constexpr uint8_t MSG_START_APP = 16;
-
-// Since server 3.0 the device multiplies every scroll value by 16 before using it (the
-// old decoder read the range as [-1,1] when it really was [-16,16]). Sending a sixteenth
-// keeps one wheel notch worth one wheel notch.
-constexpr float SCROLL_FIXED_POINT_SCALE = 8192.0f / 16.0f;
-
-// The name is length-prefixed with a single byte, so it cannot be longer than this.
-constexpr size_t UHID_MAX_NAME_LENGTH = 127;
 
 // Probes whether the device will let anything open /dev/uhid. It opens the node
 // EXACTLY the way the server does: read AND write in one descriptor (3<>). The server
@@ -444,8 +435,8 @@ bool ScrcpyClient::start_server_process() {
 
     if (config_.new_display) {
         // An empty value means "same size and same density as the phone's own display",
-        // which is the only shape whose picture the rest of this cave already knows how
-        // to hold. Numbers are only carved in when somebody really asked for them.
+        // which is the only shape the rest of the client already knows how to handle.
+        // Numbers are only appended when somebody really asked for them.
         std::string display_arg;
         if (config_.new_display_width > 0 && config_.new_display_height > 0) {
             display_arg = std::to_string(config_.new_display_width) + "x" +
@@ -684,7 +675,7 @@ bool ScrcpyClient::read_metadata() {
     {
         std::ostringstream oss;
         oss << "[Scrcpy] Metadata codec=" << video_codec_id_
-            << " size=" << initial_width_ << "x" << initial_height_
+            << " size=" << initial_width_.load() << "x" << initial_height_.load()
             << " max_size=" << config_.max_size
             << " bit_rate=" << config_.video_bit_rate
             << " max_fps=" << config_.max_fps;
@@ -792,23 +783,18 @@ void ScrcpyClient::video_thread_loop() {
         uint64_t pts = 0;
         for (int i = 0; i < 8; ++i) pts = (pts << 8) | header[i];
 
-        // Server 4.0 shifted both old flags down one bit and took the top one for
-        // itself. Reading the old positions makes every frame look like a config packet.
-        constexpr uint64_t SC_PACKET_FLAG_SESSION = 1ULL << 63;
-        constexpr uint64_t SC_PACKET_FLAG_CONFIG = 1ULL << 62;
-
-        if ((pts & SC_PACKET_FLAG_SESSION) != 0) {
-            // A session packet IS the whole message — no picture follows it. The twelve
-            // stones are flags, width, height. It arrives once before the first picture
+        if ((pts & wire::PACKET_FLAG_SESSION) != 0) {
+            // A session packet IS the whole message — no picture follows it. Its twelve
+            // bytes are flags, width, height. It arrives once before the first picture
             // and again whenever the display turns or is resized under us.
             const uint32_t new_width = (header[4] << 24) | (header[5] << 16)
                                      | (header[6] << 8) | header[7];
             const uint32_t new_height = (header[8] << 24) | (header[9] << 16)
                                       | (header[10] << 8) | header[11];
             if (new_width > 0 && new_height > 0 &&
-                (new_width != initial_width_ || new_height != initial_height_)) {
-                initial_width_ = new_width;
-                initial_height_ = new_height;
+                (new_width != initial_width_.load() || new_height != initial_height_.load())) {
+                initial_width_.store(new_width);
+                initial_height_.store(new_height);
                 std::ostringstream oss;
                 oss << "[Scrcpy] Display resized to " << new_width << "x" << new_height;
                 log_stream_event(oss.str());
@@ -829,7 +815,7 @@ void ScrcpyClient::video_thread_loop() {
             break;
         }
 
-        bool is_config = (pts & SC_PACKET_FLAG_CONFIG) != 0;
+        bool is_config = (pts & wire::PACKET_FLAG_CONFIG) != 0;
 
         packet_data.resize(size);
         if (!recv_all((char*)packet_data.data(), size)) break;
@@ -1011,13 +997,9 @@ void ScrcpyClient::inject_scroll(float x, float y, int w, int h, float hscroll, 
     write16(buf + 9, static_cast<uint16_t>(w));
     write16(buf + 11, static_cast<uint16_t>(h));
 
-    // fixed-point, clamped to int16 range (see SCROLL_FIXED_POINT_SCALE)
-    const float hs_scaled =
-        (std::max)(-32768.0f, (std::min)(hscroll * SCROLL_FIXED_POINT_SCALE, 32767.0f));
-    const float vs_scaled =
-        (std::max)(-32768.0f, (std::min)(vscroll * SCROLL_FIXED_POINT_SCALE, 32767.0f));
-    write16(buf + 13, static_cast<uint16_t>(static_cast<int16_t>(hs_scaled)));
-    write16(buf + 15, static_cast<uint16_t>(static_cast<int16_t>(vs_scaled)));
+    // fixed-point, clamped to int16 range (see wire::SCROLL_FIXED_POINT_SCALE)
+    write16(buf + 13, static_cast<uint16_t>(wire::scroll_to_fixed_point(hscroll)));
+    write16(buf + 15, static_cast<uint16_t>(wire::scroll_to_fixed_point(vscroll)));
 
     // buttons = 0 (4 bytes)
     write32(buf + 17, 0);
@@ -1067,14 +1049,10 @@ void ScrcpyClient::inject_collapse_panels() {
 }
 
 void ScrcpyClient::inject_screen_power_mode(bool on) {
-    uint8_t buf[2];
-    buf[0] = 10;             // SC_CONTROL_MSG_TYPE_SET_DISPLAY_POWER
-    // Since server 3.0 this is a plain boolean, not the old power mode number. The old
-    // 2 would still read as "true" over there, but only by accident.
-    buf[1] = on ? 1 : 0;
+    const std::vector<uint8_t> buf = wire::build_set_display_power(on);
     // Only record the panel as forced off once the message really went out — a message
     // that never arrived changed nothing on the device.
-    if (send_control(buf, sizeof(buf))) {
+    if (send_control(buf.data(), buf.size())) {
         screen_forced_off_.store(!on);
         log_stream_event(on ? "[Scrcpy] Device screen power back to normal"
                             : "[Scrcpy] Device screen power turned off");
@@ -1126,35 +1104,10 @@ bool ScrcpyClient::device_supports_uhid() {
 
 bool ScrcpyClient::uhid_create(uint16_t id, const std::string& name,
                                const uint8_t* report_desc, size_t desc_size) {
-    if (!report_desc || desc_size == 0 || desc_size > 0xFFFF) {
+    const std::vector<uint8_t> buf = wire::build_uhid_create(id, name, report_desc, desc_size);
+    if (buf.empty()) {
         return false;
     }
-
-    // The name is length-prefixed with a single byte. A longer one would have to be
-    // truncated, and cutting UTF-8 mid-sequence corrupts umlauts — so send no name at
-    // all instead and let the device fall back to plain "scrcpy".
-    const size_t name_length = name.size() <= UHID_MAX_NAME_LENGTH ? name.size() : 0;
-
-    // Server 3.x and later want two more fields between the id and the name:
-    //   type(1) id(2) vendor(2) product(2) name_len(1) name rd_size(2) rd_data
-    // The 2.7 shape had no vendor/product at all. Send them wrong and the phone reads
-    // the name length out of the middle of the report description — and the control
-    // thread it tears down takes mouse, touch and clipboard with it. scrcpy itself
-    // sends zeroes for keyboards and mice; only gamepads carry real ids.
-    constexpr uint16_t UHID_VENDOR_ID = 0;
-    constexpr uint16_t UHID_PRODUCT_ID = 0;
-
-    std::vector<uint8_t> buf(8 + name_length + 2 + desc_size);
-    buf[0] = MSG_UHID_CREATE;
-    write16(buf.data() + 1, id);
-    write16(buf.data() + 3, UHID_VENDOR_ID);
-    write16(buf.data() + 5, UHID_PRODUCT_ID);
-    buf[7] = static_cast<uint8_t>(name_length);
-    if (name_length > 0) {
-        std::memcpy(buf.data() + 8, name.data(), name_length);
-    }
-    write16(buf.data() + 8 + name_length, static_cast<uint16_t>(desc_size));
-    std::memcpy(buf.data() + 10 + name_length, report_desc, desc_size);
 
     if (!send_control(buf.data(), buf.size())) {
         log_stream_event("[Scrcpy] Could not send UHID_CREATE, keyboard stays virtual-less");
@@ -1175,7 +1128,7 @@ void ScrcpyClient::uhid_input(uint16_t id, const uint8_t* data, size_t size) {
 
     // Every key press and release goes through here, so this path must not allocate.
     uint8_t buf[5 + UHID_MAX_REPORT_SIZE];
-    buf[0] = MSG_UHID_INPUT;
+    buf[0] = wire::MSG_UHID_INPUT;
     write16(buf + 1, id);
     write16(buf + 3, static_cast<uint16_t>(size));
     std::memcpy(buf + 5, data, size);
@@ -1185,7 +1138,7 @@ void ScrcpyClient::uhid_input(uint16_t id, const uint8_t* data, size_t size) {
 
 void ScrcpyClient::uhid_destroy(uint16_t id) {
     uint8_t buf[3];
-    buf[0] = MSG_UHID_DESTROY;
+    buf[0] = wire::MSG_UHID_DESTROY;
     write16(buf + 1, id);
 
     send_control(buf, sizeof(buf));
@@ -1193,21 +1146,16 @@ void ScrcpyClient::uhid_destroy(uint16_t id) {
 
 void ScrcpyClient::open_hard_keyboard_settings() {
     uint8_t buf[1];
-    buf[0] = MSG_OPEN_HARD_KEYBOARD_SETTINGS;
+    buf[0] = wire::MSG_OPEN_HARD_KEYBOARD_SETTINGS;
 
     send_control(buf, sizeof(buf));
 }
 
 void ScrcpyClient::start_app(const std::string& package_name) {
-    // Same one length stone as the UHID name, so the same cut-off rule applies.
-    if (package_name.empty() || package_name.size() > UHID_MAX_NAME_LENGTH) {
+    const std::vector<uint8_t> buf = wire::build_start_app(package_name);
+    if (buf.empty()) {
         return;
     }
-
-    std::vector<uint8_t> buf(2 + package_name.size());
-    buf[0] = MSG_START_APP;
-    buf[1] = static_cast<uint8_t>(package_name.size());
-    std::memcpy(buf.data() + 2, package_name.data(), package_name.size());
 
     if (send_control(buf.data(), buf.size())) {
         log_stream_event("[Scrcpy] Asked phone to start app " + package_name);

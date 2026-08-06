@@ -381,6 +381,19 @@ Ganze, alle drei teuer gelernt — die vollständige Aufzeichnung samt Messwerte
   Fossify Launcher mit, startet ihn per `START_APP` mit `vd_system_decorations=false`
   und installiert ihn bei der Ersteinrichtung über USB. Die Installation läuft über
   `push_file` + `install_pushed_app`, bewusst **nicht** über `install_app` mit `-g`.
+  Fehlt der Launcher ganz, fällt `start_stream` auf die gewöhnliche Spiegelung zurück
+  und sagt das auch — ein Display, das zeichnet, aber nichts starten kann, ist schlimmer.
+  Das ausgewählte Paket steht nur in der Sitzungs-`Config` und wird **nie** nach
+  `settings.txt` zurückgeschrieben; `main.cpp` hält eine langlebige `Settings`-Kopie und
+  schreibt bei jedem Menüklick die ganze Datei, ein dort abgelegter Wert überlebte also
+  nur bis zum nächsten Schalter. Maßgeblich ist `ScrcpyClient::new_display_app()`.
+- **Fossify steht unter GPL-3.0-only.** `Client/vendor/licenses/` enthält Lizenztext und
+  Quellenangebot (mit dem genauen Upstream-Commit); `CMakeLists.txt` legt beides neben
+  die EXE und ins Installationspaket. Sie müssen überall mitreisen, wo die APK mitreist.
+  Die APK selbst wird beim Bauen geladen und **von Hand** gegen ihre Prüfsumme geprüft —
+  nicht über `file(DOWNLOAD ... EXPECTED_HASH)`, das bei Abweichung den ganzen
+  Configure-Lauf abbricht und die schlechte Datei liegen lässt, wo der nächste Lauf sie
+  ungeprüft ausliefert.
 - **Das Gerät darf nicht einschlafen.** Das Abschalten des Panels über
   `SET_DISPLAY_POWER` hält Androids Untätigkeitsuhr nicht an, das Handy schlief nach
   einer Minute ein und nahm das virtuelle Display mit; `keep_active` weckt es nur alle
@@ -447,16 +460,30 @@ Windows-Client mit MSVC (gleicher Compiler, gleiches `/utf-8` wie die Auslieferu
 und lässt `ctest` laufen - ohne Packaging. `release.yml` baut zusätzlich die
 Installer und nur auf `v*`-Tags.
 
-### Der einzige automatische Test auf der Client-Seite
+### Die automatischen Tests auf der Client-Seite
 
-`Client/tests/hid_keyboard_test.cpp` - ein eigenständiges `main()` mit
-handgeschriebenem `check()` (bewusst **kein** `assert`: die Auslieferung ist ein
-Release-Build mit `NDEBUG`, dort wäre jede Zusicherung wegoptimiert). Er nagelt die
-Scancode-Tabelle, die AltGr-Phantom-Strg-Maske, Extended-vs-Numpad-Paare und den
-6-Tasten-Rollover fest. Ziel `pm_hid_keyboard_test` (Option `PM_BUILD_TESTS`,
-standardmäßig an), hängt nur an `hid_keyboard.cpp` und wird weder installiert noch
-paketiert. Kein Test-Framework hinzufügen - für weitere Absicherungen dasselbe
-Muster benutzen.
+Beide sind eigenständige `main()` mit handgeschriebenem `check()` (bewusst **kein**
+`assert`: die Auslieferung ist ein Release-Build mit `NDEBUG`, dort wäre jede
+Zusicherung wegoptimiert). Kein Test-Framework hinzufügen - für weitere Absicherungen
+dasselbe Muster benutzen.
+
+`Client/tests/hid_keyboard_test.cpp` nagelt die Scancode-Tabelle, die
+AltGr-Phantom-Strg-Maske, Extended-vs-Numpad-Paare und den 6-Tasten-Rollover fest. Ziel
+`pm_hid_keyboard_test` (Option `PM_BUILD_TESTS`, standardmäßig an), hängt nur an
+`hid_keyboard.cpp`.
+
+`Client/tests/control_messages_test.cpp` nagelt die scrcpy-Wire-Layouts aus
+`src/stream/control_messages.h` gegen den gebündelten Server 4.1 fest: `UHID_CREATE`
+samt des Vendor-/Product-Blocks, den 2.7 nicht hatte, `START_APP`, die Boolean-Nutzlast
+von `SET_DISPLAY_POWER`, die Flag-Bits für Session/Config/Key-Frame, das Auslesen der
+Bildgröße aus dem Session-Paket und die ÷16-Scroll-Skalierung. Das ist der eine Teil des
+Protokolls, dessen Fehler **still** sind - ein falscher `UHID_CREATE`-Offset reißt den
+kompletten Control-Thread des Servers ab, während das Bild weiterläuft. Genau deshalb
+liegt das Byte-Bauen in einem Header ohne Socket- und FFmpeg-Abhängigkeit, der Test
+linkt gar nichts, und `ScrcpyClient` ruft dieselben Funktionen auf - die festgenagelten
+Bytes sind also die ausgelieferten Bytes. Ziel `pm_control_messages_test`.
+
+Beide werden weder installiert noch paketiert, und CI lässt sie laufen.
 
 ### Was sich nicht automatisiert testen lässt
 

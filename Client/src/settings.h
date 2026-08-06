@@ -43,15 +43,22 @@ struct Settings {
     bool m_auto_pause_minimized = true;
     // EXPERIMENT. Instead of taking the phone's picture away from it, the phone builds
     // a second display that only this PC can see. Phone stays locked and usable by a
-    // human at the same time. Needs server 3.x and Android 14+ to be worth anything.
-    // ON by default, even though it is a beta road: it is what this build exists for.
-    // The menu switch turns it off again and falls back to plain mirroring.
+    // human at the same time. Needs the bundled server 4.1 and Android 14+ to be worth
+    // anything. ON by default, even though it is a beta road: it is what this build
+    // exists for. The menu switch turns it off again and falls back to plain mirroring.
+    //
+    // Note that this alone does NOT darken the phone's panel — that is m_screen_off,
+    // which is independent and off by default.
     bool m_virtual_display = true;
-    // EXPERIMENT, only meaningful together with the switch above. Empty means "let the
-    // phone hang its own launcher into the new display". A package name instead means
-    // "no launcher, start THIS on it" — the way out when the phone's launcher for
-    // second displays is useless, which is exactly what a Pixel 9 on Android 17 does.
-    // No menu entry: this is set by hand in settings.txt while the experiment runs.
+    // EXPERIMENT, only meaningful together with the switch above. Empty is the normal
+    // case: the client then installs and uses Fossify Launcher, because the phone's own
+    // launcher for second displays is useless (a Pixel 9 on Android 17 renders it but
+    // starts nothing from it). A package name overrides that and puts THAT app on the
+    // display instead.
+    //
+    // Hand-edited in settings.txt only. The client never writes the launcher it picked
+    // back here — it resolves that per session and keeps it in the stream config, so
+    // whatever stands here is the human's word and stays the human's word.
     std::string m_virtual_display_app = "";
 };
 

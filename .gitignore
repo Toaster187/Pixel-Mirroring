@@ -68,4 +68,7 @@ $RECYCLE.BIN/
 
 # EXPERIMENT: Startbildschirm fuer das virtuelle Display. Wird beim Bauen von
 # F-Droid geladen (siehe Client/CMakeLists.txt), muss also nicht ins Repo.
+# Der Lizenztext daneben (Client/vendor/licenses/) gehoert dagegen eingecheckt:
+# die GPL-3.0 verlangt ihn bei jeder Auslieferung der APK.
 Client/vendor/FossifyLauncher.apk
+Client/vendor/FossifyLauncher.apk.download

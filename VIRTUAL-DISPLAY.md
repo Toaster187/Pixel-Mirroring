@@ -15,12 +15,29 @@ startet den Stream neu, weil der Server seine Optionen nur beim Start liest.
 | Einstellung | Schlüssel in `settings.txt` | Standard |
 |---|---|---|
 | Modus an/aus | `virtual_display` | `1` |
-| App auf dem Display | `virtual_display_app` | wird auf `org.fossify.home` gesetzt |
+| App auf dem Display | `virtual_display_app` | leer → Fossify Launcher |
 
 Beide Angaben gehen als Serveroptionen raus: `new_display=` (leer = Größe und
 Punktdichte des Handy-Displays), `display_ime_policy=local`, `keep_active=true`,
 `screen_off_timeout=3600000` und — sobald eine App benannt ist —
 `vd_system_decorations=false` plus Steuernachricht 16 (`START_APP`).
+
+`virtual_display_app` ist reine Handarbeit: der Client **schreibt nie** hinein. Bleibt es
+leer, sucht er sich pro Sitzung den Fossify Launcher, installiert ihn notfalls und merkt
+sich das nur in der Sitzungs-`Config` (`ScrcpyClient::new_display_app()`). Ein
+zurückgeschriebener Wert würde ohnehin nur bis zum nächsten Menüklick überleben, weil
+`main.cpp` eine langlebige `Settings`-Kopie hält und die ganze Datei neu schreibt.
+
+**Der Modus allein macht das Handy nicht dunkel.** Das Abschalten des Panels hängt am
+unabhängigen Schalter `screen_off` (Standard `0`, Menüpunkt „Handy-Display komplett
+aus"). Ohne ihn bekommt der PC sein eigenes Display, während das Handy weiter leuchtet.
+Das Menü weist darauf hin, solange nur der eine der beiden Schalter an ist.
+
+**Ohne Launcher keine Sitzung in diesem Modus:** lässt sich Fossify nicht installieren
+und ist auch von Hand keine App benannt, fällt `start_stream` auf die gewöhnliche
+Spiegelung zurück und schreibt das in die Statuszeile. Die Alternative wäre, die
+Systemdekorationen anzulassen und dem Zweitdisplay-Launcher des Handys das Display zu
+überlassen — also genau das Bild, das zeichnet, aber nichts starten kann.
 
 ## Voraussetzung: Server-JAR 4.1
 
@@ -66,9 +83,29 @@ Beim allerersten Start fragt Fossify, ob es Standard-Launcher des ganzen Handys 
 soll. Der Client schickt direkt nach einer frischen Installation einmal `BACK`, was dem
 „Abbrechen" entspricht — nur dann, nicht in jeder Sitzung.
 
-**Vor einem Release zu klären:** Fossify steht unter GPL-3.0, das Mitliefern bringt die
-Pflichten dieser Lizenz mit. Und die APK vergrößert das Installationspaket um gut 5 MB,
-was dem Grundsatz „die Größe der Auslieferung ist ein Feature" zuwiderläuft.
+### Lizenz
+
+Fossify Launcher steht unter **GPL-3.0-only**. Mitgeliefert wird eine unveränderte APK,
+also gelten die Pflichten aus Abschnitt 4 und 6 der Lizenz. Erfüllt sind sie so:
+
+* `Client/vendor/licenses/GPL-3.0.txt` — der vollständige Lizenztext.
+* `Client/vendor/licenses/FossifyLauncher.md` — Version, Prüfsumme und das
+  Quellenangebot nach Abschnitt 6d, samt des genauen Upstream-Commits, aus dem F-Droid
+  diese Binärdatei gebaut hat.
+* `CMakeLists.txt` legt beide Dateien neben die EXE **und** ins Installationspaket. Sie
+  müssen überall mitreisen, wo die APK mitreist — auch in einem selbst gebauten ZIP.
+
+Die APK ist ein eigenständiges Programm auf einem anderen Gerät, nicht gelinkt und nicht
+mit dem Client zu einem Werk verbunden: eine bloße Zusammenstellung nach Abschnitt 5. Die
+Lizenz von Pixel Mirroring bleibt davon unberührt.
+
+Die Prüfsumme wird in CMake **von Hand** verglichen, nicht über
+`file(DOWNLOAD ... EXPECTED_HASH)`. Das bricht bei Abweichung den ganzen Configure-Lauf
+ab, erreicht den `STATUS`-Zweig nie und lässt die schlechte Datei liegen — der nächste
+Lauf findet sie über `EXISTS`, überspringt jede Prüfung und liefert sie ungeprüft aus.
+
+**Offen:** die APK vergrößert das Installationspaket um gut 5 MB, was dem Grundsatz „die
+Größe der Auslieferung ist ein Feature" zuwiderläuft.
 
 ## Schlaf, Sperre, Panel
 

@@ -1723,6 +1723,13 @@ void Win32Window::build_settings_menu_items() {
         // The whole point in one row, because the switch looks harmless and changes
         // everything: the phone is no longer being watched, it keeps living its own life.
         g_menu_items.push_back({0, L"Handy bleibt gesperrt und parallel benutzbar", false, false, false, true});
+        // The mode reads as "and the phone goes dark", but darkening the panel is the
+        // separate switch above, which is off by default. Naming it here is cheaper
+        // than letting the phone on the table contradict the promise on the desk.
+        if (!screen_off_) {
+            g_menu_items.push_back({0, L"Für ein dunkles Panel zusätzlich „Handy-Display komplett aus“",
+                                    false, false, false, true});
+        }
     }
     g_menu_items.push_back({ID_TOGGLE_UHID_KEYBOARD, L"Echte USB-Tastatur am Handy", true, uhid_keyboard_, false});
     if (uhid_keyboard_) {

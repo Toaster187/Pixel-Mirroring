@@ -35,9 +35,9 @@ public:
         bool tunnel_forward = false;
         bool lowest_brightness = true;
 
-        // EXPERIMENT (needs server 3.x): the phone does not hand over ITS picture but
-        // grows a SECOND display that exists only for this PC. The phone's own panel
-        // stays dark and locked and a second human can keep using it meanwhile.
+        // EXPERIMENT (needs the bundled server 4.1): the phone does not hand over ITS
+        // picture but grows a SECOND display that exists only for this PC. The phone's
+        // own panel stays locked and a second human can keep using it meanwhile.
         bool new_display = false;
         int new_display_width = 0;   // 0 x 0 = same shape as the phone's own display
         int new_display_height = 0;
@@ -46,7 +46,6 @@ public:
         // switches the launcher (and the whole system furniture) off and puts that one
         // app on it instead — see Settings::m_virtual_display_app.
         std::string new_display_app;
-
 
         // How long the PHONE may stay untouched before it falls asleep, in ms. 0 = do
         // not touch the setting.
@@ -80,6 +79,12 @@ public:
     // phone's. Everything that pokes the phone's OWN panel — brightness, unlocking,
     // the screen watchdog — has to keep its hands still while this is true.
     bool uses_new_display() const { return config_.new_display; }
+
+    // The package this session put on its own display, empty if none. This is the
+    // authority on the question, not the settings file: the launcher is resolved once
+    // per session (it may be installed on the fly) and only the session knows what it
+    // actually aimed at.
+    const std::string& new_display_app() const { return config_.new_display_app; }
 
     // Callbacks
     using FrameCallback = std::function<void(AVFrame* frame)>;
@@ -119,7 +124,7 @@ public:
     // while the picture comes from a display of our own.
     void inject_screen_power_mode(bool on);
 
-    // Type 16, server 3.x and later: starts an app on the display. Needed when the
+    // Type 16, server 3.0 and later: starts an app on the display. Needed when the
     // phone puts no usable launcher on a secondary display — without it the new
     // display stays black and nothing can ever be started on it.
     void start_app(const std::string& package_name);
@@ -206,8 +211,12 @@ private:
     // Device Info
     std::string device_name_;
     uint32_t video_codec_id_{0};
-    uint32_t initial_width_{0};
-    uint32_t initial_height_{0};
+    // Atomic because server 4.x rewrites these mid-stream: the video thread stores a
+    // new size on every session packet (rotation, resize) while the connection and UI
+    // threads read them through video_width()/video_height(). Before 4.x they were
+    // written once, before any thread existed.
+    std::atomic<uint32_t> initial_width_{0};
+    std::atomic<uint32_t> initial_height_{0};
     
     int local_port_{27183};
     

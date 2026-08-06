@@ -75,6 +75,14 @@ if(PM_BUILD_TESTS)
     endif()
 
     add_test(NAME hid_keyboard COMMAND pm_hid_keyboard_test)
+
+    # Header-only, so this links nothing at all — no sockets, no FFmpeg.
+    add_executable(pm_control_messages_test tests/control_messages_test.cpp)
+    if(MSVC)
+        target_compile_options(pm_control_messages_test PRIVATE /EHsc /utf-8)
+    endif()
+
+    add_test(NAME control_messages COMMAND pm_control_messages_test)
 endif()
 
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/copy_apk.cmake" "
@@ -142,34 +150,79 @@ endif()
 # Fetched at BUILD time, exactly like ADB above, so the repository stays free of a 5 MB
 # binary. Two things to know before this leaves the experiment:
 #   - it adds ~5 MB to an installer whose small size is a deliberate feature, and
-#   - Fossify Launcher is GPL-3.0; shipping it inside the installer brings that
-#     licence's obligations along.
+#   - Fossify Launcher is GPL-3.0-only. vendor/licenses/ carries the licence text and
+#     the source offer; both are installed next to the APK, which is what the licence
+#     asks for — see vendor/licenses/FossifyLauncher.md.
 set(PM_FOSSIFY_APK "${CMAKE_SOURCE_DIR}/vendor/FossifyLauncher.apk")
 set(PM_FOSSIFY_URL "https://f-droid.org/repo/org.fossify.home_16.apk")
 set(PM_FOSSIFY_SHA256 "a603d3d510482feafd73d52a93a1ea9baefd2ca0aae329a14cbf0e21f43638e3")
 
-if(NOT EXISTS "${PM_FOSSIFY_APK}")
-    message(STATUS "Ugg! Fossify Launcher not found. Downloading from F-Droid...")
-    file(DOWNLOAD "${PM_FOSSIFY_URL}" "${PM_FOSSIFY_APK}"
+# The hash is checked HERE rather than through file(DOWNLOAD ... EXPECTED_HASH), which
+# aborts the whole configure step on a mismatch — the STATUS branch below never runs and
+# the bad file stays on disk, where the next configure finds it via EXISTS and ships it
+# unverified. Downloading to a scratch name and comparing by hand keeps the failure as
+# non-fatal as the comment always claimed, and never leaves an unchecked APK behind.
+function(pm_fossify_hash_ok path out_var)
+    set(${out_var} FALSE PARENT_SCOPE)
+    if(EXISTS "${path}")
+        file(SHA256 "${path}" PM_FOSSIFY_ACTUAL)
+        if(PM_FOSSIFY_ACTUAL STREQUAL PM_FOSSIFY_SHA256)
+            set(${out_var} TRUE PARENT_SCOPE)
+        endif()
+    endif()
+endfunction()
+
+# A file already lying there is re-verified, not trusted for being present.
+pm_fossify_hash_ok("${PM_FOSSIFY_APK}" PM_FOSSIFY_OK)
+if(EXISTS "${PM_FOSSIFY_APK}" AND NOT PM_FOSSIFY_OK)
+    message(WARNING "Fossify Launcher has an unexpected checksum, discarding it")
+    file(REMOVE "${PM_FOSSIFY_APK}")
+endif()
+
+if(NOT PM_FOSSIFY_OK)
+    message(STATUS "Fossify Launcher not found, downloading from F-Droid...")
+    set(PM_FOSSIFY_TMP "${PM_FOSSIFY_APK}.download")
+    file(DOWNLOAD "${PM_FOSSIFY_URL}" "${PM_FOSSIFY_TMP}"
          SHOW_PROGRESS
-         EXPECTED_HASH SHA256=${PM_FOSSIFY_SHA256}
          STATUS PM_FOSSIFY_STATUS)
     list(GET PM_FOSSIFY_STATUS 0 PM_FOSSIFY_ERR)
+    pm_fossify_hash_ok("${PM_FOSSIFY_TMP}" PM_FOSSIFY_TMP_OK)
+
+    # Not fatal in either direction: everything except the virtual-display experiment
+    # works without it, and the client falls back to plain mirroring when the APK is
+    # missing (see start_stream in main.cpp).
     if(NOT PM_FOSSIFY_ERR EQUAL 0)
         list(GET PM_FOSSIFY_STATUS 1 PM_FOSSIFY_MSG)
-        # Not fatal: everything except the virtual-display experiment works without it.
-        file(REMOVE "${PM_FOSSIFY_APK}")
-        message(WARNING "Ugg! Could not download Fossify Launcher: ${PM_FOSSIFY_MSG}")
+        file(REMOVE "${PM_FOSSIFY_TMP}")
+        message(WARNING "Could not download Fossify Launcher: ${PM_FOSSIFY_MSG}")
+    elseif(NOT PM_FOSSIFY_TMP_OK)
+        file(SHA256 "${PM_FOSSIFY_TMP}" PM_FOSSIFY_ACTUAL)
+        file(REMOVE "${PM_FOSSIFY_TMP}")
+        message(WARNING "Fossify Launcher checksum mismatch — expected "
+                        "${PM_FOSSIFY_SHA256}, got ${PM_FOSSIFY_ACTUAL}. Not shipping it.")
+    else()
+        file(RENAME "${PM_FOSSIFY_TMP}" "${PM_FOSSIFY_APK}")
+        set(PM_FOSSIFY_OK TRUE)
     endif()
 endif()
 
-if(EXISTS "${PM_FOSSIFY_APK}")
+if(PM_FOSSIFY_OK)
     add_custom_command(TARGET PixelMirroring POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${PM_FOSSIFY_APK}"
             "$<TARGET_FILE_DIR:PixelMirroring>/FossifyLauncher.apk"
         COMMENT "Copy Fossify Launcher next to desktop client"
     )
+    # GPL-3.0 obliges us to hand the licence text along with the binary, so it travels
+    # with the EXE and not only inside the installer.
+    foreach(PM_FOSSIFY_LICENCE_FILE IN ITEMS GPL-3.0.txt FossifyLauncher.md)
+        add_custom_command(TARGET PixelMirroring POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_SOURCE_DIR}/vendor/licenses/${PM_FOSSIFY_LICENCE_FILE}"
+                "$<TARGET_FILE_DIR:PixelMirroring>/licenses/${PM_FOSSIFY_LICENCE_FILE}"
+            COMMENT "Copy ${PM_FOSSIFY_LICENCE_FILE} next to desktop client"
+        )
+    endforeach()
 endif()
 
 if(WIN32)
@@ -324,9 +377,16 @@ install(FILES "$<TARGET_FILE_DIR:PixelMirroring>/scrcpy-server.jar"
     OPTIONAL
 )
 
-# The home screen for the virtual-display experiment (see above).
+# The home screen for the virtual-display experiment (see above), plus the licence
+# text and written offer GPL-3.0 requires us to distribute with it.
 install(FILES "$<TARGET_FILE_DIR:PixelMirroring>/FossifyLauncher.apk"
     DESTINATION .
+    OPTIONAL
+)
+install(FILES
+        "${CMAKE_SOURCE_DIR}/vendor/licenses/GPL-3.0.txt"
+        "${CMAKE_SOURCE_DIR}/vendor/licenses/FossifyLauncher.md"
+    DESTINATION licenses
     OPTIONAL
 )
 

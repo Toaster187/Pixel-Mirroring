@@ -12,7 +12,6 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <set>
 #include <sstream>
 #include <utility>
 #include <vector>
@@ -986,8 +985,14 @@ bool start_stream(
     // one the phone brings does not work (VIRTUAL-DISPLAY.md). So the mode brings its
     // own: put it on the phone if it is missing, and aim at it unless the human has
     // named a different app by hand.
+    //
+    // The resolved package lives in the CONFIG and nowhere else. Writing it back into
+    // settings.txt looks tempting but is a trap: main.cpp holds a long-lived Settings
+    // copy and saves the whole file on every menu click, so the value would survive
+    // exactly until the next toggle. It is re-derived every session anyway, and
+    // ScrcpyClient::new_display_app() is what everyone else asks.
     bool fossify_freshly_installed = false;
-    if (settings.m_virtual_display) {
+    if (config.new_display && config.new_display_app.empty()) {
         pm::adb::AdbClient launcher_adb;
         const bool had_it = launcher_adb.is_app_installed(device_id, FOSSIFY_PACKAGE);
         if (!had_it) {
@@ -997,12 +1002,19 @@ bool start_stream(
         }
         if (ensure_fossify_installed(launcher_adb, device_id)) {
             fossify_freshly_installed = !had_it;
-            if (config.new_display_app.empty()) {
-                config.new_display_app = FOSSIFY_PACKAGE;
-                pm::Settings stored = pm::load_settings();
-                stored.m_virtual_display_app = FOSSIFY_PACKAGE;
-                pm::save_settings(stored);
-            }
+            config.new_display_app = FOSSIFY_PACKAGE;
+        } else {
+            // No launcher, no usable display. Without an app to name we would have to
+            // leave the system decorations on and hand the display to the phone's own
+            // secondary launcher — which renders but cannot start anything, so the user
+            // would be looking at a picture that does nothing and says nothing about
+            // why. Plain mirroring is worse than the experiment but better than that.
+            config.new_display = false;
+            config.new_display_app.clear();
+            window.post_task([&window]() {
+                window.set_status_text(
+                    "Startbildschirm fehlt — Spiegelung statt eigenem PC-Bildschirm.");
+            });
         }
     }
 
@@ -1019,7 +1031,6 @@ bool start_stream(
     if (own_display) {
         config.screen_off_timeout_ms = 60 * 60 * 1000;
     }
-
 
     // Also runs with a display of our own, and on purpose: turning the panel off goes
     // past Android's own idea of the screen, so anything that lights it again — the
@@ -1725,13 +1736,20 @@ static int app_main() {
             }
             case pm::window::MenuAction::TOGGLE_VIRTUAL_DISPLAY: {
                 // EXPERIMENT. The server only ever reads this when it is born, so the
-                // stream has to die and come back — same road the quality stones walk.
+                // stream has to die and come back — the same path a quality change takes.
                 current_settings.m_virtual_display = !current_settings.m_virtual_display;
                 pm::save_settings(current_settings);
                 window->set_virtual_display(current_settings.m_virtual_display);
-                window->set_status_text(current_settings.m_virtual_display
-                    ? "Eigener PC-Bildschirm wird aufgebaut..."
-                    : "Zurück zur Spiegelung des Handy-Bildschirms...");
+                // Only promise a rebuild if one is actually going to happen.
+                // apply_quality_now() declines while nothing streams or a recording is
+                // running, and says so itself in the latter case.
+                if (!scrcpy.is_running()) {
+                    window->set_status_text("Wirkt bei der nächsten Verbindung.");
+                } else {
+                    window->set_status_text(current_settings.m_virtual_display
+                        ? "Eigener PC-Bildschirm wird aufgebaut..."
+                        : "Zurück zur Spiegelung des Handy-Bildschirms...");
+                }
                 if (apply_quality_now) apply_quality_now();
                 break;
             }
@@ -2024,11 +2042,16 @@ static int app_main() {
         // On a display of our own with system decorations switched off, no home screen
         // is registered — the phone answers HOME with nothing at all, so whoever opened
         // an app is stuck in it. Here the key does what it means: put the launcher back
-        // on the display. Press only, or the launcher is started twice per keystroke.
-        if (action == 0 && keycode == ANDROID_KEYCODE_HOME && scrcpy.uses_new_display()) {
-            const pm::Settings current = pm::load_settings();
-            if (!current.m_virtual_display_app.empty()) {
-                scrcpy.start_app(current.m_virtual_display_app);
+        // on the display.
+        //
+        // Press AND release are swallowed together. The launcher is only started on the
+        // press (otherwise it starts twice per keystroke), but letting the release
+        // through would send the phone an ACTION_UP for a key it never saw pressed —
+        // the same asymmetry swallowed_shortcuts_ exists to prevent on the UHID path.
+        if (keycode == ANDROID_KEYCODE_HOME && scrcpy.uses_new_display()) {
+            const std::string& launcher = scrcpy.new_display_app();
+            if (!launcher.empty()) {
+                if (action == 0) scrcpy.start_app(launcher);
                 return;
             }
         }
@@ -2307,8 +2330,7 @@ static int app_main() {
                 // adb process, so it must not run on every poll round: roughly every 2s
                 // while the phone stays silent, every 5s as a cross-check when it answers.
                 const int adb_check_interval = phone_answered ? 10 : 4;
-                if (screen_on && !device_id.empty() &&
-                    ++adb_poll_counter >= adb_check_interval) {
+                if (screen_on && !device_id.empty() && ++adb_poll_counter >= adb_check_interval) {
                     adb_poll_counter = 0;
                     // Ask PowerManager, not "dumpsys display" — the latter prints a history
                     // of past OFF events and would read as "screen off" long after the fact.

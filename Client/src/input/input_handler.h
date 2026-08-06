@@ -52,8 +52,13 @@ private:
     void send_hid_report(const uint8_t* report);
 
     pm::stream::ScrcpyClient* client_;
-    int m_device_width{1080};
-    int m_device_height{1920};
+    // Atomic for the same reason as m_uhid_active below: since server 4.x the video
+    // thread rewrites the size on every rotation, while the UI thread reads it for
+    // every pointer event. They are still two separate stores, so an event landing
+    // between them is mapped with a new width and an old height — one misplaced poke
+    // at the instant of a rotation, which is the cheapest of the available outcomes.
+    std::atomic<int> m_device_width{1080};
+    std::atomic<int> m_device_height{1920};
 
     // Written by the connection thread when a session starts, read by the UI
     // thread on every keystroke — hence atomic. The HID state below is only ever
