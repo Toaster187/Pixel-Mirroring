@@ -2283,7 +2283,14 @@ static int app_main() {
 
         screen_poll_thread = std::thread([&, poll_ip, device_id]() {
             pm::adb::AdbClient poll_adb;
+            // Seeded from the FIRST reading instead of assuming "on". Assuming it would
+            // make a phone that was already asleep when the session started look like one
+            // that had just been switched off, and the teardown below would fire before
+            // the first frame ever arrived — which is exactly what starting the client at
+            // a dark phone does. Only a genuine on → off change during a live session is
+            // the human saying "I am done".
             bool last_screen_on = true;
+            bool have_first_reading = false;
             int clip_poll_counter = 0;
             int adb_poll_counter = 0;
 
@@ -2344,10 +2351,18 @@ static int app_main() {
                     }
                 }
 
-                if (screen_on != last_screen_on) {
+                if (!have_first_reading) {
+                    // First round only records where the phone stands, it never acts.
+                    have_first_reading = true;
                     last_screen_on = screen_on;
-                    
-                    if (!screen_on) {
+                } else if (screen_on != last_screen_on) {
+                    last_screen_on = screen_on;
+
+                    // A stream that is not running cannot be "ended by the human": this
+                    // is either a connect still on its way or a teardown already under
+                    // way, and tearing down again would only drop the window into SETUP
+                    // behind its back.
+                    if (!screen_on && scrcpy.is_running()) {
                         // Screen went off: hand the phone its original brightness back.
                         if (saved_brightness.brightness >= 0) {
                             pm::adb::AdbClient restore_adb;
@@ -2374,6 +2389,10 @@ static int app_main() {
                                 }
                             }
                             window->set_app_state(pm::window::AppState::SETUP);
+                            // Without this the line from the running session stays up and
+                            // claims the PC display is still active, right next to a
+                            // "Verbinden" button.
+                            window->set_status_text("Handy ausgeschaltet — Verbindung beendet.");
                         });
                         // Tear the stream down so the phone stops encoding for nobody.
                         if (scrcpy.is_running()) {
