@@ -138,6 +138,15 @@ verwechselt:
   Sperrbildschirm erscheint. Ein automatisches Entsperren gab es hier zwischenzeitlich,
   es ist wieder entfernt.
 
+**Geweckt wird trotzdem, entsperrt nicht.** Ein dösendes Gerät nimmt das virtuelle
+Display mit in den Schlaf, das Fenster bleibt dann schwarz. `start_stream` schickt in
+diesem Modus deshalb einmal `KEYCODE_WAKEUP`, bevor das Display gebaut wird — das holt
+das Handy an seinen Sperrbildschirm und keinen Schritt weiter, es wird keine PIN
+getippt. Wachhalten übernimmt danach `screen_off_timeout`, das Abdunkeln `m_screen_off`.
+Endzustand: ein dunkles, gesperrtes, waches Handy. Nachgemessen vom ausgeschalteten
+Handy aus: Sitzung kommt hoch, 55–60 fps bei 14–17 Mbit/s, 80 s durchgehend `Awake`,
+`isKeyguardShowing=true`, Fossify mit `visibleRequested=true`.
+
 **Reihenfolge ist wichtig:** die Helligkeitsabsenkung läuft in diesem Modus *vor* dem
 Stream. Das Schreiben von `screen_brightness` lässt Android den Displayzustand neu setzen
 und schaltet das gerade abgedunkelte Panel wieder ein; als Hintergrundaufgabe landete das

@@ -1032,6 +1032,22 @@ bool start_stream(
         config.screen_off_timeout_ms = 60 * 60 * 1000;
     }
 
+    // A dozing phone takes the virtual display into sleep with it: WindowManager hangs a
+    // Display-off token on our display too, the launcher stops rendering and the PC shows
+    // nothing but black. So the device is woken before the display is built.
+    //
+    // Waking is NOT unlocking. KEYCODE_WAKEUP brings the phone out of doze to its lock
+    // screen and no further; no PIN is typed, and the phone stays locked. What keeps it
+    // awake afterwards is screen_off_timeout above, and m_screen_off darkens the panel
+    // again once the stream stands — the end state is a dark, locked, awake phone.
+    //
+    // Sent unconditionally: on a phone that is already awake, WAKEUP does nothing.
+    if (own_display) {
+        pm::adb::AdbClient wake_adb;
+        wake_adb.execute_shell_command(device_id, "input keyevent 224");
+        std::this_thread::sleep_for(std::chrono::milliseconds(600));
+    }
+
     // Also runs with a display of our own, and on purpose: turning the panel off goes
     // past Android's own idea of the screen, so anything that lights it again — the
     // lock screen after a poke, a notification — comes back at full brightness. The
