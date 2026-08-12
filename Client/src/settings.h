@@ -30,6 +30,12 @@ struct Settings {
     // The stronger version of the line above: the panel is actually switched off via
     // scrcpy, not just dimmed. Opt-in only — an unexpectedly black phone reads as broken.
     bool m_screen_off = false;
+    // The phone's auto-rotation while a session is running, applied on every connect
+    // in both modes. Locked by default: a window on a PC monitor that turns sideways
+    // because somebody moved the phone on the desk is never what the user wanted.
+    // The phone's own value from before the session is remembered and put back at
+    // teardown, so nothing is changed for good behind the user's back.
+    bool m_auto_rotate = false;
     bool m_send_captures_to_phone = true; // push finished screenshots/recordings to the phone
     bool m_audio_enabled = true;       // play the phone's audio through the PC's speakers
     // Attach a virtual USB keyboard instead of injecting text. Off by default: not

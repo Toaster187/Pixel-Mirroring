@@ -128,14 +128,27 @@ void restore_brightness(pm::adb::AdbClient& adb, const SavedBrightness& saved) {
         "settings put system screen_brightness " + std::to_string(saved.brightness));
 }
 
-// Reads the phone's own rotation setting instead of guessing. The menu toggle must
-// always start out matching whatever the user already set on the phone — never a
-// fixed app default that quietly flips it. See issue #46.
+// Reads the phone's own rotation setting. Used both to remember where the phone stood
+// before a session touched it, and to avoid writing a value that is already there.
 bool read_auto_rotate(pm::adb::AdbClient& adb, const std::string& device_id) {
     std::string res = adb.execute_shell_command(device_id, "settings get system accelerometer_rotation");
     res.erase(0, res.find_first_not_of(" \n\r\t"));
     res.erase(res.find_last_not_of(" \n\r\t") + 1);
     return res != "0"; // treat unknown/empty output as "on", same as a stock phone default
+}
+
+// The phone's rotation switch as it stood before a session forced it, so it can be put
+// back. accelerometer_rotation is a system-wide setting: a phone left locked after the
+// PC is gone looks broken to whoever picks it up next.
+struct SavedAutoRotate {
+    int enabled = -1;      // -1 = not saved
+    std::string device_id; // which phone this belongs to
+};
+
+void restore_auto_rotate(pm::adb::AdbClient& adb, const SavedAutoRotate& saved) {
+    if (saved.device_id.empty() || saved.enabled < 0) return;
+    adb.execute_shell_command(saved.device_id,
+        "settings put system accelerometer_rotation " + std::to_string(saved.enabled));
 }
 
 class ScopeExit {
@@ -653,7 +666,8 @@ bool start_stream(
     const std::string& device_id,
     SavedBrightness* out_saved_brightness,
     BackgroundTasks& tasks,
-    std::atomic<bool>* out_phone_auto_rotate
+    std::atomic<bool>* out_phone_auto_rotate,
+    SavedAutoRotate* out_saved_auto_rotate
 );
 
 // A switch that is on but does nothing is worse than no switch at all. When the
@@ -777,7 +791,8 @@ bool run_first_time_setup(
     std::atomic<bool>& should_stop,
     SavedBrightness* out_saved_brightness,
     BackgroundTasks& tasks,
-    std::atomic<bool>* out_phone_auto_rotate
+    std::atomic<bool>* out_phone_auto_rotate,
+    SavedAutoRotate* out_saved_auto_rotate
 ) {
     clear_setup_state();
 
@@ -915,7 +930,7 @@ bool run_first_time_setup(
         return unlock_device_if_needed(tcp_id, &window);
     });
 
-    bool stream_ok = start_stream(window, scrcpy, renderer, input, tcp_device->id, out_saved_brightness, tasks, out_phone_auto_rotate);
+    bool stream_ok = start_stream(window, scrcpy, renderer, input, tcp_device->id, out_saved_brightness, tasks, out_phone_auto_rotate, out_saved_auto_rotate);
     bool unlock_ok = unlock_future.get();
 
     if (!unlock_ok || !stream_ok) {
@@ -959,7 +974,8 @@ bool start_stream(
     const std::string& device_id,
     SavedBrightness* out_saved_brightness,
     BackgroundTasks& tasks,
-    std::atomic<bool>* out_phone_auto_rotate
+    std::atomic<bool>* out_phone_auto_rotate,
+    SavedAutoRotate* out_saved_auto_rotate
 ) {
     window.post_task([&window]() { window.set_status_text("Starte Video-Stream..."); });
 
@@ -1078,16 +1094,32 @@ bool start_stream(
         }
     }
 
-    // Reads the phone's rotation setting, never writes it — the menu toggle has to
-    // start out exactly where the phone already was (see issue #46).
+    // The rotation switch is forced to the saved preference for the length of the
+    // session, in BOTH modes — mirroring and a display of our own. Default is locked:
+    // a picture on a PC monitor must not turn sideways because somebody moved the phone
+    // on the desk, and every connect used to leave it at whatever the phone said.
+    //
+    // This supersedes the read-only rule from issue #46: the menu toggle is our own
+    // persisted setting now, not a mirror of the phone's. What survives of #46 is that
+    // the phone is never changed for good — its own value is remembered here and put
+    // back at teardown.
     {
         std::string dev_id = device_id;
+        const bool wanted = settings.m_auto_rotate;
         pm::window::IWindow* w = &window;
-        tasks.run([dev_id, out_phone_auto_rotate, w]() {
+        tasks.run([dev_id, wanted, out_phone_auto_rotate, out_saved_auto_rotate, w]() {
             pm::adb::AdbClient adb;
-            bool enabled = read_auto_rotate(adb, dev_id);
-            if (out_phone_auto_rotate) *out_phone_auto_rotate = enabled;
-            w->post_task([w, enabled]() { w->set_auto_rotate_enabled(enabled); });
+            const bool was_enabled = read_auto_rotate(adb, dev_id);
+            if (out_saved_auto_rotate && out_saved_auto_rotate->enabled < 0) {
+                out_saved_auto_rotate->device_id = dev_id;
+                out_saved_auto_rotate->enabled = was_enabled ? 1 : 0;
+            }
+            if (was_enabled != wanted) {
+                adb.execute_shell_command(dev_id,
+                    std::string("settings put system accelerometer_rotation ") + (wanted ? "1" : "0"));
+            }
+            if (out_phone_auto_rotate) *out_phone_auto_rotate = wanted;
+            w->post_task([w, wanted]() { w->set_auto_rotate_enabled(wanted); });
         });
     }
 
@@ -1443,9 +1475,13 @@ static int app_main() {
     window->set_uhid_keyboard(initial_settings.m_uhid_keyboard);
     window->set_virtual_display(initial_settings.m_virtual_display);
     window->set_auto_pause_minimized(initial_settings.m_auto_pause_minimized);
+    window->set_auto_rotate_enabled(initial_settings.m_auto_rotate);
 
     SavedBrightness saved_brightness; // the phone's brightness before we dimmed it
-    std::atomic<bool> phone_auto_rotate{true}; // Mirrors the phone's OWN rotation switch, never sets a default
+    SavedAutoRotate saved_auto_rotate; // the phone's rotation switch before we locked it
+    // The wanted rotation state, seeded from the saved setting and re-applied on every
+    // connect — not read back off the phone.
+    std::atomic<bool> phone_auto_rotate{initial_settings.m_auto_rotate};
     std::atomic<bool> should_stop{false};
     pm::stream::ScrcpyClient scrcpy;
     scrcpy.set_disconnect_callback([w = window.get()]() {
@@ -1851,12 +1887,17 @@ static int app_main() {
                 break;
             }
             case pm::window::MenuAction::TOGGLE_AUTO_ROTATE: {
-                // This is NOT stored in Settings — it only ever mirrors and flips the
-                // phone's own accelerometer_rotation value (issue #46). The toggle is
-                // synced from the phone on connect (see start_stream), and a click here
-                // is the only thing that ever changes it.
+                // Persisted like every other switch and re-applied on every connect (see
+                // start_stream), so a locked rotation stays locked across sessions.
+                //
+                // A click here is a deliberate change to the phone, so the remembered
+                // pre-session value is dropped: teardown must not undo what the user just
+                // asked for.
                 bool new_value = !phone_auto_rotate.load();
                 phone_auto_rotate = new_value;
+                current_settings.m_auto_rotate = new_value;
+                pm::save_settings(current_settings);
+                saved_auto_rotate = {};
                 window->set_auto_rotate_enabled(new_value);
                 run_on_device([new_value](const std::string& device_id) {
                     pm::adb::AdbClient adb;
@@ -2205,7 +2246,7 @@ static int app_main() {
             scrcpy.stop();
             if (should_stop) return;
             if (start_stream(*window, scrcpy, renderer, input, device_id,
-                             &saved_brightness, background_tasks, &phone_auto_rotate)) {
+                             &saved_brightness, background_tasks, &phone_auto_rotate, &saved_auto_rotate)) {
                 start_heartbeat(device_id.substr(0, device_id.rfind(':')));
             }
         });
@@ -2267,7 +2308,7 @@ static int app_main() {
                 // there is nothing to discover and no pairing to negotiate.
                 const bool resumed = !device_id.empty() &&
                     start_stream(*window, scrcpy, renderer, input, device_id,
-                                 &saved_brightness, background_tasks, &phone_auto_rotate);
+                                 &saved_brightness, background_tasks, &phone_auto_rotate, &saved_auto_rotate);
 
                 // Lower the flag only now: while the stream was being rebuilt the
                 // heartbeat still had to count as wanted.
@@ -2379,13 +2420,21 @@ static int app_main() {
                     // way, and tearing down again would only drop the window into SETUP
                     // behind its back.
                     if (!screen_on && scrcpy.is_running()) {
-                        // Screen went off: hand the phone its original brightness back.
+                        // Screen went off: hand the phone its original brightness and
+                        // rotation switch back — from here on it is a phone in someone's
+                        // hand again, not a screen for the PC. A later reconnect re-applies
+                        // both from start_stream.
                         if (saved_brightness.brightness >= 0) {
                             pm::adb::AdbClient restore_adb;
                             restore_brightness(restore_adb, saved_brightness);
                             saved_brightness = {}; // already restored, do not restore twice
                         }
-                        
+                        if (saved_auto_rotate.enabled >= 0) {
+                            pm::adb::AdbClient restore_adb;
+                            restore_auto_rotate(restore_adb, saved_auto_rotate);
+                            saved_auto_rotate = {}; // already restored, do not restore twice
+                        }
+
                         const bool own_display_session = scrcpy.uses_new_display();
                         window->post_task([&, own_display_session]() {
                             // Hide to the tray rather than showing a black window.
@@ -2450,7 +2499,7 @@ static int app_main() {
             SetupState setup_state = load_setup_state();
             if (!setup_state.configured) {
                 if (run_first_time_setup(adb, *window, scrcpy, renderer, input, should_stop,
-                                         &saved_brightness, background_tasks, &phone_auto_rotate)) {
+                                         &saved_brightness, background_tasks, &phone_auto_rotate, &saved_auto_rotate)) {
                     auto new_state = load_setup_state();
                     if (new_state.configured && !new_state.device_ip.empty()) {
                         start_heartbeat(new_state.device_ip);
@@ -2482,7 +2531,7 @@ static int app_main() {
                         w->set_status_text("Nicht über WLAN erreichbar — richte per USB neu ein...");
                     });
                     if (run_first_time_setup(adb, *window, scrcpy, renderer, input, should_stop,
-                                             &saved_brightness, background_tasks, &phone_auto_rotate)) {
+                                             &saved_brightness, background_tasks, &phone_auto_rotate, &saved_auto_rotate)) {
                         auto new_state = load_setup_state();
                         if (new_state.configured && !new_state.device_ip.empty()) {
                             start_heartbeat(new_state.device_ip);
@@ -2513,7 +2562,7 @@ static int app_main() {
             });
 
             bool stream_ok = start_stream(*window, scrcpy, renderer, input, tcp_device->id,
-                                          &saved_brightness, background_tasks, &phone_auto_rotate);
+                                          &saved_brightness, background_tasks, &phone_auto_rotate, &saved_auto_rotate);
             bool unlock_ok = unlock_future.get();
 
             if (!unlock_ok) {
@@ -2579,6 +2628,12 @@ static int app_main() {
     if (saved_brightness.brightness >= 0) {
         pm::adb::AdbClient restore_adb;
         restore_brightness(restore_adb, saved_brightness);
+    }
+
+    // Same for the rotation switch: the lock only ever belonged to the session.
+    if (saved_auto_rotate.enabled >= 0) {
+        pm::adb::AdbClient restore_adb;
+        restore_auto_rotate(restore_adb, saved_auto_rotate);
     }
 
     scrcpy.stop();
