@@ -2,7 +2,7 @@
 
 > **Dein Android-Bildschirm — nativ auf deinem PC.**  
 > Ein Open-Source-Pendant zu Apples iPhone Mirroring für Android/Pixel-Geräte.  
-> **Version 5.1.0** — Vollständig implementiert, produktionsreif, aktiv maintained.
+> **Version 5.2.0** — Vollständig implementiert, produktionsreif, aktiv maintained.
 
 ---
 
@@ -283,7 +283,7 @@ Pixel-Mirroring/
 │   └── build.gradle.kts
 │
 ├── Client/                      ← Desktop Client (C++20 / CMake)
-│   ├── CMakeLists.txt           ← Build-Config (Version 5.1.0, C++20, UTF-8)
+│   ├── CMakeLists.txt           ← Build-Config (Version 5.2.0, C++20, UTF-8)
 │   ├── src/
 │   │   ├── main.cpp             ← Entry Point, State Machine (SETUP→SCANNING→CONNECTED→STREAMING)
 │   │   ├── settings.{h,cpp}     ← Persistente Einstellungen (max_fps, max_size, PIN, Ton, etc.)
@@ -411,7 +411,7 @@ Das Projekt ist unter **Apache License 2.0** lizenziert. Alle Abhängigkeiten si
 
 ## 📋 Status & Roadmap
 
-### ✅ Produktionsreife Features (v5.1.0)
+### ✅ Produktionsreife Features (v5.2.0)
 
 | Komponente | Status | Notizen |
 |-----------|--------|---------|

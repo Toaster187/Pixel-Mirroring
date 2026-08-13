@@ -76,11 +76,13 @@ jobs:
         run: ./Client/vcpkg/bootstrap-vcpkg.bat
         shell: cmd
 
-      # PM_REQUIRE_FOSSIFY: ein Release ohne den Launcher-APK würde still ausgeliefert,
-      # und weil der virtuelle Bildschirm standardmäßig an ist, liefe jeder Nutzer in die
-      # Rückfallebene. Hier soll der Build lieber laut scheitern.
+      # Beide APKs werden über install(... OPTIONAL) eingepackt, ein fehlendes Paket
+      # fällt also von allein nicht auf. PM_REQUIRE_FOSSIFY: ohne den Launcher liefe
+      # jeder Nutzer in die Rückfallebene, weil der virtuelle Bildschirm standardmäßig an
+      # ist. PM_REQUIRE_ANDROID_APK: ohne die Companion-App kann der Installer überhaupt
+      # kein Handy einrichten. Beides soll den Build laut scheitern lassen.
       - name: Configure CMake
-        run: cmake --preset default -DCMAKE_BUILD_TYPE=Release -DPM_REQUIRE_FOSSIFY=ON
+        run: cmake --preset default -DCMAKE_BUILD_TYPE=Release -DPM_REQUIRE_FOSSIFY=ON -DPM_REQUIRE_ANDROID_APK=ON
         working-directory: Client
 
       - name: Build Client
@@ -96,6 +98,30 @@ jobs:
           cpack -C Release
         working-directory: Client
         shell: bash
+
+      # Letzte Kontrolle am fertigen Paket statt am Build-Verzeichnis: das ZIP entsteht
+      # aus demselben Install-Baum wie der NSIS-Installer, ist aber ohne Windows-
+      # Werkzeuge lesbar. Der .exe-Installer wird eigens geprüft, weil das Upload unten
+      # schon zufrieden ist, wenn irgendeines der drei Muster etwas findet.
+      - name: Verify packaged payload
+        working-directory: Client/build
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(ls PixelMirroring-*.zip | head -1)
+          echo "Prüfe $ZIP"
+          cmake -E tar tf "$ZIP" > contents.txt
+          cat contents.txt
+          for f in PixelMirroring.apk FossifyLauncher.apk scrcpy-server.jar adb.exe \
+                   licenses/GPL-3.0.txt licenses/FossifyLauncher.md; do
+            if ! grep -q -- "$f" contents.txt; then
+              echo "::error::Fehlt im Auslieferungspaket: $f"
+              exit 1
+            fi
+          done
+          ls PixelMirroring-*.exe >/dev/null || { echo "::error::Kein NSIS-Installer gebaut"; exit 1; }
+          echo "Alle mitgelieferten Dateien vorhanden."
+          rm -f contents.txt
 
       - name: Upload Installers as Workflow Artifacts
         uses: actions/upload-artifact@v4

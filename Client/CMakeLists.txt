@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(PixelMirroring VERSION 5.1.0 LANGUAGES CXX)
+project(PixelMirroring VERSION 5.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -85,21 +85,39 @@ if(PM_BUILD_TESTS)
     add_test(NAME control_messages COMMAND pm_control_messages_test)
 endif()
 
+# Same reasoning as PM_REQUIRE_FOSSIFY further down: a developer build without the
+# companion APK is perfectly normal — the client then asks the user to install it by
+# hand — but an installer without it cannot set a phone up at all, and the install rule
+# for it is OPTIONAL, so the whole release would go out silently incomplete. Release
+# builds set this to ON and fail at build time instead.
+option(PM_REQUIRE_ANDROID_APK
+       "Fail the build when the Android companion APK is not next to the client" OFF)
+
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/copy_apk.cmake" "
 set(CANDIDATES
     \"${CMAKE_SOURCE_DIR}/../Android/app/build/outputs/apk/debug/app-debug.apk\"
     \"${CMAKE_SOURCE_DIR}/../Android/app/build/intermediates/apk/debug/app-debug.apk\"
 )
+set(PM_APK_FOUND FALSE)
 foreach(CAND IN LISTS CANDIDATES)
     if(EXISTS \"\${CAND}\")
         execute_process(COMMAND \${CMAKE_COMMAND} -E copy_if_different \"\${CAND}\" \"\${DEST}/PixelMirroring.apk\")
+        set(PM_APK_FOUND TRUE)
         break()
     endif()
 endforeach()
+if(NOT PM_APK_FOUND AND REQUIRE_APK)
+    message(FATAL_ERROR
+        \"No Android companion APK found in \${CANDIDATES} and PM_REQUIRE_ANDROID_APK is \"
+        \"ON. Build it with 'gradle assembleDebug' in Android/ first — an installer \"
+        \"without it cannot set up a phone.\")
+endif()
 ")
 
 add_custom_command(TARGET PixelMirroring POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -D DEST="$<TARGET_FILE_DIR:PixelMirroring>" -P "${CMAKE_CURRENT_BINARY_DIR}/copy_apk.cmake"
+    COMMAND ${CMAKE_COMMAND} -D DEST="$<TARGET_FILE_DIR:PixelMirroring>"
+                             -D REQUIRE_APK=${PM_REQUIRE_ANDROID_APK}
+                             -P "${CMAKE_CURRENT_BINARY_DIR}/copy_apk.cmake"
     COMMENT "Copy Android companion APK next to desktop client if it exists"
 )
 
