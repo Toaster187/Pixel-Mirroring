@@ -345,6 +345,17 @@ jedem Textfeld korrekt dargestellt werden. Damit das dauerhaft hält, gilt:
   - **Beim Fortsetzen gibt es den kalten Weg als Rückfall.** Scheitert `start_stream()`
     beim Wiederherstellen - Handy eingeschlafen, WLAN gewechselt, ADB doch abgeschaltet -
     ruft der Task `start_connection(true)` auf, statt ein totes Fenster stehen zu lassen.
+  - **Ein Abbau, der das Fenster selbst faltet, darf nicht wie ein Mensch aussehen.**
+    Wird das Handy im Virtual-Display-Modus ausgeschaltet, minimiert der Screen-Poll-
+    Thread das Fenster - und `ShowWindow(SW_MINIMIZE)` feuert dieselbe
+    `SIZE_MINIMIZED`-Flanke. `pause_suspended` wird deshalb **vor** dem geposteten Task
+    gesetzt; Minimize-Callback und Abgleich-Task steigen daran aus, und der Poll-Thread
+    setzt `pause_wanted`/`auto_paused` nach seinem `scrcpy.stop()` zurück. Sonst kann der
+    Task das Rennen gewinnen, `auto_paused` an einem selbst gestoppten Stream einrasten
+    lassen und nie wieder senken - und `auto_paused` ist genau das, was die
+    Heartbeat-Schleife als "noch gewollt" zählt: der Client hielte ADB an einem
+    ausgeschalteten Handy über den 60-s-Watchdog hinaus offen. `start_connection` senkt
+    die Sperre wieder.
 - **Optionale UHID-Tastatur** (`Settings::m_uhid_keyboard`, standardmäßig aus): statt
   `inject_text` hängt eine virtuelle USB-HID-Tastatur am Handy (scrcpy-Control-Messages
   12 `UHID_CREATE`, 13 `UHID_INPUT`, 14 `UHID_DESTROY` sowie 15
@@ -383,6 +394,10 @@ Ganze, alle drei teuer gelernt — die vollständige Aufzeichnung samt Messwerte
   `push_file` + `install_pushed_app`, bewusst **nicht** über `install_app` mit `-g`.
   Fehlt der Launcher ganz, fällt `start_stream` auf die gewöhnliche Spiegelung zurück
   und sagt das auch — ein Display, das zeichnet, aber nichts starten kann, ist schlimmer.
+  Ein von Hand in `virtual_display_app` benanntes Paket geht durch dieselbe Prüfung
+  (`is_app_installed`), bevor es dem Server genannt wird: `START_APP` hat keine Antwort,
+  die der Client lesen könnte — sein `bool` sagt nur, dass die Steuernachricht raus ist —
+  und ein Tippfehler ergäbe genau dieses schwarze Display.
   Das ausgewählte Paket steht nur in der Sitzungs-`Config` und wird **nie** nach
   `settings.txt` zurückgeschrieben; `main.cpp` hält eine langlebige `Settings`-Kopie und
   schreibt bei jedem Menüklick die ganze Datei, ein dort abgelegter Wert überlebte also
@@ -393,7 +408,13 @@ Ganze, alle drei teuer gelernt — die vollständige Aufzeichnung samt Messwerte
   Die APK selbst wird beim Bauen geladen und **von Hand** gegen ihre Prüfsumme geprüft —
   nicht über `file(DOWNLOAD ... EXPECTED_HASH)`, das bei Abweichung den ganzen
   Configure-Lauf abbricht und die schlechte Datei liegen lässt, wo der nächste Lauf sie
-  ungeprüft ausliefert.
+  ungeprüft ausliefert. Für Entwickler-Builds bleibt eine fehlende APK eine Warnung,
+  `release.yml` konfiguriert aber mit `-DPM_REQUIRE_FOSSIFY=ON` und macht daraus einen
+  `FATAL_ERROR`: der virtuelle Bildschirm ist standardmäßig an, ein Installationspaket
+  ohne Launcher schickte also jeden Nutzer in die Rückfallebene — bei grünem Build.
+  F-Droid räumt überholte Versionen von `/repo/` ins `/archive/`, deshalb stehen in
+  `PM_FOSSIFY_URLS` beide Adressen; die `/repo/`-URL wird mit der nächsten Version
+  zwangsläufig 404.
 - **Das Gerät darf nicht einschlafen.** Das Abschalten des Panels über
   `SET_DISPLAY_POWER` hält Androids Untätigkeitsuhr nicht an, das Handy schlief nach
   einer Minute ein und nahm das virtuelle Display mit; `keep_active` weckt es nur alle

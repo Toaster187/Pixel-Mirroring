@@ -989,22 +989,10 @@ void ScrcpyClient::inject_keycode(int action, int keycode) {
 }
 
 void ScrcpyClient::inject_scroll(float x, float y, int w, int h, float hscroll, float vscroll) {
-    uint8_t buf[21] = {0};
-    buf[0] = 3; // SC_CONTROL_MSG_TYPE_INJECT_SCROLL_EVENT
+    const auto buf = wire::build_inject_scroll(
+        x, y, static_cast<uint16_t>(w), static_cast<uint16_t>(h), hscroll, vscroll);
 
-    write32(buf + 1, static_cast<uint32_t>((std::max)(0.0f, x)));
-    write32(buf + 5, static_cast<uint32_t>((std::max)(0.0f, y)));
-    write16(buf + 9, static_cast<uint16_t>(w));
-    write16(buf + 11, static_cast<uint16_t>(h));
-
-    // fixed-point, clamped to int16 range (see wire::SCROLL_FIXED_POINT_SCALE)
-    write16(buf + 13, static_cast<uint16_t>(wire::scroll_to_fixed_point(hscroll)));
-    write16(buf + 15, static_cast<uint16_t>(wire::scroll_to_fixed_point(vscroll)));
-
-    // buttons = 0 (4 bytes)
-    write32(buf + 17, 0);
-
-    send_control(buf, sizeof(buf));
+    send_control(buf.data(), buf.size());
 }
 
 void ScrcpyClient::inject_text(const std::string& text) {
@@ -1122,44 +1110,40 @@ bool ScrcpyClient::uhid_create(uint16_t id, const std::string& name,
 }
 
 void ScrcpyClient::uhid_input(uint16_t id, const uint8_t* data, size_t size) {
-    if (!data || size == 0 || size > UHID_MAX_REPORT_SIZE) {
+    // Every key press and release goes through here, so this path must not allocate.
+    uint8_t buf[wire::UHID_INPUT_HEADER_SIZE + UHID_MAX_REPORT_SIZE];
+    const size_t length = wire::build_uhid_input(buf, sizeof(buf), id, data, size);
+    if (length == 0) {
         return;
     }
 
-    // Every key press and release goes through here, so this path must not allocate.
-    uint8_t buf[5 + UHID_MAX_REPORT_SIZE];
-    buf[0] = wire::MSG_UHID_INPUT;
-    write16(buf + 1, id);
-    write16(buf + 3, static_cast<uint16_t>(size));
-    std::memcpy(buf + 5, data, size);
-
-    send_control(buf, 5 + size);
+    send_control(buf, length);
 }
 
 void ScrcpyClient::uhid_destroy(uint16_t id) {
-    uint8_t buf[3];
-    buf[0] = wire::MSG_UHID_DESTROY;
-    write16(buf + 1, id);
+    const std::vector<uint8_t> buf = wire::build_uhid_destroy(id);
 
-    send_control(buf, sizeof(buf));
+    send_control(buf.data(), buf.size());
 }
 
 void ScrcpyClient::open_hard_keyboard_settings() {
-    uint8_t buf[1];
-    buf[0] = wire::MSG_OPEN_HARD_KEYBOARD_SETTINGS;
+    const std::vector<uint8_t> buf = wire::build_open_hard_keyboard_settings();
 
-    send_control(buf, sizeof(buf));
+    send_control(buf.data(), buf.size());
 }
 
-void ScrcpyClient::start_app(const std::string& package_name) {
+bool ScrcpyClient::start_app(const std::string& package_name) {
     const std::vector<uint8_t> buf = wire::build_start_app(package_name);
     if (buf.empty()) {
-        return;
+        return false;
     }
 
-    if (send_control(buf.data(), buf.size())) {
-        log_stream_event("[Scrcpy] Asked phone to start app " + package_name);
+    if (!send_control(buf.data(), buf.size())) {
+        log_stream_event("[Scrcpy] Could not ask phone to start app " + package_name);
+        return false;
     }
+    log_stream_event("[Scrcpy] Asked phone to start app " + package_name);
+    return true;
 }
 
 } // namespace pm::stream

@@ -98,6 +98,16 @@ QualitySpec quality_spec(QualityPreset preset) {
     }
 }
 
+// virtual_display_app is the one value a user is expected to type into settings.txt by
+// hand, so it is the one that arrives with a stray space or a CR from an editor. An
+// untrimmed package name reaches the phone as an app that does not exist.
+static std::string trim(const std::string& value) {
+    const auto first = value.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return "";
+    const auto last = value.find_last_not_of(" \t\r\n");
+    return value.substr(first, last - first + 1);
+}
+
 static QualityPreset parse_quality(const std::string& value) {
     if (value == "battery") return QualityPreset::BATTERY;
     if (value == "maximum") return QualityPreset::MAXIMUM;
@@ -164,7 +174,7 @@ Settings load_settings() {
         } else if (key == "virtual_display") {
             s.m_virtual_display = (value == "1");
         } else if (key == "virtual_display_app") {
-            s.m_virtual_display_app = value;
+            s.m_virtual_display_app = trim(value);
         } else if (key == "pin") {
             s.m_pin = decrypt_pin(value);
         }

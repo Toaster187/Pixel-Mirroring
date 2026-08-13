@@ -126,6 +126,88 @@ static void test_set_display_power() {
     check_bytes(wire::build_set_display_power(false), {10, 0}, "SET_DISPLAY_POWER off");
 }
 
+// --- UHID_INPUT -----------------------------------------------------------------
+// type(1) id(2 BE) size(2 BE) report
+//
+// The message every single key press and release goes through. A wrong size prefix here
+// kills the server's control thread exactly like a wrong UHID_CREATE does.
+
+static void test_uhid_input_layout() {
+    const uint8_t report[8] = {0x02, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00}; // Shift+A
+    uint8_t out[wire::UHID_INPUT_HEADER_SIZE + wire::UHID_MAX_REPORT_SIZE];
+
+    const size_t length = wire::build_uhid_input(out, sizeof(out), 0x0102, report, sizeof(report));
+    check(length == wire::UHID_INPUT_HEADER_SIZE + sizeof(report), "UHID_INPUT is header plus report");
+    check_bytes(std::vector<uint8_t>(out, out + length), {
+        13,          // type
+        0x01, 0x02,  // id, big endian
+        0x00, 0x08,  // report size, big endian
+        0x02, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00
+    }, "UHID_INPUT full layout");
+}
+
+static void test_uhid_input_refusals() {
+    const uint8_t report[8] = {0};
+    uint8_t out[wire::UHID_INPUT_HEADER_SIZE + wire::UHID_MAX_REPORT_SIZE];
+
+    check(wire::build_uhid_input(out, sizeof(out), 1, nullptr, 8) == 0, "no report, no message");
+    check(wire::build_uhid_input(out, sizeof(out), 1, report, 0) == 0, "empty report, no message");
+
+    // Over the cap the buffer was sized against. Sending it anyway would write past the
+    // stack array in the hot path.
+    const uint8_t oversized[wire::UHID_MAX_REPORT_SIZE + 1] = {0};
+    check(wire::build_uhid_input(out, sizeof(out), 1, oversized, sizeof(oversized)) == 0,
+          "a report beyond the cap sends nothing");
+
+    // A buffer too small is refused rather than filled halfway.
+    uint8_t tiny[4];
+    check(wire::build_uhid_input(tiny, sizeof(tiny), 1, report, sizeof(report)) == 0,
+          "a buffer that cannot hold the message sends nothing");
+}
+
+// --- UHID_DESTROY and OPEN_HARD_KEYBOARD_SETTINGS -------------------------------
+
+static void test_uhid_destroy_layout() {
+    check_bytes(wire::build_uhid_destroy(0x0102), {14, 0x01, 0x02}, "UHID_DESTROY full layout");
+}
+
+static void test_open_hard_keyboard_settings_layout() {
+    // A bare type byte: any payload at all would shift every following message.
+    check_bytes(wire::build_open_hard_keyboard_settings(), {15},
+                "OPEN_HARD_KEYBOARD_SETTINGS carries no payload");
+}
+
+// --- INJECT_SCROLL --------------------------------------------------------------
+// type(1) x(4 BE) y(4 BE) w(2 BE) h(2 BE) hscroll(2 BE) vscroll(2 BE) buttons(4 BE)
+
+static void test_inject_scroll_layout() {
+    // Coordinates stay well under 2^24 so the float parameters carry them exactly — the
+    // test pins the byte order, not the rounding of a number no screen is that wide for.
+    const auto msg = wire::build_inject_scroll(0x00010203, 0x00040506, 1080, 2424, 0.0f, 1.0f);
+    check(msg.size() == wire::INJECT_SCROLL_SIZE, "INJECT_SCROLL is 21 bytes");
+    check_bytes(std::vector<uint8_t>(msg.begin(), msg.end()), {
+        3,                       // type
+        0x00, 0x01, 0x02, 0x03,  // x
+        0x00, 0x04, 0x05, 0x06,  // y
+        0x04, 0x38,              // width 1080
+        0x09, 0x78,              // height 2424
+        0x00, 0x00,              // hscroll
+        0x02, 0x00,              // vscroll: one notch = 512
+        0x00, 0x00, 0x00, 0x00   // buttons: none held
+    }, "INJECT_SCROLL full layout");
+}
+
+static void test_inject_scroll_clamps_coordinates() {
+    // A pointer dragged past the left or top edge must not wrap through the unsigned
+    // cast — that would put the event at roughly four billion on the phone.
+    const auto msg = wire::build_inject_scroll(-5.0f, -5.0f, 100, 100, 0.0f, -1.0f);
+    check(msg[1] == 0 && msg[2] == 0 && msg[3] == 0 && msg[4] == 0, "a negative x clamps to zero");
+    check(msg[5] == 0 && msg[6] == 0 && msg[7] == 0 && msg[8] == 0, "a negative y clamps to zero");
+
+    // -512 as int16 reinterpreted unsigned.
+    check(msg[15] == 0xFE && msg[16] == 0x00, "a backwards notch is -512");
+}
+
 // --- Video packet flags ---------------------------------------------------------
 
 static void test_packet_flags() {
@@ -137,6 +219,7 @@ static void test_packet_flags() {
     // The three must not overlap, or one packet kind reads as another.
     check((wire::PACKET_FLAG_SESSION & wire::PACKET_FLAG_CONFIG) == 0, "SESSION and CONFIG differ");
     check((wire::PACKET_FLAG_CONFIG & wire::PACKET_FLAG_KEY_FRAME) == 0, "CONFIG and KEY_FRAME differ");
+    check((wire::PACKET_FLAG_SESSION & wire::PACKET_FLAG_KEY_FRAME) == 0, "SESSION and KEY_FRAME differ");
 }
 
 // --- Session packet parsing -----------------------------------------------------
@@ -174,6 +257,12 @@ int main() {
     test_uhid_create_name_rules();
     test_start_app_layout();
     test_set_display_power();
+    test_uhid_input_layout();
+    test_uhid_input_refusals();
+    test_uhid_destroy_layout();
+    test_open_hard_keyboard_settings_layout();
+    test_inject_scroll_layout();
+    test_inject_scroll_clamps_coordinates();
     test_packet_flags();
     test_session_packet_read();
     test_scroll_scaling();

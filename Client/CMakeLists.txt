@@ -153,8 +153,23 @@ endif()
 #   - Fossify Launcher is GPL-3.0-only. vendor/licenses/ carries the licence text and
 #     the source offer; both are installed next to the APK, which is what the licence
 #     asks for — see vendor/licenses/FossifyLauncher.md.
+#
+# A build without the APK is legal but must never be shipped: m_virtual_display defaults
+# to ON, so an installer missing the launcher sends every single user into the fallback
+# and the whole feature is silently gone, with a green build to show for it. Release
+# builds therefore set PM_REQUIRE_FOSSIFY=ON and fail loudly instead; developer builds
+# and offline runners are unaffected.
+option(PM_REQUIRE_FOSSIFY
+       "Fail the configure step when the Fossify Launcher APK cannot be provided" OFF)
+
 set(PM_FOSSIFY_APK "${CMAKE_SOURCE_DIR}/vendor/FossifyLauncher.apk")
-set(PM_FOSSIFY_URL "https://f-droid.org/repo/org.fossify.home_16.apk")
+# Two sources on purpose. F-Droid moves superseded versions out of /repo/ into /archive/,
+# so the first URL is guaranteed to 404 the day version 17 appears — this is a scheduled
+# failure, not a "what if the network is down". The archive copy is the same file with the
+# same checksum, so the verification below covers both.
+set(PM_FOSSIFY_URLS
+    "https://f-droid.org/repo/org.fossify.home_16.apk"
+    "https://f-droid.org/archive/org.fossify.home_16.apk")
 set(PM_FOSSIFY_SHA256 "a603d3d510482feafd73d52a93a1ea9baefd2ca0aae329a14cbf0e21f43638e3")
 
 # The hash is checked HERE rather than through file(DOWNLOAD ... EXPECTED_HASH), which
@@ -180,29 +195,47 @@ if(EXISTS "${PM_FOSSIFY_APK}" AND NOT PM_FOSSIFY_OK)
 endif()
 
 if(NOT PM_FOSSIFY_OK)
-    message(STATUS "Fossify Launcher not found, downloading from F-Droid...")
     set(PM_FOSSIFY_TMP "${PM_FOSSIFY_APK}.download")
-    file(DOWNLOAD "${PM_FOSSIFY_URL}" "${PM_FOSSIFY_TMP}"
-         SHOW_PROGRESS
-         STATUS PM_FOSSIFY_STATUS)
-    list(GET PM_FOSSIFY_STATUS 0 PM_FOSSIFY_ERR)
-    pm_fossify_hash_ok("${PM_FOSSIFY_TMP}" PM_FOSSIFY_TMP_OK)
+    set(PM_FOSSIFY_WHY "")
+    foreach(PM_FOSSIFY_URL IN LISTS PM_FOSSIFY_URLS)
+        message(STATUS "Fossify Launcher not found, downloading from ${PM_FOSSIFY_URL}...")
+        file(DOWNLOAD "${PM_FOSSIFY_URL}" "${PM_FOSSIFY_TMP}"
+             SHOW_PROGRESS
+             STATUS PM_FOSSIFY_STATUS)
+        list(GET PM_FOSSIFY_STATUS 0 PM_FOSSIFY_ERR)
+        pm_fossify_hash_ok("${PM_FOSSIFY_TMP}" PM_FOSSIFY_TMP_OK)
 
-    # Not fatal in either direction: everything except the virtual-display experiment
-    # works without it, and the client falls back to plain mirroring when the APK is
-    # missing (see start_stream in main.cpp).
-    if(NOT PM_FOSSIFY_ERR EQUAL 0)
-        list(GET PM_FOSSIFY_STATUS 1 PM_FOSSIFY_MSG)
-        file(REMOVE "${PM_FOSSIFY_TMP}")
-        message(WARNING "Could not download Fossify Launcher: ${PM_FOSSIFY_MSG}")
-    elseif(NOT PM_FOSSIFY_TMP_OK)
-        file(SHA256 "${PM_FOSSIFY_TMP}" PM_FOSSIFY_ACTUAL)
-        file(REMOVE "${PM_FOSSIFY_TMP}")
-        message(WARNING "Fossify Launcher checksum mismatch — expected "
-                        "${PM_FOSSIFY_SHA256}, got ${PM_FOSSIFY_ACTUAL}. Not shipping it.")
-    else()
-        file(RENAME "${PM_FOSSIFY_TMP}" "${PM_FOSSIFY_APK}")
-        set(PM_FOSSIFY_OK TRUE)
+        if(NOT PM_FOSSIFY_ERR EQUAL 0)
+            list(GET PM_FOSSIFY_STATUS 1 PM_FOSSIFY_MSG)
+            file(REMOVE "${PM_FOSSIFY_TMP}")
+            set(PM_FOSSIFY_WHY "${PM_FOSSIFY_URL}: ${PM_FOSSIFY_MSG}")
+        elseif(NOT PM_FOSSIFY_TMP_OK)
+            file(SHA256 "${PM_FOSSIFY_TMP}" PM_FOSSIFY_ACTUAL)
+            file(REMOVE "${PM_FOSSIFY_TMP}")
+            # One string, not two arguments: set() with several values would build a
+            # semicolon-separated list and print as such.
+            set(PM_FOSSIFY_WHY "${PM_FOSSIFY_URL}: checksum mismatch — expected ${PM_FOSSIFY_SHA256}, got ${PM_FOSSIFY_ACTUAL}")
+        else()
+            file(RENAME "${PM_FOSSIFY_TMP}" "${PM_FOSSIFY_APK}")
+            set(PM_FOSSIFY_OK TRUE)
+            break()
+        endif()
+    endforeach()
+
+    # A missing APK is not fatal by itself — everything except the virtual-display
+    # experiment works without it, and the client falls back to plain mirroring (see
+    # start_stream in main.cpp). It IS fatal for a build that will be handed to users,
+    # because that fallback would then be all anyone ever sees.
+    if(NOT PM_FOSSIFY_OK)
+        if(PM_REQUIRE_FOSSIFY)
+            message(FATAL_ERROR
+                "Fossify Launcher could not be provided (${PM_FOSSIFY_WHY}) and "
+                "PM_REQUIRE_FOSSIFY is ON. Shipping without it would silently disable "
+                "the virtual display for every user. Fix the download or bump "
+                "PM_FOSSIFY_URLS/PM_FOSSIFY_SHA256 to the current F-Droid version.")
+        endif()
+        message(WARNING "Could not provide Fossify Launcher (${PM_FOSSIFY_WHY}). "
+                        "Not shipping it; the virtual display falls back to mirroring.")
     endif()
 endif()
 

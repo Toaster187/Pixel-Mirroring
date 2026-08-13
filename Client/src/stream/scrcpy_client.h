@@ -16,6 +16,7 @@
 
 #include "../adb/adb_client.h"
 #include "audio_player.h"
+#include "control_messages.h"
 #include "video_decoder.h"
 
 // Forward declarations for FFmpeg/SDL (they will be included in the .cpp files)
@@ -61,8 +62,10 @@ public:
 
     // Largest HID report this client will send. A keyboard report is 8 bytes; the cap
     // only exists so the hot send path can use a stack buffer instead of allocating on
-    // every keystroke.
-    static constexpr size_t UHID_MAX_REPORT_SIZE = 64;
+    // every keystroke. Same number as wire::UHID_MAX_REPORT_SIZE, which is what actually
+    // refuses an oversized report — kept in one place so the stack buffer cannot end up
+    // smaller than what the builder is willing to write into it.
+    static constexpr size_t UHID_MAX_REPORT_SIZE = wire::UHID_MAX_REPORT_SIZE;
 
     ScrcpyClient();
     ~ScrcpyClient();
@@ -127,7 +130,11 @@ public:
     // Type 16, server 3.0 and later: starts an app on the display. Needed when the
     // phone puts no usable launcher on a secondary display — without it the new
     // display stays black and nothing can ever be started on it.
-    void start_app(const std::string& package_name);
+    //
+    // Returns whether the message reached the phone. That is all the client can know:
+    // the server never answers whether the app actually came up, so a caller that needs
+    // certainty has to check the package beforehand (see start_stream).
+    bool start_app(const std::string& package_name);
 
     // True while WE are holding the panel off. Stays true across stop() if the "panel
     // back on" message never reached the phone, so a later session can still fix it.

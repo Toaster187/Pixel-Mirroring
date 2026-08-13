@@ -9,6 +9,7 @@
 // keys, mouse, touch and clipboard die while video keeps running, with nothing in any
 // log. The bundled server is 4.1; verify against that jar before touching a number here.
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -24,6 +25,14 @@ inline constexpr uint8_t MSG_UHID_INPUT = 13;
 inline constexpr uint8_t MSG_UHID_DESTROY = 14;
 inline constexpr uint8_t MSG_OPEN_HARD_KEYBOARD_SETTINGS = 15;
 inline constexpr uint8_t MSG_START_APP = 16;
+inline constexpr uint8_t MSG_INJECT_SCROLL = 3;
+
+// The device refuses anything larger, and the buffer for it is a stack array.
+inline constexpr size_t UHID_MAX_REPORT_SIZE = 64;
+// type(1) id(2 BE) size(2 BE), then the report itself.
+inline constexpr size_t UHID_INPUT_HEADER_SIZE = 5;
+// type(1) x(4) y(4) w(2) h(2) hscroll(2) vscroll(2) buttons(4)
+inline constexpr size_t INJECT_SCROLL_SIZE = 21;
 
 // Both fields are length-prefixed with a single byte, so neither can be longer. Separate
 // constants on purpose: the two share a limit, not a meaning.
@@ -45,6 +54,13 @@ inline constexpr float SCROLL_FIXED_POINT_SCALE = 8192.0f / 16.0f;
 inline void write16be(uint8_t* out, uint16_t value) {
     out[0] = static_cast<uint8_t>((value >> 8) & 0xff);
     out[1] = static_cast<uint8_t>(value & 0xff);
+}
+
+inline void write32be(uint8_t* out, uint32_t value) {
+    out[0] = static_cast<uint8_t>((value >> 24) & 0xff);
+    out[1] = static_cast<uint8_t>((value >> 16) & 0xff);
+    out[2] = static_cast<uint8_t>((value >> 8) & 0xff);
+    out[3] = static_cast<uint8_t>(value & 0xff);
 }
 
 inline uint32_t read32be(const uint8_t* in) {
@@ -103,12 +119,67 @@ inline std::vector<uint8_t> build_set_display_power(bool on) {
     return {MSG_SET_DISPLAY_POWER, static_cast<uint8_t>(on ? 1 : 0)};
 }
 
+// type(1) id(2 BE) size(2 BE) report
+//
+// This is the message every single key press and release goes through, so it writes into
+// a caller-supplied buffer instead of allocating one. Returns the number of bytes
+// written, or 0 when there is nothing to send — a report the device would refuse, or a
+// buffer too small to hold it.
+inline size_t build_uhid_input(uint8_t* out, size_t out_capacity, uint16_t id,
+                               const uint8_t* data, size_t size) {
+    if (!out || !data || size == 0 || size > UHID_MAX_REPORT_SIZE) {
+        return 0;
+    }
+    if (out_capacity < UHID_INPUT_HEADER_SIZE + size) {
+        return 0;
+    }
+
+    out[0] = MSG_UHID_INPUT;
+    write16be(out + 1, id);
+    write16be(out + 3, static_cast<uint16_t>(size));
+    std::memcpy(out + UHID_INPUT_HEADER_SIZE, data, size);
+    return UHID_INPUT_HEADER_SIZE + size;
+}
+
+// type(1) id(2 BE)
+inline std::vector<uint8_t> build_uhid_destroy(uint16_t id) {
+    std::vector<uint8_t> buf(3);
+    buf[0] = MSG_UHID_DESTROY;
+    write16be(buf.data() + 1, id);
+    return buf;
+}
+
+// type(1), no payload at all.
+inline std::vector<uint8_t> build_open_hard_keyboard_settings() {
+    return {MSG_OPEN_HARD_KEYBOARD_SETTINGS};
+}
+
 // Fixed-point scroll value, clamped to what an int16 can carry.
 inline int16_t scroll_to_fixed_point(float value) {
     const float scaled = value * SCROLL_FIXED_POINT_SCALE;
     if (scaled <= -32768.0f) return -32768;
     if (scaled >= 32767.0f) return 32767;
     return static_cast<int16_t>(scaled);
+}
+
+// type(1) x(4 BE) y(4 BE) w(2 BE) h(2 BE) hscroll(2 BE) vscroll(2 BE) buttons(4 BE)
+//
+// Negative coordinates are clamped to 0 rather than wrapping around through the unsigned
+// cast: a pointer dragged past the left or top edge would otherwise land at roughly four
+// billion on the phone. The scroll values are the fixed-point ones, which is why they go
+// out as int16 reinterpreted as unsigned.
+inline std::array<uint8_t, INJECT_SCROLL_SIZE> build_inject_scroll(
+    float x, float y, uint16_t width, uint16_t height, float hscroll, float vscroll) {
+    std::array<uint8_t, INJECT_SCROLL_SIZE> buf{};
+    buf[0] = MSG_INJECT_SCROLL;
+    write32be(buf.data() + 1, static_cast<uint32_t>(x < 0.0f ? 0.0f : x));
+    write32be(buf.data() + 5, static_cast<uint32_t>(y < 0.0f ? 0.0f : y));
+    write16be(buf.data() + 9, width);
+    write16be(buf.data() + 11, height);
+    write16be(buf.data() + 13, static_cast<uint16_t>(scroll_to_fixed_point(hscroll)));
+    write16be(buf.data() + 15, static_cast<uint16_t>(scroll_to_fixed_point(vscroll)));
+    write32be(buf.data() + 17, 0); // buttons: none held while the wheel turns
+    return buf;
 }
 
 } // namespace pm::stream::wire

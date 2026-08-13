@@ -39,6 +39,13 @@ Spiegelung zurück und schreibt das in die Statuszeile. Die Alternative wäre, d
 Systemdekorationen anzulassen und dem Zweitdisplay-Launcher des Handys das Display zu
 überlassen — also genau das Bild, das zeichnet, aber nichts starten kann.
 
+Ein **von Hand gesetztes** `virtual_display_app` geht durch dieselbe Prüfung: der Client
+fragt `pm list packages`, bevor er es dem Server nennt, und fällt bei einem Tippfehler
+oder einer deinstallierten App auf die Spiegelung zurück statt auf ein schwarzes Display.
+`START_APP` hat keine Antwort, die der Client lesen könnte — sein Rückgabewert sagt nur,
+ob die Nachricht den Steuerkanal verlassen hat. Der Wert wird beim Einlesen getrimmt,
+Leerzeichen am Zeilenende sind also harmlos.
+
 ## Voraussetzung: Server-JAR 4.1
 
 `Client/scrcpy-server.jar` und `scrcpy_download/scrcpy-server.jar` sind das
@@ -142,7 +149,12 @@ verwechselt:
 Display mit in den Schlaf, das Fenster bleibt dann schwarz. `start_stream` schickt in
 diesem Modus deshalb einmal `KEYCODE_WAKEUP`, bevor das Display gebaut wird — das holt
 das Handy an seinen Sperrbildschirm und keinen Schritt weiter, es wird keine PIN
-getippt. Wachhalten übernimmt danach `screen_off_timeout`, das Abdunkeln `m_screen_off`.
+getippt. Vorher wird gefragt (`dumpsys power | grep mInteractive`): `start_stream` ist
+nicht nur der Kaltstart, sondern auch der Rückweg aus der Auto-Pause und jeder
+Qualitätswechsel, und dort ist das Handy nachweislich wach. Das Wecken selbst tut dann
+nichts, die feste Wartezeit von 600 ms danach aber schon — und bei `screen_off` leuchtet
+das Panel kurz auf, bevor es wieder verdunkelt wird. Ist die Antwort unlesbar, wird
+geweckt wie zuvor. Wachhalten übernimmt danach `screen_off_timeout`, das Abdunkeln `m_screen_off`.
 Endzustand: ein dunkles, gesperrtes, waches Handy. Nachgemessen vom ausgeschalteten
 Handy aus: Sitzung kommt hoch, 55–60 fps bei 14–17 Mbit/s, 80 s durchgehend `Awake`,
 `isKeyguardShowing=true`, Fossify mit `visibleRequested=true`.
