@@ -26,6 +26,7 @@ public:
     bool create() override;
     void show() override;
     void hide() override;
+    void minimize() override;
     bool is_visible() const override;
     void process_messages() override;
     
@@ -58,6 +59,7 @@ public:
     void set_auto_rotate_enabled(bool enabled) override { auto_rotate_enabled_ = enabled; }
     void set_uhid_keyboard(bool enabled) override { uhid_keyboard_ = enabled; hid_held_keys_.clear(); }
     void set_auto_pause_minimized(bool enabled) override { auto_pause_minimized_ = enabled; }
+    void set_virtual_display(bool enabled) override { virtual_display_ = enabled; }
     void set_recording(bool recording) override;
     void trigger_screenshot_flash() override;
     void set_file_drop_callback(std::function<void(const std::vector<std::string>&)> cb) override { m_file_drop_cb_ = std::move(cb); }
@@ -184,6 +186,7 @@ private:
     bool auto_rotate_enabled_{true};
     bool uhid_keyboard_{false};
     bool auto_pause_minimized_{true};
+    bool virtual_display_{false};
     bool recording_{false};
     std::chrono::steady_clock::time_point recording_start_time_;
     bool screenshot_flash_{false};

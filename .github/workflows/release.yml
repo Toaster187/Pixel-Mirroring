@@ -76,8 +76,11 @@ jobs:
         run: ./Client/vcpkg/bootstrap-vcpkg.bat
         shell: cmd
 
+      # PM_REQUIRE_FOSSIFY: ein Release ohne den Launcher-APK würde still ausgeliefert,
+      # und weil der virtuelle Bildschirm standardmäßig an ist, liefe jeder Nutzer in die
+      # Rückfallebene. Hier soll der Build lieber laut scheitern.
       - name: Configure CMake
-        run: cmake --preset default -DCMAKE_BUILD_TYPE=Release
+        run: cmake --preset default -DCMAKE_BUILD_TYPE=Release -DPM_REQUIRE_FOSSIFY=ON
         working-directory: Client
 
       - name: Build Client

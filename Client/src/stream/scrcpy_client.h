@@ -16,6 +16,7 @@
 
 #include "../adb/adb_client.h"
 #include "audio_player.h"
+#include "control_messages.h"
 #include "video_decoder.h"
 
 // Forward declarations for FFmpeg/SDL (they will be included in the .cpp files)
@@ -30,16 +31,41 @@ public:
         int max_size = 0;
         int video_bit_rate = 20000000;
         int max_fps = 60;
-        bool audio = false; 
+        bool audio = false;
         bool control = true;
         bool tunnel_forward = false;
         bool lowest_brightness = true;
+
+        // EXPERIMENT (needs the bundled server 4.1): the phone does not hand over ITS
+        // picture but grows a SECOND display that exists only for this PC. The phone's
+        // own panel stays locked and a second human can keep using it meanwhile.
+        bool new_display = false;
+        int new_display_width = 0;   // 0 x 0 = same shape as the phone's own display
+        int new_display_height = 0;
+        int new_display_dpi = 0;     // 0 = scaled from the phone's own density
+        // Empty = let the phone hang its own launcher into the display. A package name
+        // switches the launcher (and the whole system furniture) off and puts that one
+        // app on it instead — see Settings::m_virtual_display_app.
+        std::string new_display_app;
+
+        // How long the PHONE may stay untouched before it falls asleep, in ms. 0 = do
+        // not touch the setting.
+        //
+        // Turning the panel off does NOT stop the phone's own idle timer: Android still
+        // believes its screen is on (SET_DISPLAY_POWER goes past it through
+        // SurfaceControl) and dozes off after its usual minute, taking the PC's display
+        // with it. The server writes this value and its own cleanup process restores the
+        // old one even if the server is killed. Writing it from here instead would leave
+        // a phone that never sleeps again whenever this client dies badly.
+        int screen_off_timeout_ms = 0;
     };
 
     // Largest HID report this client will send. A keyboard report is 8 bytes; the cap
     // only exists so the hot send path can use a stack buffer instead of allocating on
-    // every keystroke.
-    static constexpr size_t UHID_MAX_REPORT_SIZE = 64;
+    // every keystroke. Same number as wire::UHID_MAX_REPORT_SIZE, which is what actually
+    // refuses an oversized report — kept in one place so the stack buffer cannot end up
+    // smaller than what the builder is willing to write into it.
+    static constexpr size_t UHID_MAX_REPORT_SIZE = wire::UHID_MAX_REPORT_SIZE;
 
     ScrcpyClient();
     ~ScrcpyClient();
@@ -52,14 +78,30 @@ public:
     int video_height() const { return static_cast<int>(initial_height_); }
     const std::string& get_device_id() const { return config_.device_id; }
 
+    // True while this session paints into a display of its own instead of into the
+    // phone's. Everything that pokes the phone's OWN panel — brightness, unlocking,
+    // the screen watchdog — has to keep its hands still while this is true.
+    bool uses_new_display() const { return config_.new_display; }
+
+    // The package this session put on its own display, empty if none. This is the
+    // authority on the question, not the settings file: the launcher is resolved once
+    // per session (it may be installed on the fly) and only the session knows what it
+    // actually aimed at.
+    const std::string& new_display_app() const { return config_.new_display_app; }
+
     // Callbacks
     using FrameCallback = std::function<void(AVFrame* frame)>;
     using DisconnectCallback = std::function<void()>;
     using ClipboardCallback = std::function<void(const std::string& text)>;
     using ControlLostCallback = std::function<void()>;
+    // Fires from the video thread when the phone changes the picture size mid-stream
+    // (rotation, or a resize we asked for). Server 4.x announces this in the stream;
+    // before that the size was fixed for the whole session.
+    using ResolutionCallback = std::function<void(int width, int height)>;
     void set_frame_callback(FrameCallback cb);
     void set_disconnect_callback(DisconnectCallback cb);
     void set_device_clipboard_callback(ClipboardCallback cb);
+    void set_resolution_callback(ResolutionCallback cb);
 
     // Fires when the server's control thread dies. Video keeps running but nothing
     // listens any more — no keys, no mouse, no clipboard.
@@ -73,15 +115,26 @@ public:
     void inject_set_clipboard(const std::string& text);
     void inject_get_clipboard(uint8_t copy_key = 0);
 
-    // Opens and closes the phone's pull-down panels. Server 2.7 message types 5, 6
-    // and 7 — a single byte each.
+    // Opens and closes the phone's pull-down panels. Message types 5, 6 and 7 — a
+    // single byte each.
     void inject_expand_notification_panel();
     void inject_expand_settings_panel();
     void inject_collapse_panels();
 
-    // Type 10: the panel power mode itself, not just brightness. false = panel off,
-    // true = back to normal. The phone stays awake and controllable either way.
+    // Type 10 (SET_DISPLAY_POWER since server 3.0): the panel power mode itself, not
+    // just brightness. false = panel off, true = back to normal. The phone stays awake
+    // and controllable either way. Always targets the phone's OWN panel, including
+    // while the picture comes from a display of our own.
     void inject_screen_power_mode(bool on);
+
+    // Type 16, server 3.0 and later: starts an app on the display. Needed when the
+    // phone puts no usable launcher on a secondary display — without it the new
+    // display stays black and nothing can ever be started on it.
+    //
+    // Returns whether the message reached the phone. That is all the client can know:
+    // the server never answers whether the app actually came up, so a caller that needs
+    // certainty has to check the package beforehand (see start_stream).
+    bool start_app(const std::string& package_name);
 
     // True while WE are holding the panel off. Stays true across stop() if the "panel
     // back on" message never reached the phone, so a later session can still fix it.
@@ -160,12 +213,17 @@ private:
     DisconnectCallback disconnect_cb_;
     ClipboardCallback clipboard_cb_;
     ControlLostCallback control_lost_cb_;
+    ResolutionCallback resolution_cb_;
 
     // Device Info
     std::string device_name_;
     uint32_t video_codec_id_{0};
-    uint32_t initial_width_{0};
-    uint32_t initial_height_{0};
+    // Atomic because server 4.x rewrites these mid-stream: the video thread stores a
+    // new size on every session packet (rotation, resize) while the connection and UI
+    // threads read them through video_width()/video_height(). Before 4.x they were
+    // written once, before any thread existed.
+    std::atomic<uint32_t> initial_width_{0};
+    std::atomic<uint32_t> initial_height_{0};
     
     int local_port_{27183};
     

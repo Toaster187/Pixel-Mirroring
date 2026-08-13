@@ -280,6 +280,14 @@ void Win32Window::hide() {
     visible_ = false;
     update_animation_timer();
 }
+void Win32Window::minimize() {
+    // Deliberately NOT touching visible_: a folded-down window is still a window the
+    // human owns, and the tray path (hide()) must stay the only thing that says
+    // "gone". SW_MINIMIZE also fires the SIZE_MINIMIZED edge, so the auto-pause hand
+    // hears about this exactly as if the human had clicked the minimize button.
+    ShowWindow(hwnd_, SW_MINIMIZE);
+}
+
 bool Win32Window::is_visible() const { return visible_; }
 
 void Win32Window::process_messages() {
@@ -1403,6 +1411,7 @@ namespace {
     constexpr UINT ID_TOGGLE_UHID_KEYBOARD = 1014;
     constexpr UINT ID_OPEN_KEYBOARD_SETTINGS = 1015;
     constexpr UINT ID_TOGGLE_AUTO_PAUSE = 1017;
+    constexpr UINT ID_TOGGLE_VIRTUAL_DISPLAY = 1018;
 
     constexpr UINT ID_SCREENSHOT = 1101;
     constexpr UINT ID_TOGGLE_RECORDING = 1102;
@@ -1708,6 +1717,20 @@ void Win32Window::build_settings_menu_items() {
     g_menu_items.push_back({ID_TOGGLE_AUDIO, L"Ton vom Handy übertragen", true, audio_enabled_, false});
     g_menu_items.push_back({ID_TOGGLE_AUTO_PAUSE, L"Stream pausieren, wenn Fenster minimiert",
                             true, auto_pause_minimized_, false});
+    g_menu_items.push_back({ID_TOGGLE_VIRTUAL_DISPLAY, L"Eigener PC-Bildschirm (experimentell)",
+                            true, virtual_display_, false});
+    if (virtual_display_) {
+        // The whole point in one row, because the switch looks harmless and changes
+        // everything: the phone is no longer being watched, it keeps living its own life.
+        g_menu_items.push_back({0, L"Handy bleibt gesperrt und parallel benutzbar", false, false, false, true});
+        // The mode reads as "and the phone goes dark", but darkening the panel is the
+        // separate switch above, which is off by default. Naming it here is cheaper
+        // than letting the phone on the table contradict the promise on the desk.
+        if (!screen_off_) {
+            g_menu_items.push_back({0, L"Für ein dunkles Panel zusätzlich „Handy-Display komplett aus“",
+                                    false, false, false, true});
+        }
+    }
     g_menu_items.push_back({ID_TOGGLE_UHID_KEYBOARD, L"Echte USB-Tastatur am Handy", true, uhid_keyboard_, false});
     if (uhid_keyboard_) {
         if (app_state_ == AppState::STREAMING) {
@@ -1795,6 +1818,7 @@ void Win32Window::show_context_menu(POINT pt) {
                 case ID_TOGGLE_SCREEN_OFF: action = MenuAction::TOGGLE_SCREEN_OFF; break;
                 case ID_TOGGLE_AUDIO:  action = MenuAction::TOGGLE_AUDIO; break;
                 case ID_TOGGLE_AUTO_PAUSE: action = MenuAction::TOGGLE_AUTO_PAUSE_MINIMIZED; break;
+                case ID_TOGGLE_VIRTUAL_DISPLAY: action = MenuAction::TOGGLE_VIRTUAL_DISPLAY; break;
                 case ID_TOGGLE_AUTO_ROTATE: action = MenuAction::TOGGLE_AUTO_ROTATE; break;
                 case ID_TOGGLE_UHID_KEYBOARD: action = MenuAction::TOGGLE_UHID_KEYBOARD; break;
                 case ID_OPEN_KEYBOARD_SETTINGS: action = MenuAction::OPEN_KEYBOARD_SETTINGS; break;
@@ -1827,6 +1851,7 @@ void Win32Window::show_context_menu(POINT pt) {
         case ID_TOGGLE_SCREEN_OFF: action = MenuAction::TOGGLE_SCREEN_OFF; break;
         case ID_TOGGLE_AUDIO:  action = MenuAction::TOGGLE_AUDIO; break;
         case ID_TOGGLE_AUTO_PAUSE: action = MenuAction::TOGGLE_AUTO_PAUSE_MINIMIZED; break;
+        case ID_TOGGLE_VIRTUAL_DISPLAY: action = MenuAction::TOGGLE_VIRTUAL_DISPLAY; break;
         case ID_TOGGLE_AUTO_ROTATE: action = MenuAction::TOGGLE_AUTO_ROTATE; break;
         case ID_TOGGLE_UHID_KEYBOARD: action = MenuAction::TOGGLE_UHID_KEYBOARD; break;
         case ID_OPEN_KEYBOARD_SETTINGS: action = MenuAction::OPEN_KEYBOARD_SETTINGS; break;

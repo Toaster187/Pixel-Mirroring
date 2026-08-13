@@ -98,6 +98,16 @@ QualitySpec quality_spec(QualityPreset preset) {
     }
 }
 
+// virtual_display_app is the one value a user is expected to type into settings.txt by
+// hand, so it is the one that arrives with a stray space or a CR from an editor. An
+// untrimmed package name reaches the phone as an app that does not exist.
+static std::string trim(const std::string& value) {
+    const auto first = value.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return "";
+    const auto last = value.find_last_not_of(" \t\r\n");
+    return value.substr(first, last - first + 1);
+}
+
 static QualityPreset parse_quality(const std::string& value) {
     if (value == "battery") return QualityPreset::BATTERY;
     if (value == "maximum") return QualityPreset::MAXIMUM;
@@ -151,6 +161,8 @@ Settings load_settings() {
             s.m_lowest_brightness = (value == "1");
         } else if (key == "screen_off") {
             s.m_screen_off = (value == "1");
+        } else if (key == "auto_rotate") {
+            s.m_auto_rotate = (value == "1");
         } else if (key == "send_captures_to_phone") {
             s.m_send_captures_to_phone = (value == "1");
         } else if (key == "audio_enabled") {
@@ -159,6 +171,10 @@ Settings load_settings() {
             s.m_uhid_keyboard = (value == "1");
         } else if (key == "auto_pause_minimized") {
             s.m_auto_pause_minimized = (value == "1");
+        } else if (key == "virtual_display") {
+            s.m_virtual_display = (value == "1");
+        } else if (key == "virtual_display_app") {
+            s.m_virtual_display_app = trim(value);
         } else if (key == "pin") {
             s.m_pin = decrypt_pin(value);
         }
@@ -181,10 +197,13 @@ void save_settings(const Settings& s) {
     file << "compatibility_mode=" << (s.m_compatibility_mode ? "1" : "0") << "\n";
     file << "lowest_brightness=" << (s.m_lowest_brightness ? "1" : "0") << "\n";
     file << "screen_off=" << (s.m_screen_off ? "1" : "0") << "\n";
+    file << "auto_rotate=" << (s.m_auto_rotate ? "1" : "0") << "\n";
     file << "send_captures_to_phone=" << (s.m_send_captures_to_phone ? "1" : "0") << "\n";
     file << "audio_enabled=" << (s.m_audio_enabled ? "1" : "0") << "\n";
     file << "uhid_keyboard=" << (s.m_uhid_keyboard ? "1" : "0") << "\n";
     file << "auto_pause_minimized=" << (s.m_auto_pause_minimized ? "1" : "0") << "\n";
+    file << "virtual_display=" << (s.m_virtual_display ? "1" : "0") << "\n";
+    file << "virtual_display_app=" << s.m_virtual_display_app << "\n";
     file << "pin=" << encrypt_pin(s.m_pin) << "\n";
 }
 

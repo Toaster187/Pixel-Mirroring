@@ -128,14 +128,62 @@ void restore_brightness(pm::adb::AdbClient& adb, const SavedBrightness& saved) {
         "settings put system screen_brightness " + std::to_string(saved.brightness));
 }
 
-// Reads the phone's own rotation setting instead of guessing. The menu toggle must
-// always start out matching whatever the user already set on the phone — never a
-// fixed app default that quietly flips it. See issue #46.
+// Reads the phone's own rotation setting. Used both to remember where the phone stood
+// before a session touched it, and to avoid writing a value that is already there.
 bool read_auto_rotate(pm::adb::AdbClient& adb, const std::string& device_id) {
     std::string res = adb.execute_shell_command(device_id, "settings get system accelerometer_rotation");
     res.erase(0, res.find_first_not_of(" \n\r\t"));
     res.erase(res.find_last_not_of(" \n\r\t") + 1);
     return res != "0"; // treat unknown/empty output as "on", same as a stock phone default
+}
+
+// The phone's rotation switch as it stood before a session forced it, so it can be put
+// back. accelerometer_rotation is a system-wide setting: a phone left locked after the
+// PC is gone looks broken to whoever picks it up next.
+struct SavedAutoRotate {
+    int enabled = -1;      // -1 = not saved
+    std::string device_id; // which phone this belongs to
+};
+
+void restore_auto_rotate(pm::adb::AdbClient& adb, const SavedAutoRotate& saved) {
+    if (saved.device_id.empty() || saved.enabled < 0) return;
+    adb.execute_shell_command(saved.device_id,
+        "settings put system accelerometer_rotation " + std::to_string(saved.enabled));
+}
+
+// Everything a session borrowed from the phone and has to hand back. Both values are
+// touched from four threads — a background worker in start_stream writes them, the
+// screen-poll thread restores and clears them, the UI thread clears the rotation value
+// when the user flips the switch, and teardown restores what is left. Each of them
+// carries a std::string, so an unsynchronised write is a heap race and not merely a
+// stale integer: one thread was building the device id while another destroyed it.
+//
+// The lock is only ever held around the struct itself. Restoring talks to ADB, which
+// takes hundreds of milliseconds, and the UI thread must not wait for that — so every
+// caller copies out under the lock and does its ADB work afterwards.
+struct SessionPhoneState {
+    std::mutex mutex;
+    SavedBrightness brightness;
+    SavedAutoRotate auto_rotate;
+};
+
+// Hands both values back to the phone and forgets them, so nothing is restored twice.
+// Safe to call from any thread; does nothing when there is nothing to restore.
+void restore_phone_state(SessionPhoneState& state) {
+    SavedBrightness brightness;
+    SavedAutoRotate auto_rotate;
+    {
+        std::lock_guard<std::mutex> guard(state.mutex);
+        brightness = state.brightness;
+        auto_rotate = state.auto_rotate;
+        state.brightness = {};
+        state.auto_rotate = {};
+    }
+    if (brightness.brightness < 0 && auto_rotate.enabled < 0) return;
+
+    pm::adb::AdbClient restore_adb;
+    if (brightness.brightness >= 0) restore_brightness(restore_adb, brightness);
+    if (auto_rotate.enabled >= 0) restore_auto_rotate(restore_adb, auto_rotate);
 }
 
 class ScopeExit {
@@ -504,6 +552,54 @@ std::optional<std::filesystem::path> find_android_apk() {
     return std::nullopt;
 }
 
+// EXPERIMENT. The home screen for a display of our own. The phone's own launcher for
+// secondary displays renders but cannot start anything (see VIRTUAL-DISPLAY.md), so
+// this one ships with the client and is pushed over when the mode needs it.
+const char* const FOSSIFY_PACKAGE = "org.fossify.home";
+
+std::optional<std::filesystem::path> find_fossify_apk() {
+    std::filesystem::path current = path_from_utf8(pm::adb::get_executable_dir());
+    for (int i = 0; i < 4; ++i) {
+        const std::filesystem::path candidate = current / "FossifyLauncher.apk";
+        if (path_exists(candidate)) {
+            return candidate;
+        }
+        const std::filesystem::path vendored = current / "vendor" / "FossifyLauncher.apk";
+        if (path_exists(vendored)) {
+            return vendored;
+        }
+        current = current.parent_path();
+        if (current.empty()) break;
+    }
+    return std::nullopt;
+}
+
+// Installs the launcher on the phone if it is missing. Returns whether the phone has it
+// afterwards — a false is not fatal anywhere, it only means the new display shows
+// whatever the phone puts on it by itself.
+//
+// Deliberately WITHOUT the "-g" that the companion app gets. Pre-granting every runtime
+// permission is defensible for our own app, which the user installed on purpose; a
+// launcher fetched from a third-party repository has to ask the phone like any other app.
+bool ensure_fossify_installed(pm::adb::AdbClient& adb, const std::string& device_id) {
+    if (adb.is_app_installed(device_id, FOSSIFY_PACKAGE)) {
+        return true;
+    }
+
+    const auto apk = find_fossify_apk();
+    if (!apk) {
+        return false;
+    }
+
+    const std::string remote = "/data/local/tmp/FossifyLauncher.apk";
+    if (!adb.push_file(device_id, path_to_utf8(*apk), remote)) {
+        return false;
+    }
+    const bool installed = adb.install_pushed_app(device_id, remote);
+    adb.execute_shell_command(device_id, "rm -f " + remote);
+    return installed;
+}
+
 // adb prints several lines and the useful one is rarely the first ("Performing
 // Streamed Install" comes first). Pick the line that names the failure, otherwise
 // fall back to the last non-empty line.
@@ -603,7 +699,7 @@ bool start_stream(
     pm::stream::VideoRenderer& renderer,
     pm::input::InputHandler& input,
     const std::string& device_id,
-    SavedBrightness* out_saved_brightness,
+    SessionPhoneState* phone_state,
     BackgroundTasks& tasks,
     std::atomic<bool>* out_phone_auto_rotate
 );
@@ -727,7 +823,7 @@ bool run_first_time_setup(
     pm::stream::VideoRenderer& renderer,
     pm::input::InputHandler& input,
     std::atomic<bool>& should_stop,
-    SavedBrightness* out_saved_brightness,
+    SessionPhoneState* phone_state,
     BackgroundTasks& tasks,
     std::atomic<bool>* out_phone_auto_rotate
 ) {
@@ -765,21 +861,26 @@ bool run_first_time_setup(
             });
             return false;
         }
-    } else {
-        // App already installed, so no APK push — but it may still be paired to a
-        // DIFFERENT PC. The phone stores exactly one clientId and never drops it on
-        // its own; nothing in the app ever calls removePairedClient(). So once this
-        // PC's client_id.txt changes (the "Werkseinstellungen" menu deletes it), the
-        // phone answers every /connect with 403 and there is no way back.
-        //
-        // Running setup over USB means the user is physically holding the phone with
-        // a cable attached. That is enough proof of ownership to restart the pairing:
-        // clear the app's stored state so the new clientId is adopted on the next
-        // /connect. WRITE_SECURE_SETTINGS is re-granted just below, because clearing
-        // the app data revokes it too.
-        window.post_task([&window]() { window.set_status_text("Alte Kopplung wird gelöst..."); });
-        adb.execute_shell_command(usb_device->id, std::string("pm clear ") + ANDROID_PACKAGE);
     }
+
+    // The app may still be paired to a DIFFERENT PC. The phone stores exactly one
+    // clientId and never drops it on its own; nothing in the app ever calls
+    // removePairedClient(). So once this PC's client_id.txt changes (the
+    // "Werkseinstellungen" menu deletes it), the phone answers every /connect with 403
+    // and there is no way back.
+    //
+    // This runs after a FRESH install too, which it did not use to. A fresh install is
+    // not a blank app: Android's automatic backup restores the app's data, pairing and
+    // all, so a phone that was set up with this PC before comes back with a stale
+    // clientId and refuses every /connect with 403 — observed on a Pixel 9 after
+    // reinstalling the companion app.
+    //
+    // Running setup over USB means the user is physically holding the phone with a
+    // cable attached. That is enough proof of ownership to restart the pairing.
+    // WRITE_SECURE_SETTINGS is granted below, after this, because clearing the app data
+    // revokes it too.
+    window.post_task([&window]() { window.set_status_text("Alte Kopplung wird gelöst..."); });
+    adb.execute_shell_command(usb_device->id, std::string("pm clear ") + ANDROID_PACKAGE);
 
     // Skip the grant when the permission survived from an earlier setup.
     bool has_perm = adb.has_permission(usb_device->id, ANDROID_PACKAGE, "android.permission.WRITE_SECURE_SETTINGS");
@@ -796,6 +897,13 @@ bool run_first_time_setup(
     } else {
         // Permission already granted, skip.
     }
+
+    // EXPERIMENT. The home screen for the virtual display goes over here, while a cable
+    // is attached: it is 5 MB, and pushing that over WiFi at the start of the first
+    // session is a wait nobody asked for. A failure is not fatal — the mode installs it
+    // itself later if it has to (see ensure_fossify_installed).
+    window.post_task([&window]() { window.set_status_text("PC-Startbildschirm wird installiert..."); });
+    ensure_fossify_installed(adb, usb_device->id);
 
     window.post_task([&window]() { window.set_status_text("Android-App wird gestartet..."); });
     adb.start_app(usb_device->id, ANDROID_PACKAGE);
@@ -855,7 +963,7 @@ bool run_first_time_setup(
         return unlock_device_if_needed(tcp_id, &window);
     });
 
-    bool stream_ok = start_stream(window, scrcpy, renderer, input, tcp_device->id, out_saved_brightness, tasks, out_phone_auto_rotate);
+    bool stream_ok = start_stream(window, scrcpy, renderer, input, tcp_device->id, phone_state, tasks, out_phone_auto_rotate);
     bool unlock_ok = unlock_future.get();
 
     if (!unlock_ok || !stream_ok) {
@@ -897,7 +1005,7 @@ bool start_stream(
     pm::stream::VideoRenderer& renderer,
     pm::input::InputHandler& input,
     const std::string& device_id,
-    SavedBrightness* out_saved_brightness,
+    SessionPhoneState* phone_state,
     BackgroundTasks& tasks,
     std::atomic<bool>* out_phone_auto_rotate
 ) {
@@ -918,30 +1026,175 @@ bool start_stream(
     config.video_bit_rate = quality.video_bit_rate;
     config.lowest_brightness = settings.m_lowest_brightness;
     config.audio = settings.m_audio_enabled;
+    config.new_display = settings.m_virtual_display;
+    config.new_display_app = settings.m_virtual_display_app;
 
+    // EXPERIMENT. A display of our own is worthless without a home screen on it, and the
+    // one the phone brings does not work (VIRTUAL-DISPLAY.md). So the mode brings its
+    // own: put it on the phone if it is missing, and aim at it unless the human has
+    // named a different app by hand.
+    //
+    // The resolved package lives in the CONFIG and nowhere else. Writing it back into
+    // settings.txt looks tempting but is a trap: main.cpp holds a long-lived Settings
+    // copy and saves the whole file on every menu click, so the value would survive
+    // exactly until the next toggle. It is re-derived every session anyway, and
+    // ScrcpyClient::new_display_app() is what everyone else asks.
+
+    // No launcher, no usable display: the display is built without system decorations,
+    // so without an app to start on it the PC gets a black rectangle that renders but
+    // cannot open anything — and says nothing about why. Plain mirroring is worse than
+    // the experiment but better than that.
+    const auto fall_back_to_mirroring = [&window, &config](const std::string& reason) {
+        config.new_display = false;
+        config.new_display_app.clear();
+        window.post_task([&window, reason]() { window.set_status_text(reason); });
+    };
+
+    bool fossify_freshly_installed = false;
+    if (config.new_display) {
+        pm::adb::AdbClient launcher_adb;
+        if (!config.new_display_app.empty()) {
+            // A package named by hand in settings.txt goes through the same check as our
+            // own launcher. It used to skip this block entirely, so a typo or an app that
+            // had since been uninstalled produced exactly the black display the fallback
+            // exists to prevent — START_APP has no answer the client could read.
+            if (!launcher_adb.is_app_installed(device_id, config.new_display_app)) {
+                fall_back_to_mirroring("App „" + config.new_display_app +
+                    "“ ist nicht installiert — Spiegelung statt eigenem PC-Bildschirm.");
+            }
+        } else {
+            const bool had_it = launcher_adb.is_app_installed(device_id, FOSSIFY_PACKAGE);
+            if (!had_it) {
+                window.post_task([&window]() {
+                    window.set_status_text("Startbildschirm für den PC wird installiert...");
+                });
+            }
+            if (ensure_fossify_installed(launcher_adb, device_id)) {
+                fossify_freshly_installed = !had_it;
+                config.new_display_app = FOSSIFY_PACKAGE;
+            } else {
+                fall_back_to_mirroring(
+                    "Startbildschirm fehlt — Spiegelung statt eigenem PC-Bildschirm.");
+            }
+        }
+    }
+
+    // EXPERIMENT. With a display of our own the phone's OWN panel is none of our
+    // business any more: it stays dark and locked, and a second human may be holding
+    // it. So every hand that reaches for that panel — dimming it, waking it, watching
+    // whether it went dark — has to stay down while this is on.
+    const bool own_display = config.new_display;
+
+    // One hour of the phone lying untouched. Long enough that nobody trips over it in a
+    // session, short enough that a cleanup that never ran does not leave a phone which
+    // refuses to sleep forever. Only in this mode: while the phone's own picture is
+    // being mirrored, its sleep is the human's business and none of ours.
+    if (own_display) {
+        config.screen_off_timeout_ms = 60 * 60 * 1000;
+    }
+
+    // A dozing phone takes the virtual display into sleep with it: WindowManager hangs a
+    // Display-off token on our display too, the launcher stops rendering and the PC shows
+    // nothing but black. So the device is woken before the display is built.
+    //
+    // Waking is NOT unlocking. KEYCODE_WAKEUP brings the phone out of doze to its lock
+    // screen and no further; no PIN is typed, and the phone stays locked. What keeps it
+    // awake afterwards is screen_off_timeout above, and m_screen_off darkens the panel
+    // again once the stream stands — the end state is a dark, locked, awake phone.
+    //
+    // Asked before poking. WAKEUP does nothing to a phone that is already awake, but the
+    // 600 ms afterwards run regardless — and start_stream is not only the cold path: the
+    // auto-pause resume and every quality change come through here with a phone that
+    // provably never slept, because the heartbeat kept running and screen_off_timeout is
+    // still parked at an hour. One dumpsys round trip replaces a fixed wait on every
+    // resume, and with m_screen_off it also stops the panel from flashing bright before
+    // it is darkened again.
+    //
+    // Only "mInteractive": the wakefulness lines carry an mWakefulnessChanging=false that
+    // would read as asleep. A phone whose panel WE darkened still answers true, which is
+    // correct — it is awake. Anything unreadable counts as asleep and gets the old
+    // behaviour, so a changed dumpsys format loses the shortcut and not the wake.
+    if (own_display) {
+        pm::adb::AdbClient wake_adb;
+        const std::string power = wake_adb.execute_shell_command(
+            device_id, "dumpsys power | grep -iE 'mInteractive|mIsInteractive'");
+        const bool already_awake = !power.empty() && power.find("false") == std::string::npos;
+        if (!already_awake) {
+            wake_adb.execute_shell_command(device_id, "input keyevent 224");
+            std::this_thread::sleep_for(std::chrono::milliseconds(600));
+        }
+    }
+
+    // Also runs with a display of our own, and on purpose: turning the panel off goes
+    // past Android's own idea of the screen, so anything that lights it again — the
+    // lock screen after a poke, a notification — comes back at full brightness. The
+    // dimming underneath makes that moment harmless instead of blinding.
     if (settings.m_lowest_brightness) {
         // Remember the phone's current brightness, then turn it all the way down.
         // This only dims via ADB; m_screen_off below is what really turns the panel off.
         std::string dev_id = device_id;
-        tasks.run([dev_id, out_saved_brightness]() {
+        auto dim_now = [dev_id, phone_state]() {
             pm::adb::AdbClient adb;
-            if (out_saved_brightness && out_saved_brightness->brightness < 0) {
-                *out_saved_brightness = read_brightness(adb, dev_id);
+            bool need_read = false;
+            if (phone_state) {
+                std::lock_guard<std::mutex> guard(phone_state->mutex);
+                need_read = phone_state->brightness.brightness < 0;
+            }
+            if (need_read) {
+                // Reading takes an ADB round trip, so it happens outside the lock and
+                // the result is only accepted if nobody else got there first.
+                SavedBrightness current = read_brightness(adb, dev_id);
+                std::lock_guard<std::mutex> guard(phone_state->mutex);
+                if (phone_state->brightness.brightness < 0) {
+                    phone_state->brightness = std::move(current);
+                }
             }
             adb.execute_shell_command(dev_id, "settings put system screen_brightness_mode 0; settings put system screen_brightness 0");
-        });
+        };
+
+        // These two fight each other. Writing a brightness makes Android re-evaluate the
+        // panel and hand it a fresh power mode, which switches back ON the panel that
+        // SET_DISPLAY_POWER had just darkened behind Android's back. As a background job
+        // it landed in either order, and roughly every second start came up with a bright
+        // phone. With a display of our own the dimming therefore happens HERE, before the
+        // stream exists, so the power-off further down always has the last word. While
+        // mirroring nothing turns the panel off, so that path is left as it was.
+        if (own_display) {
+            dim_now();
+        } else {
+            tasks.run(dim_now);
+        }
     }
 
-    // Reads the phone's rotation setting, never writes it — the menu toggle has to
-    // start out exactly where the phone already was (see issue #46).
+    // The rotation switch is forced to the saved preference for the length of the
+    // session, in BOTH modes — mirroring and a display of our own. Default is locked:
+    // a picture on a PC monitor must not turn sideways because somebody moved the phone
+    // on the desk, and every connect used to leave it at whatever the phone said.
+    //
+    // This supersedes the read-only rule from issue #46: the menu toggle is our own
+    // persisted setting now, not a mirror of the phone's. What survives of #46 is that
+    // the phone is never changed for good — its own value is remembered here and put
+    // back at teardown.
     {
         std::string dev_id = device_id;
+        const bool wanted = settings.m_auto_rotate;
         pm::window::IWindow* w = &window;
-        tasks.run([dev_id, out_phone_auto_rotate, w]() {
+        tasks.run([dev_id, wanted, out_phone_auto_rotate, phone_state, w]() {
             pm::adb::AdbClient adb;
-            bool enabled = read_auto_rotate(adb, dev_id);
-            if (out_phone_auto_rotate) *out_phone_auto_rotate = enabled;
-            w->post_task([w, enabled]() { w->set_auto_rotate_enabled(enabled); });
+            const bool was_enabled = read_auto_rotate(adb, dev_id);
+            if (phone_state) {
+                std::lock_guard<std::mutex> guard(phone_state->mutex);
+                if (phone_state->auto_rotate.enabled < 0) {
+                    phone_state->auto_rotate.device_id = dev_id;
+                    phone_state->auto_rotate.enabled = was_enabled ? 1 : 0;
+                }
+            }
+            if (was_enabled != wanted) {
+                adb.execute_shell_command(dev_id,
+                    std::string("settings put system accelerometer_rotation ") + (wanted ? "1" : "0"));
+            }
+            if (out_phone_auto_rotate) *out_phone_auto_rotate = wanted;
+            w->post_task([w, wanted]() { w->set_auto_rotate_enabled(wanted); });
         });
     }
 
@@ -954,6 +1207,17 @@ bool start_stream(
     }
     scrcpy.set_frame_callback([&](AVFrame* frame) {
         renderer.render_frame(frame);
+    });
+
+    // Server 4.x says out loud when the picture changes shape mid-stream. Without this
+    // the mouse keeps aiming at the old ruler and the window keeps the old proportions
+    // — a turned display would put every poke in the wrong place.
+    scrcpy.set_resolution_callback([&window, &input](int new_w, int new_h) {
+        input.set_device_size(new_w, new_h);
+        window.post_task([&window, new_w, new_h]() {
+            window.set_aspect_ratio((double)new_w / (double)new_h);
+            window.set_orientation(new_w > new_h);
+        });
     });
     window.set_render_callback([&](SDL_Renderer* renderer_ptr, int x, int y, int w, int h) {
         renderer.paint(renderer_ptr, x, y, w, h);
@@ -985,6 +1249,13 @@ bool start_stream(
     // power mode is handled here and not next to the brightness code above. The
     // "else" is not dead weight: it catches a session whose "panel back on" message
     // never reached the phone.
+    //
+    // With a display of our own this switch is not a nicety, it is THE way to keep the
+    // phone dark. Measured on a Pixel 9 with Android 17: once the phone itself falls
+    // asleep, WindowManager puts our display to sleep with it and the picture stops —
+    // server 4.x's keep_active only wakes it every four seconds and cannot hold it.
+    // Turning the PANEL off instead leaves the phone awake, and our display alive,
+    // while its screen stays black.
     if (settings.m_screen_off) {
         scrcpy.inject_screen_power_mode(false);
     } else if (scrcpy.screen_forced_off()) {
@@ -1010,11 +1281,59 @@ bool start_stream(
         }
     }
 
-    window.post_task([&window, w, h, uhid_keyboard]() {
+    // With the phone's own launcher switched off, nothing would ever appear on the new
+    // display — the app has to be pushed onto it by hand, and only once the control
+    // hole is open. Without decorations and without an app there is no picture at all.
+    // Reads the CONFIG, not the settings from further up: the launcher may have been
+    // filled in only a moment ago, after those were read.
+    bool launcher_started = true;
+    if (own_display && !config.new_display_app.empty()) {
+        // A refused message means nothing will ever appear on this display. Reported in
+        // the status line further down instead of here, which the closing post_task would
+        // overwrite a moment later.
+        launcher_started = scrcpy.start_app(config.new_display_app);
+
+        // On its very first run the launcher asks whether it may become the phone's ONE
+        // home screen. That is a question about the whole phone, which nobody here has
+        // answered, and its dialog would sit on the display blocking everything. BACK is
+        // that dialog's "no". It is sent only right after a fresh install: on a home
+        // screen a back press does nothing, so a wrong guess costs nothing, but sending
+        // it every session would still mean poking at something we cannot see.
+        if (fossify_freshly_installed) {
+            constexpr int ANDROID_KEYCODE_BACK = 4;
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+            scrcpy.inject_keycode(0, ANDROID_KEYCODE_BACK);
+            scrcpy.inject_keycode(1, ANDROID_KEYCODE_BACK);
+        }
+    }
+
+    // Read the size again instead of handing on the snapshot from before the UHID probe
+    // and the launcher start: seconds pass in between — an ADB round trip, and after a
+    // fresh Fossify install a deliberate three-second wait. A session packet arriving in
+    // that window has already moved the window and the input ruler on, and re-posting the
+    // old numbers would put the wrong aspect ratio back for the rest of the session, with
+    // the mouse aiming at a picture that is no longer that shape. In this mode that is not
+    // theoretical: the new display can still settle after START_APP. The values are
+    // atomics for exactly this.
+    int cur_w = scrcpy.video_width();
+    int cur_h = scrcpy.video_height();
+    if (cur_w <= 0 || cur_h <= 0) {
+        cur_w = w;
+        cur_h = h;
+    } else if (cur_w != w || cur_h != h) {
+        input.set_device_size(cur_w, cur_h);
+    }
+
+    window.post_task([&window, cur_w, cur_h, uhid_keyboard, own_display, launcher_started]() {
         window.set_uhid_keyboard(uhid_keyboard);
-        window.set_aspect_ratio((double)w / (double)h);
-        window.set_orientation(w > h);
+        window.set_aspect_ratio((double)cur_w / (double)cur_h);
+        window.set_orientation(cur_w > cur_h);
         window.set_app_state(pm::window::AppState::STREAMING);
+        if (own_display) {
+            window.set_status_text(launcher_started
+                ? "Eigener PC-Bildschirm aktiv — Handy bleibt gesperrt."
+                : "Startbildschirm konnte nicht gestartet werden — Bildschirm bleibt leer.");
+        }
     });
     return true;
 }
@@ -1127,6 +1446,13 @@ DeviceLockState read_lock_state(pm::adb::AdbClient& adb, const std::string& devi
 bool unlock_device_if_needed(const std::string& device_id, pm::window::IWindow* window, bool user_requested) {
     pm::Settings settings = pm::load_settings();
     if (settings.m_pin.empty()) return true;
+
+    // EXPERIMENT. With a display of our own the client keeps its hands off the phone's
+    // lock. An automatic unlock was built here once, because a locked phone leaves the
+    // launcher on the new display unresponsive — but it proved unreliable in practice,
+    // and typing a PIN into a phone nobody is looking at is the wrong kind of clever.
+    // Clicking "Handy entsperren" by hand still does exactly that.
+    if (settings.m_virtual_display && !user_requested) return true;
 
     pm::adb::AdbClient adb;
 
@@ -1245,10 +1571,16 @@ static int app_main() {
     window->set_capture_send_to_phone(initial_settings.m_send_captures_to_phone);
     window->set_audio_enabled(initial_settings.m_audio_enabled);
     window->set_uhid_keyboard(initial_settings.m_uhid_keyboard);
+    window->set_virtual_display(initial_settings.m_virtual_display);
     window->set_auto_pause_minimized(initial_settings.m_auto_pause_minimized);
+    window->set_auto_rotate_enabled(initial_settings.m_auto_rotate);
 
-    SavedBrightness saved_brightness; // the phone's brightness before we dimmed it
-    std::atomic<bool> phone_auto_rotate{true}; // Mirrors the phone's OWN rotation switch, never sets a default
+    // The phone's brightness and rotation switch as they stood before this session, both
+    // behind one lock — four threads reach for them (see SessionPhoneState).
+    SessionPhoneState phone_state;
+    // The wanted rotation state, seeded from the saved setting and re-applied on every
+    // connect — not read back off the phone.
+    std::atomic<bool> phone_auto_rotate{initial_settings.m_auto_rotate};
     std::atomic<bool> should_stop{false};
     pm::stream::ScrcpyClient scrcpy;
     scrcpy.set_disconnect_callback([w = window.get()]() {
@@ -1294,6 +1626,14 @@ static int app_main() {
     std::atomic<bool> pause_wanted{false};   // newest desired state from the window
     std::atomic<bool> auto_paused{false};    // true only while WE are holding the stream down
     std::atomic<bool> pause_worker_busy{false};
+    // A session that is ending folds the window down itself when the phone is switched
+    // off in virtual-display mode, and ShowWindow(SW_MINIMIZE) fires the very same
+    // SIZE_MINIMIZED edge a human minimize does. Without this the pause worker can win
+    // the race against the teardown, latch auto_paused on a stream it stopped itself and
+    // never lower it again — and a latched auto_paused keeps the heartbeat loop alive
+    // forever, so the client goes on holding ADB open on a phone the user just switched
+    // off. Raised before the window task is posted, lowered when a connect starts.
+    std::atomic<bool> pause_suspended{false};
     // The phone this session belongs to, remembered so resuming needs no discovery.
     std::string paused_device_id;
     std::mutex paused_device_mutex;
@@ -1553,6 +1893,25 @@ static int app_main() {
                     : "Handy-Display bleibt an.");
                 break;
             }
+            case pm::window::MenuAction::TOGGLE_VIRTUAL_DISPLAY: {
+                // EXPERIMENT. The server only ever reads this when it is born, so the
+                // stream has to die and come back — the same path a quality change takes.
+                current_settings.m_virtual_display = !current_settings.m_virtual_display;
+                pm::save_settings(current_settings);
+                window->set_virtual_display(current_settings.m_virtual_display);
+                // Only promise a rebuild if one is actually going to happen.
+                // apply_quality_now() declines while nothing streams or a recording is
+                // running, and says so itself in the latter case.
+                if (!scrcpy.is_running()) {
+                    window->set_status_text("Wirkt bei der nächsten Verbindung.");
+                } else {
+                    window->set_status_text(current_settings.m_virtual_display
+                        ? "Eigener PC-Bildschirm wird aufgebaut..."
+                        : "Zurück zur Spiegelung des Handy-Bildschirms...");
+                }
+                if (apply_quality_now) apply_quality_now();
+                break;
+            }
             case pm::window::MenuAction::EXPAND_NOTIFICATION_PANEL:
                 scrcpy.inject_expand_notification_panel();
                 break;
@@ -1635,12 +1994,20 @@ static int app_main() {
                 break;
             }
             case pm::window::MenuAction::TOGGLE_AUTO_ROTATE: {
-                // This is NOT stored in Settings — it only ever mirrors and flips the
-                // phone's own accelerometer_rotation value (issue #46). The toggle is
-                // synced from the phone on connect (see start_stream), and a click here
-                // is the only thing that ever changes it.
+                // Persisted like every other switch and re-applied on every connect (see
+                // start_stream), so a locked rotation stays locked across sessions.
+                //
+                // A click here is a deliberate change to the phone, so the remembered
+                // pre-session value is dropped: teardown must not undo what the user just
+                // asked for.
                 bool new_value = !phone_auto_rotate.load();
                 phone_auto_rotate = new_value;
+                current_settings.m_auto_rotate = new_value;
+                pm::save_settings(current_settings);
+                {
+                    std::lock_guard<std::mutex> guard(phone_state.mutex);
+                    phone_state.auto_rotate = {};
+                }
                 window->set_auto_rotate_enabled(new_value);
                 run_on_device([new_value](const std::string& device_id) {
                     pm::adb::AdbClient adb;
@@ -1837,6 +2204,25 @@ static int app_main() {
         input.handle_pointer(action, x, y, w, h);
     });
     window->set_key_callback([&](int action, int keycode) {
+        constexpr int ANDROID_KEYCODE_HOME = 3;
+
+        // On a display of our own with system decorations switched off, no home screen
+        // is registered — the phone answers HOME with nothing at all, so whoever opened
+        // an app is stuck in it. Here the key does what it means: put the launcher back
+        // on the display.
+        //
+        // Press AND release are swallowed together. The launcher is only started on the
+        // press (otherwise it starts twice per keystroke), but letting the release
+        // through would send the phone an ACTION_UP for a key it never saw pressed —
+        // the same asymmetry swallowed_shortcuts_ exists to prevent on the UHID path.
+        if (keycode == ANDROID_KEYCODE_HOME && scrcpy.uses_new_display()) {
+            const std::string& launcher = scrcpy.new_display_app();
+            if (!launcher.empty()) {
+                if (action == 0) scrcpy.start_app(launcher);
+                return;
+            }
+        }
+
         // action: 0 = down, 1 = up.
         if (action == 0) {
             input.handle_key_down(keycode);
@@ -1970,7 +2356,7 @@ static int app_main() {
             scrcpy.stop();
             if (should_stop) return;
             if (start_stream(*window, scrcpy, renderer, input, device_id,
-                             &saved_brightness, background_tasks, &phone_auto_rotate)) {
+                             &phone_state, background_tasks, &phone_auto_rotate)) {
                 start_heartbeat(device_id.substr(0, device_id.rfind(':')));
             }
         });
@@ -1988,6 +2374,13 @@ static int app_main() {
             // The bound only exists so somebody hammering the minimize button cannot keep
             // this worker spinning forever.
             for (int rounds = 0; rounds < 8 && !should_stop; ++rounds) {
+                // The session is being torn down and the window folded down as part of
+                // it. Neither direction applies any more: there is nothing to pause, and
+                // resuming would rebuild a stream on a phone that is switched off.
+                if (pause_suspended.load()) {
+                    auto_paused.store(false);
+                    return;
+                }
                 const bool want_paused = pause_wanted.load();
                 if (want_paused == auto_paused.load()) return;
 
@@ -2032,7 +2425,7 @@ static int app_main() {
                 // there is nothing to discover and no pairing to negotiate.
                 const bool resumed = !device_id.empty() &&
                     start_stream(*window, scrcpy, renderer, input, device_id,
-                                 &saved_brightness, background_tasks, &phone_auto_rotate);
+                                 &phone_state, background_tasks, &phone_auto_rotate);
 
                 // Lower the flag only now: while the stream was being rebuilt the
                 // heartbeat still had to count as wanted.
@@ -2064,7 +2457,14 @@ static int app_main() {
 
         screen_poll_thread = std::thread([&, poll_ip, device_id]() {
             pm::adb::AdbClient poll_adb;
+            // Seeded from the FIRST reading instead of assuming "on". Assuming it would
+            // make a phone that was already asleep when the session started look like one
+            // that had just been switched off, and the teardown below would fire before
+            // the first frame ever arrived — which is exactly what starting the client at
+            // a dark phone does. Only a genuine on → off change during a live session is
+            // the human saying "I am done".
             bool last_screen_on = true;
+            bool have_first_reading = false;
             int clip_poll_counter = 0;
             int adb_poll_counter = 0;
 
@@ -2077,6 +2477,14 @@ static int app_main() {
                 bool screen_on = true; // assume on unless a check proves otherwise
                 bool phone_answered = false;
 
+                // The screen is watched in EVERY mode, including with a display of our
+                // own — pressing the side button is how someone says "I am done".
+                //
+                // This does not misfire on the panel WE darken: SET_DISPLAY_POWER goes
+                // straight to SurfaceControl, so Android still reports the phone as
+                // interactive and the checks below stay quiet. Only a phone that really
+                // fell asleep reads as not interactive, and by then the display of our
+                // own is dead anyway.
                 if (scrcpy.is_running()) {
                     clip_poll_counter++;
                     if (clip_poll_counter >= 3) { // every ~1.5s
@@ -2117,29 +2525,66 @@ static int app_main() {
                     }
                 }
 
-                if (screen_on != last_screen_on) {
+                if (!have_first_reading) {
+                    // First round only records where the phone stands, it never acts.
+                    have_first_reading = true;
                     last_screen_on = screen_on;
-                    
-                    if (!screen_on) {
-                        // Screen went off: hand the phone its original brightness back.
-                        if (saved_brightness.brightness >= 0) {
-                            pm::adb::AdbClient restore_adb;
-                            restore_brightness(restore_adb, saved_brightness);
-                            saved_brightness = {}; // already restored, do not restore twice
-                        }
-                        
-                        window->post_task([&]() {
+                } else if (screen_on != last_screen_on) {
+                    last_screen_on = screen_on;
+
+                    // A stream that is not running cannot be "ended by the human": this
+                    // is either a connect still on its way or a teardown already under
+                    // way, and tearing down again would only drop the window into SETUP
+                    // behind its back.
+                    if (!screen_on && scrcpy.is_running()) {
+                        // Screen went off: hand the phone its original brightness and
+                        // rotation switch back — from here on it is a phone in someone's
+                        // hand again, not a screen for the PC. A later reconnect re-applies
+                        // both from start_stream. Restoring clears the values, so teardown
+                        // does not do it a second time.
+                        restore_phone_state(phone_state);
+
+                        // Before the window is touched, never after: the minimize below
+                        // fires the auto-pause edge on the UI thread, and that thread may
+                        // get there before this one reaches scrcpy.stop().
+                        pause_suspended.store(true);
+
+                        const bool own_display_session = scrcpy.uses_new_display();
+                        window->post_task([&, own_display_session]() {
                             // Hide to the tray rather than showing a black window.
+                            //
+                            // With a display of our own the window folds down to the
+                            // taskbar instead. The tray route exists because a mirrored
+                            // picture without a phone screen is a black hole nobody wants
+                            // to stare at — but this window carried a desktop of its own,
+                            // and someone who switches the phone off expects to find it
+                            // where every other window goes, not behind a tray icon.
                             if (window->is_visible()) {
-                                window->hide();
-                                if (tray) tray->show();
+                                if (own_display_session) {
+                                    window->minimize();
+                                } else {
+                                    window->hide();
+                                    if (tray) tray->show();
+                                }
                             }
                             window->set_app_state(pm::window::AppState::SETUP);
+                            // Without this the line from the running session stays up and
+                            // claims the PC display is still active, right next to a
+                            // "Verbinden" button.
+                            window->set_status_text("Handy ausgeschaltet — Verbindung beendet.");
                         });
                         // Tear the stream down so the phone stops encoding for nobody.
                         if (scrcpy.is_running()) {
                             scrcpy.stop();
                         }
+                        // The pause state belonged to the session and must not outlive
+                        // it. auto_paused is what the heartbeat loop counts as "still
+                        // wanted", so leaving it raised here would keep POST /heartbeat
+                        // going at a switched-off phone and hold its ADB open past the
+                        // 60s watchdog — the attack surface that is supposed to close
+                        // the moment the PC is gone.
+                        pause_wanted.store(false);
+                        auto_paused.store(false);
                         break; // fully disconnected — this thread has nothing left to poll
                     }
                 }
@@ -2165,8 +2610,10 @@ static int app_main() {
         connection_thread = std::thread([&, automatic]() {
             connection_running = true;
             ScopeExit mark_done([&]() { connection_running = false; });
-            // A fresh connection supersedes whatever the pause state was holding.
+            // A fresh connection supersedes whatever the pause state was holding, and
+            // re-arms the auto-pause that a previous teardown switched off.
             auto_paused.store(false);
+            pause_suspended.store(false);
             pm::adb::AdbClient adb;
 
             // The adb server has to be up before anything else can talk to a device.
@@ -2176,7 +2623,7 @@ static int app_main() {
             SetupState setup_state = load_setup_state();
             if (!setup_state.configured) {
                 if (run_first_time_setup(adb, *window, scrcpy, renderer, input, should_stop,
-                                         &saved_brightness, background_tasks, &phone_auto_rotate)) {
+                                         &phone_state, background_tasks, &phone_auto_rotate)) {
                     auto new_state = load_setup_state();
                     if (new_state.configured && !new_state.device_ip.empty()) {
                         start_heartbeat(new_state.device_ip);
@@ -2208,7 +2655,7 @@ static int app_main() {
                         w->set_status_text("Nicht über WLAN erreichbar — richte per USB neu ein...");
                     });
                     if (run_first_time_setup(adb, *window, scrcpy, renderer, input, should_stop,
-                                             &saved_brightness, background_tasks, &phone_auto_rotate)) {
+                                             &phone_state, background_tasks, &phone_auto_rotate)) {
                         auto new_state = load_setup_state();
                         if (new_state.configured && !new_state.device_ip.empty()) {
                             start_heartbeat(new_state.device_ip);
@@ -2239,7 +2686,7 @@ static int app_main() {
             });
 
             bool stream_ok = start_stream(*window, scrcpy, renderer, input, tcp_device->id,
-                                          &saved_brightness, background_tasks, &phone_auto_rotate);
+                                          &phone_state, background_tasks, &phone_auto_rotate);
             bool unlock_ok = unlock_future.get();
 
             if (!unlock_ok) {
@@ -2276,6 +2723,10 @@ static int app_main() {
 
     // Fires on the UI thread, so it may only record the desired state and hand off.
     window->set_minimize_callback([&](bool minimized) {
+        // Not a human at the minimize button but our own teardown folding the window
+        // down (see pause_suspended). Recording a wish here would pause a session that
+        // is already ending.
+        if (pause_suspended.load()) return;
         if (!auto_pause_enabled.load()) {
             // Auto-pause was switched off mid-session while the stream was already
             // paused: resume anyway instead of leaving it paused forever.
@@ -2300,12 +2751,6 @@ static int app_main() {
     should_stop = true;
     stop_screen_poll = true;
     stop_heartbeat = true;
-
-    // Restore the phone's brightness while ADB is still connected.
-    if (saved_brightness.brightness >= 0) {
-        pm::adb::AdbClient restore_adb;
-        restore_brightness(restore_adb, saved_brightness);
-    }
 
     scrcpy.stop();
 
@@ -2332,6 +2777,12 @@ static int app_main() {
     if (heartbeat_thread.joinable()) heartbeat_thread.join();
     // Every background worker must finish before the objects it captured go away.
     background_tasks.join_all();
+
+    // Only now: brightness and the rotation switch belonged to the session, and the
+    // worker that remembers them runs in that very pool. Restoring before the join once
+    // meant restoring a value the worker had not written yet, and the phone stayed
+    // locked. ADB is still up at this point — the phone's watchdog needs 60s of silence.
+    restore_phone_state(phone_state);
 
     if (tray) tray->hide();
 

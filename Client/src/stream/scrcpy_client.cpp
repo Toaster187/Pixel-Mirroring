@@ -1,4 +1,5 @@
 #include "scrcpy_client.h"
+#include "control_messages.h"
 #include "../adb/adb_client.h"
 #include "../util/encoding.h"
 #include <algorithm>
@@ -32,6 +33,11 @@ extern "C" {
 
 namespace pm::stream {
 
+// Message types, packet flags and the byte layouts that go with them live in the nested
+// namespace pm::stream::wire (control_messages.h). They are pinned by
+// pm_control_messages_test, which is the only thing standing between a wrong offset and
+// a silently dead control thread.
+
 namespace {
 void log_stream_event(const std::string& message) {
     std::cout << message << std::endl;
@@ -63,14 +69,10 @@ void log_stream_event(const std::string& message) {
 constexpr int AUDIO_SAMPLE_RATE = 48000;
 constexpr int AUDIO_CHANNELS = 2;
 
-// Control message types of the scrcpy protocol we speak beyond the old handful.
-constexpr uint8_t MSG_UHID_CREATE = 12;
-constexpr uint8_t MSG_UHID_INPUT = 13;
-constexpr uint8_t MSG_UHID_DESTROY = 14;
-constexpr uint8_t MSG_OPEN_HARD_KEYBOARD_SETTINGS = 15;
-
-// The name is length-prefixed with a single byte, so it cannot be longer than this.
-constexpr size_t UHID_MAX_NAME_LENGTH = 127;
+// Which server jar lies next to the exe. The server compares this word against its own
+// and refuses to start on any mismatch, so it may only ever be changed together with
+// Client/scrcpy-server.jar — and with every wire format that moved in between.
+constexpr const char* SERVER_VERSION = "4.1";
 
 // Probes whether the device will let anything open /dev/uhid. It opens the node
 // EXACTLY the way the server does: read AND write in one descriptor (3<>). The server
@@ -167,6 +169,10 @@ void ScrcpyClient::set_device_clipboard_callback(ClipboardCallback cb) {
 
 void ScrcpyClient::set_control_lost_callback(ControlLostCallback cb) {
     control_lost_cb_ = std::move(cb);
+}
+
+void ScrcpyClient::set_resolution_callback(ResolutionCallback cb) {
+    resolution_cb_ = std::move(cb);
 }
 
 bool ScrcpyClient::start(const Config& config) {
@@ -398,7 +404,8 @@ bool ScrcpyClient::start_server_process() {
     }
     
     // 2. Start server
-    std::string cmd = "CLASSPATH=/data/local/tmp/scrcpy-server.jar app_process / com.genymobile.scrcpy.Server 2.7 ";
+    std::string cmd = "CLASSPATH=/data/local/tmp/scrcpy-server.jar app_process / com.genymobile.scrcpy.Server ";
+    cmd += std::string(SERVER_VERSION) + " ";
     cmd += "scid=" + scid_ + " ";
     cmd += "log_level=info ";
     cmd += "audio=" + std::string(config_.audio ? "true" : "false") + " ";
@@ -416,10 +423,57 @@ bool ScrcpyClient::start_server_process() {
     cmd += "clipboard_autosync=true ";
     cmd += "send_dummy_byte=false ";
     cmd += "send_device_meta=false ";
-    cmd += "send_codec_meta=true ";
+    // Renamed in server 4.0. It now covers the codec id AND the session packets that
+    // carry the picture size, which used to sit in a fixed header (see read_metadata).
+    cmd += "send_stream_meta=true ";
     cmd += "send_frame_meta=true ";
     cmd += "tunnel_forward=" + std::string(config_.tunnel_forward ? "true" : "false") + " ";
-    
+
+    if (config_.screen_off_timeout_ms > 0) {
+        cmd += "screen_off_timeout=" + std::to_string(config_.screen_off_timeout_ms) + " ";
+    }
+
+    if (config_.new_display) {
+        // An empty value means "same size and same density as the phone's own display",
+        // which is the only shape the rest of the client already knows how to handle.
+        // Numbers are only appended when somebody really asked for them.
+        std::string display_arg;
+        if (config_.new_display_width > 0 && config_.new_display_height > 0) {
+            display_arg = std::to_string(config_.new_display_width) + "x" +
+                          std::to_string(config_.new_display_height);
+        }
+        if (config_.new_display_dpi > 0) {
+            display_arg += "/" + std::to_string(config_.new_display_dpi);
+        }
+        cmd += "new_display=" + display_arg + " ";
+
+        // Without this the on-screen keyboard appears on the PHONE while someone types
+        // into the PC — on a phone meant to stay dark, nobody finds it again. "local"
+        // pins the keyboard to OUR display.
+        cmd += "display_ime_policy=local ";
+
+        // A display of our own follows the PHONE into sleep. The moment the phone is
+        // locked, WindowManager adds a "Display-off" sleep token to our display as well,
+        // the launcher stops rendering and every input lands in the dark — the very
+        // thing this mode exists to avoid. Verified on a Pixel 9 with Android 17:
+        //   Add SleepToken: tag=Display-off, displayId=0   (phone locked)
+        //   Add SleepToken: tag=Display-off, displayId=17  (ours, 200 ms later)
+        // FLAG_ALWAYS_UNLOCKED only bypasses the lock screen, not sleep. That is what
+        // keep_active is for: the server calls PowerManager.userActivity() on OUR display
+        // alone. It exists only since server 4.x, which is why this client is on 4.1.
+        cmd += "keep_active=true ";
+
+        // A Pixel 9 on Android 17 DOES put its launcher for secondary displays on the
+        // new display, but that launcher is useless: the home screen stays empty and
+        // tapping an app in its drawer starts nothing, without even a refusal in the log.
+        // Naming an app leaves the whole system furniture out and gives that one app the
+        // display to itself. This is the route upstream documents for phones whose
+        // secondary-display launcher is no good.
+        if (!config_.new_display_app.empty()) {
+            cmd += "vd_system_decorations=false ";
+        }
+    }
+
     log_stream_event("[Scrcpy] Executing server: " + cmd);
 
     // app_process blocks for as long as the server lives, so it runs in a child process
@@ -575,30 +629,53 @@ bool ScrcpyClient::connect_sockets() {
 }
 
 bool ScrcpyClient::read_metadata() {
-    // Codec info: 12 bytes — codec id, width, height.
-    uint8_t codec_meta[12];
-    int total_bytes_read = 0;
-    while (total_bytes_read < 12) {
-        int bytes_read = recv(video_socket_, (char*)codec_meta + total_bytes_read, 12 - total_bytes_read, 0);
-        if (bytes_read == 0) {
-            std::cerr << "[Scrcpy] Connection closed while reading codec meta" << std::endl;
-            return false;
+    // No threads are running yet, so running_ is still false and recv_all() would
+    // refuse every byte. This one reads on its own until the buffer is full.
+    auto read_blocking = [this](uint8_t* out, int length, const char* what) {
+        int total = 0;
+        while (total < length) {
+            const int got = recv(video_socket_, (char*)out + total, length - total, 0);
+            if (got <= 0) {
+                std::cerr << "[Scrcpy] Failed to read " << what << std::endl;
+                return false;
+            }
+            total += got;
         }
-        if (bytes_read < 0) {
-            std::cerr << "[Scrcpy] Failed to read codec meta" << std::endl;
-            return false;
-        }
-        total_bytes_read += bytes_read;
+        return true;
+    };
+
+    // Since server 4.0 the video header is the codec id ALONE. The picture size used to
+    // sit right behind it in the same header; now it rides in the stream as a session
+    // packet — the first one arrives before any picture, and a new one after every
+    // rotation or resize (see video_thread_loop).
+    uint8_t codec_id_buf[4];
+    if (!read_blocking(codec_id_buf, 4, "video codec id")) {
+        return false;
     }
-    
-    video_codec_id_ = (codec_meta[0] << 24) | (codec_meta[1] << 16) | (codec_meta[2] << 8) | codec_meta[3];
-    initial_width_ = (codec_meta[4] << 24) | (codec_meta[5] << 16) | (codec_meta[6] << 8) | codec_meta[7];
-    initial_height_ = (codec_meta[8] << 24) | (codec_meta[9] << 16) | (codec_meta[10] << 8) | codec_meta[11];
-    
+    video_codec_id_ = (codec_id_buf[0] << 24) | (codec_id_buf[1] << 16)
+                    | (codec_id_buf[2] << 8) | codec_id_buf[3];
+
+    uint8_t session_meta[12];
+    if (!read_blocking(session_meta, 12, "session meta")) {
+        return false;
+    }
+    // The top bit says "this is a session packet, not a picture". If it is missing we
+    // are reading a picture header as if it were a size and everything after is rubbish
+    // — that is exactly what a wrong server version looks like, so say so and stop.
+    if ((session_meta[0] & 0x80) == 0) {
+        std::cerr << "[Scrcpy] Expected a session packet, got something else — "
+                     "server/client version mismatch?" << std::endl;
+        return false;
+    }
+    initial_width_ = (session_meta[4] << 24) | (session_meta[5] << 16)
+                   | (session_meta[6] << 8) | session_meta[7];
+    initial_height_ = (session_meta[8] << 24) | (session_meta[9] << 16)
+                    | (session_meta[10] << 8) | session_meta[11];
+
     {
         std::ostringstream oss;
         oss << "[Scrcpy] Metadata codec=" << video_codec_id_
-            << " size=" << initial_width_ << "x" << initial_height_
+            << " size=" << initial_width_.load() << "x" << initial_height_.load()
             << " max_size=" << config_.max_size
             << " bit_rate=" << config_.video_bit_rate
             << " max_fps=" << config_.max_fps;
@@ -705,6 +782,31 @@ void ScrcpyClient::video_thread_loop() {
 
         uint64_t pts = 0;
         for (int i = 0; i < 8; ++i) pts = (pts << 8) | header[i];
+
+        if ((pts & wire::PACKET_FLAG_SESSION) != 0) {
+            // A session packet IS the whole message — no picture follows it. Its twelve
+            // bytes are flags, width, height. It arrives once before the first picture
+            // and again whenever the display turns or is resized under us.
+            const uint32_t new_width = (header[4] << 24) | (header[5] << 16)
+                                     | (header[6] << 8) | header[7];
+            const uint32_t new_height = (header[8] << 24) | (header[9] << 16)
+                                      | (header[10] << 8) | header[11];
+            if (new_width > 0 && new_height > 0 &&
+                (new_width != initial_width_.load() || new_height != initial_height_.load())) {
+                initial_width_.store(new_width);
+                initial_height_.store(new_height);
+                std::ostringstream oss;
+                oss << "[Scrcpy] Display resized to " << new_width << "x" << new_height;
+                log_stream_event(oss.str());
+                // Whoever maps mouse pokes onto the phone is now working with the wrong
+                // ruler until they hear this.
+                if (resolution_cb_) {
+                    resolution_cb_(static_cast<int>(new_width), static_cast<int>(new_height));
+                }
+            }
+            continue;
+        }
+
         uint32_t size = (header[8] << 24) | (header[9] << 16) | (header[10] << 8) | header[11];
 
         // Reject implausible packet sizes before allocating for them.
@@ -713,8 +815,7 @@ void ScrcpyClient::video_thread_loop() {
             break;
         }
 
-        constexpr uint64_t SC_PACKET_FLAG_CONFIG = 1ULL << 63;
-        bool is_config = (pts & SC_PACKET_FLAG_CONFIG) != 0;
+        bool is_config = (pts & wire::PACKET_FLAG_CONFIG) != 0;
 
         packet_data.resize(size);
         if (!recv_all((char*)packet_data.data(), size)) break;
@@ -888,24 +989,10 @@ void ScrcpyClient::inject_keycode(int action, int keycode) {
 }
 
 void ScrcpyClient::inject_scroll(float x, float y, int w, int h, float hscroll, float vscroll) {
-    uint8_t buf[21] = {0};
-    buf[0] = 3; // SC_CONTROL_MSG_TYPE_INJECT_SCROLL_EVENT
+    const auto buf = wire::build_inject_scroll(
+        x, y, static_cast<uint16_t>(w), static_cast<uint16_t>(h), hscroll, vscroll);
 
-    write32(buf + 1, static_cast<uint32_t>((std::max)(0.0f, x)));
-    write32(buf + 5, static_cast<uint32_t>((std::max)(0.0f, y)));
-    write16(buf + 9, static_cast<uint16_t>(w));
-    write16(buf + 11, static_cast<uint16_t>(h));
-
-    // fixed-point: float * 8192, clamped to int16 range
-    const float hs_scaled = (std::max)(-32768.0f, (std::min)(hscroll * 8192.0f, 32767.0f));
-    const float vs_scaled = (std::max)(-32768.0f, (std::min)(vscroll * 8192.0f, 32767.0f));
-    write16(buf + 13, static_cast<uint16_t>(static_cast<int16_t>(hs_scaled)));
-    write16(buf + 15, static_cast<uint16_t>(static_cast<int16_t>(vs_scaled)));
-
-    // buttons = 0 (4 bytes)
-    write32(buf + 17, 0);
-
-    send_control(buf, sizeof(buf));
+    send_control(buf.data(), buf.size());
 }
 
 void ScrcpyClient::inject_text(const std::string& text) {
@@ -950,12 +1037,10 @@ void ScrcpyClient::inject_collapse_panels() {
 }
 
 void ScrcpyClient::inject_screen_power_mode(bool on) {
-    uint8_t buf[2];
-    buf[0] = 10;             // SC_CONTROL_MSG_TYPE_SET_SCREEN_POWER_MODE
-    buf[1] = on ? 2 : 0;     // 2 = POWER_MODE_NORMAL, 0 = POWER_MODE_OFF
+    const std::vector<uint8_t> buf = wire::build_set_display_power(on);
     // Only record the panel as forced off once the message really went out — a message
     // that never arrived changed nothing on the device.
-    if (send_control(buf, sizeof(buf))) {
+    if (send_control(buf.data(), buf.size())) {
         screen_forced_off_.store(!on);
         log_stream_event(on ? "[Scrcpy] Device screen power back to normal"
                             : "[Scrcpy] Device screen power turned off");
@@ -1007,24 +1092,10 @@ bool ScrcpyClient::device_supports_uhid() {
 
 bool ScrcpyClient::uhid_create(uint16_t id, const std::string& name,
                                const uint8_t* report_desc, size_t desc_size) {
-    if (!report_desc || desc_size == 0 || desc_size > 0xFFFF) {
+    const std::vector<uint8_t> buf = wire::build_uhid_create(id, name, report_desc, desc_size);
+    if (buf.empty()) {
         return false;
     }
-
-    // The name is length-prefixed with a single byte. A longer one would have to be
-    // truncated, and cutting UTF-8 mid-sequence corrupts umlauts — so send no name at
-    // all instead and let the device fall back to plain "scrcpy".
-    const size_t name_length = name.size() <= UHID_MAX_NAME_LENGTH ? name.size() : 0;
-
-    std::vector<uint8_t> buf(4 + name_length + 2 + desc_size);
-    buf[0] = MSG_UHID_CREATE;
-    write16(buf.data() + 1, id);
-    buf[3] = static_cast<uint8_t>(name_length);
-    if (name_length > 0) {
-        std::memcpy(buf.data() + 4, name.data(), name_length);
-    }
-    write16(buf.data() + 4 + name_length, static_cast<uint16_t>(desc_size));
-    std::memcpy(buf.data() + 6 + name_length, report_desc, desc_size);
 
     if (!send_control(buf.data(), buf.size())) {
         log_stream_event("[Scrcpy] Could not send UHID_CREATE, keyboard stays virtual-less");
@@ -1039,33 +1110,40 @@ bool ScrcpyClient::uhid_create(uint16_t id, const std::string& name,
 }
 
 void ScrcpyClient::uhid_input(uint16_t id, const uint8_t* data, size_t size) {
-    if (!data || size == 0 || size > UHID_MAX_REPORT_SIZE) {
+    // Every key press and release goes through here, so this path must not allocate.
+    uint8_t buf[wire::UHID_INPUT_HEADER_SIZE + UHID_MAX_REPORT_SIZE];
+    const size_t length = wire::build_uhid_input(buf, sizeof(buf), id, data, size);
+    if (length == 0) {
         return;
     }
 
-    // Every key press and release goes through here, so this path must not allocate.
-    uint8_t buf[5 + UHID_MAX_REPORT_SIZE];
-    buf[0] = MSG_UHID_INPUT;
-    write16(buf + 1, id);
-    write16(buf + 3, static_cast<uint16_t>(size));
-    std::memcpy(buf + 5, data, size);
-
-    send_control(buf, 5 + size);
+    send_control(buf, length);
 }
 
 void ScrcpyClient::uhid_destroy(uint16_t id) {
-    uint8_t buf[3];
-    buf[0] = MSG_UHID_DESTROY;
-    write16(buf + 1, id);
+    const std::vector<uint8_t> buf = wire::build_uhid_destroy(id);
 
-    send_control(buf, sizeof(buf));
+    send_control(buf.data(), buf.size());
 }
 
 void ScrcpyClient::open_hard_keyboard_settings() {
-    uint8_t buf[1];
-    buf[0] = MSG_OPEN_HARD_KEYBOARD_SETTINGS;
+    const std::vector<uint8_t> buf = wire::build_open_hard_keyboard_settings();
 
-    send_control(buf, sizeof(buf));
+    send_control(buf.data(), buf.size());
+}
+
+bool ScrcpyClient::start_app(const std::string& package_name) {
+    const std::vector<uint8_t> buf = wire::build_start_app(package_name);
+    if (buf.empty()) {
+        return false;
+    }
+
+    if (!send_control(buf.data(), buf.size())) {
+        log_stream_event("[Scrcpy] Could not ask phone to start app " + package_name);
+        return false;
+    }
+    log_stream_event("[Scrcpy] Asked phone to start app " + package_name);
+    return true;
 }
 
 } // namespace pm::stream

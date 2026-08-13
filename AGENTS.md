@@ -34,7 +34,9 @@ Pixel-Mirroring/
 |-- Client/               C++20 Desktop Client
 |   |-- CMakeLists.txt    Build-Config (CMake 3.25+, vcpkg-Toolchain)
 |   |-- vendor/platform-tools/  Gebündelte Android Platform Tools für das Desktop-Paket
-|   |-- scrcpy-server.jar Unveränderte scrcpy-Server-JAR, wird zur Laufzeit aufs Gerät gepusht
+|   |-- scrcpy-server.jar Unveränderte scrcpy-Server-JAR (v4.1), wird zur Laufzeit aufs Gerät gepusht
+|   |-- vendor/FossifyLauncher.apk  Startbildschirm für den Virtual-Display-Modus,
+|   |                     wird beim Bauen geladen, nicht eingecheckt
 |   |-- tests/            Eigenständige Selbsttests (nacktes main() + check(), kein Framework)
 |   |-- vcpkg/            Git-Submodul (kompletter vcpkg-Checkout) — riesig, aus Suchen ausklammern
 |   `-- src/
@@ -343,6 +345,17 @@ jedem Textfeld korrekt dargestellt werden. Damit das dauerhaft hält, gilt:
   - **Beim Fortsetzen gibt es den kalten Weg als Rückfall.** Scheitert `start_stream()`
     beim Wiederherstellen - Handy eingeschlafen, WLAN gewechselt, ADB doch abgeschaltet -
     ruft der Task `start_connection(true)` auf, statt ein totes Fenster stehen zu lassen.
+  - **Ein Abbau, der das Fenster selbst faltet, darf nicht wie ein Mensch aussehen.**
+    Wird das Handy im Virtual-Display-Modus ausgeschaltet, minimiert der Screen-Poll-
+    Thread das Fenster - und `ShowWindow(SW_MINIMIZE)` feuert dieselbe
+    `SIZE_MINIMIZED`-Flanke. `pause_suspended` wird deshalb **vor** dem geposteten Task
+    gesetzt; Minimize-Callback und Abgleich-Task steigen daran aus, und der Poll-Thread
+    setzt `pause_wanted`/`auto_paused` nach seinem `scrcpy.stop()` zurück. Sonst kann der
+    Task das Rennen gewinnen, `auto_paused` an einem selbst gestoppten Stream einrasten
+    lassen und nie wieder senken - und `auto_paused` ist genau das, was die
+    Heartbeat-Schleife als "noch gewollt" zählt: der Client hielte ADB an einem
+    ausgeschalteten Handy über den 60-s-Watchdog hinaus offen. `start_connection` senkt
+    die Sperre wieder.
 - **Optionale UHID-Tastatur** (`Settings::m_uhid_keyboard`, standardmäßig aus): statt
   `inject_text` hängt eine virtuelle USB-HID-Tastatur am Handy (scrcpy-Control-Messages
   12 `UHID_CREATE`, 13 `UHID_INPUT`, 14 `UHID_DESTROY` sowie 15
@@ -358,10 +371,61 @@ jedem Textfeld korrekt dargestellt werden. Damit das dauerhaft hält, gilt:
     Subshell ist nötig, weil ein fehlgeschlagenes `exec` die Shell beendet, in der es
     steht. Das Ergebnis wird pro `device_id` gemerkt, damit Neuverbindungen und
     Qualitäts-Neustarts keinen weiteren `adb`-Prozess kosten.
-  - **Das Wire-Format hängt an der Server-Version.** Der gebündelte Server 2.7 erwartet
-    `type(1) id(2 BE) name_len(1) name rd_size(2 BE) rd_data`; das `name`-Feld gibt es vor
-    2.7 nicht und spätere scrcpy-Versionen ergänzen Vendor-/Product-IDs. Vor Änderungen
-    gegen die mitgelieferte JAR prüfen.
+  - **Das Wire-Format hängt an der Server-Version.** Der gebündelte Server 4.1 erwartet
+    `type(1) id(2 BE) vendor(2 BE) product(2 BE) name_len(1) name rd_size(2 BE) rd_data`;
+    Vendor und Product sind bei Tastatur und Maus 0, echte IDs tragen nur Gamepads.
+    Server 2.7 hatte die beiden Felder noch nicht, das `name`-Feld gibt es vor 2.7 gar
+    nicht. Vor Änderungen gegen die mitgelieferte JAR prüfen — die vollständigen
+    Vergleiche 2.7 → 3.3.4 (Steuerkanal) und 3.3.4 → 4.1 (Videostrom) stehen in
+    `VIRTUAL-DISPLAY.md`.
+
+### Virtuelles Display (experimentell, standardmäßig an)
+
+Statt der Handy-Spiegelung legt der Server ein eigenes Display für den PC an
+(`Settings::m_virtual_display`, Branch `virtual-display-dev-`). Drei Punkte tragen das
+Ganze, alle drei teuer gelernt — die vollständige Aufzeichnung samt Messwerten steht in
+`VIRTUAL-DISPLAY.md`:
+
+- **Der Zweitdisplay-Launcher des Handys taugt nichts.** Auf einem Pixel 9 unter
+  Android 17 öffnet sich seine App-Übersicht, ein Tippen auf eine App startet aber
+  nichts — nicht einmal eine Ablehnung landet im Log. Deshalb liefert der Modus den
+  Fossify Launcher mit, startet ihn per `START_APP` mit `vd_system_decorations=false`
+  und installiert ihn bei der Ersteinrichtung über USB. Die Installation läuft über
+  `push_file` + `install_pushed_app`, bewusst **nicht** über `install_app` mit `-g`.
+  Fehlt der Launcher ganz, fällt `start_stream` auf die gewöhnliche Spiegelung zurück
+  und sagt das auch — ein Display, das zeichnet, aber nichts starten kann, ist schlimmer.
+  Ein von Hand in `virtual_display_app` benanntes Paket geht durch dieselbe Prüfung
+  (`is_app_installed`), bevor es dem Server genannt wird: `START_APP` hat keine Antwort,
+  die der Client lesen könnte — sein `bool` sagt nur, dass die Steuernachricht raus ist —
+  und ein Tippfehler ergäbe genau dieses schwarze Display.
+  Das ausgewählte Paket steht nur in der Sitzungs-`Config` und wird **nie** nach
+  `settings.txt` zurückgeschrieben; `main.cpp` hält eine langlebige `Settings`-Kopie und
+  schreibt bei jedem Menüklick die ganze Datei, ein dort abgelegter Wert überlebte also
+  nur bis zum nächsten Schalter. Maßgeblich ist `ScrcpyClient::new_display_app()`.
+- **Fossify steht unter GPL-3.0-only.** `Client/vendor/licenses/` enthält Lizenztext und
+  Quellenangebot (mit dem genauen Upstream-Commit); `CMakeLists.txt` legt beides neben
+  die EXE und ins Installationspaket. Sie müssen überall mitreisen, wo die APK mitreist.
+  Die APK selbst wird beim Bauen geladen und **von Hand** gegen ihre Prüfsumme geprüft —
+  nicht über `file(DOWNLOAD ... EXPECTED_HASH)`, das bei Abweichung den ganzen
+  Configure-Lauf abbricht und die schlechte Datei liegen lässt, wo der nächste Lauf sie
+  ungeprüft ausliefert. Für Entwickler-Builds bleibt eine fehlende APK eine Warnung,
+  `release.yml` konfiguriert aber mit `-DPM_REQUIRE_FOSSIFY=ON` und macht daraus einen
+  `FATAL_ERROR`: der virtuelle Bildschirm ist standardmäßig an, ein Installationspaket
+  ohne Launcher schickte also jeden Nutzer in die Rückfallebene — bei grünem Build.
+  F-Droid räumt überholte Versionen von `/repo/` ins `/archive/`, deshalb stehen in
+  `PM_FOSSIFY_URLS` beide Adressen; die `/repo/`-URL wird mit der nächsten Version
+  zwangsläufig 404.
+- **Das Gerät darf nicht einschlafen.** Das Abschalten des Panels über
+  `SET_DISPLAY_POWER` hält Androids Untätigkeitsuhr nicht an, das Handy schlief nach
+  einer Minute ein und nahm das virtuelle Display mit; `keep_active` weckt es nur alle
+  4 s und kann es nicht halten. Erst `screen_off_timeout` löst das, und der Server setzt
+  den alten Wert selbst zurück. Die Helligkeitsabsenkung muss hier **vor** dem Stream
+  laufen, weil das Schreiben einer Helligkeit das gerade abgedunkelte Panel wieder
+  einschaltet.
+- **`pm clear` auf die Companion-App läuft auch nach einer frischen Installation.**
+  Androids automatische Datensicherung stellt die App-Daten samt Kopplung wieder her, so
+  dass eine neu installierte App mit veralteter `clientId` zurückkommt und jedes
+  `/connect` mit 403 beantwortet.
   - **Pro Taste darf genau ein Pfad feuern.** `Win32Window::uhid_keyboard_` schaltet um:
     ist er an, gehen `WM_KEYDOWN`/`WM_KEYUP`/`WM_SYSKEYDOWN`/`WM_SYSKEYUP` an
     `send_raw_key()` und `WM_CHAR` wird verworfen; ist er aus, bleibt alles wie vorher.
@@ -417,16 +481,30 @@ Windows-Client mit MSVC (gleicher Compiler, gleiches `/utf-8` wie die Auslieferu
 und lässt `ctest` laufen - ohne Packaging. `release.yml` baut zusätzlich die
 Installer und nur auf `v*`-Tags.
 
-### Der einzige automatische Test auf der Client-Seite
+### Die automatischen Tests auf der Client-Seite
 
-`Client/tests/hid_keyboard_test.cpp` - ein eigenständiges `main()` mit
-handgeschriebenem `check()` (bewusst **kein** `assert`: die Auslieferung ist ein
-Release-Build mit `NDEBUG`, dort wäre jede Zusicherung wegoptimiert). Er nagelt die
-Scancode-Tabelle, die AltGr-Phantom-Strg-Maske, Extended-vs-Numpad-Paare und den
-6-Tasten-Rollover fest. Ziel `pm_hid_keyboard_test` (Option `PM_BUILD_TESTS`,
-standardmäßig an), hängt nur an `hid_keyboard.cpp` und wird weder installiert noch
-paketiert. Kein Test-Framework hinzufügen - für weitere Absicherungen dasselbe
-Muster benutzen.
+Beide sind eigenständige `main()` mit handgeschriebenem `check()` (bewusst **kein**
+`assert`: die Auslieferung ist ein Release-Build mit `NDEBUG`, dort wäre jede
+Zusicherung wegoptimiert). Kein Test-Framework hinzufügen - für weitere Absicherungen
+dasselbe Muster benutzen.
+
+`Client/tests/hid_keyboard_test.cpp` nagelt die Scancode-Tabelle, die
+AltGr-Phantom-Strg-Maske, Extended-vs-Numpad-Paare und den 6-Tasten-Rollover fest. Ziel
+`pm_hid_keyboard_test` (Option `PM_BUILD_TESTS`, standardmäßig an), hängt nur an
+`hid_keyboard.cpp`.
+
+`Client/tests/control_messages_test.cpp` nagelt die scrcpy-Wire-Layouts aus
+`src/stream/control_messages.h` gegen den gebündelten Server 4.1 fest: `UHID_CREATE`
+samt des Vendor-/Product-Blocks, den 2.7 nicht hatte, `START_APP`, die Boolean-Nutzlast
+von `SET_DISPLAY_POWER`, die Flag-Bits für Session/Config/Key-Frame, das Auslesen der
+Bildgröße aus dem Session-Paket und die ÷16-Scroll-Skalierung. Das ist der eine Teil des
+Protokolls, dessen Fehler **still** sind - ein falscher `UHID_CREATE`-Offset reißt den
+kompletten Control-Thread des Servers ab, während das Bild weiterläuft. Genau deshalb
+liegt das Byte-Bauen in einem Header ohne Socket- und FFmpeg-Abhängigkeit, der Test
+linkt gar nichts, und `ScrcpyClient` ruft dieselben Funktionen auf - die festgenagelten
+Bytes sind also die ausgelieferten Bytes. Ziel `pm_control_messages_test`.
+
+Beide werden weder installiert noch paketiert, und CI lässt sie laufen.
 
 ### Was sich nicht automatisiert testen lässt
 

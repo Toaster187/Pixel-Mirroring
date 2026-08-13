@@ -26,10 +26,16 @@ void InputHandler::window_to_device(int wx, int wy, int ww, int wh, int* dx, int
         return;
     }
 
-    *dx = (wx * m_device_width) / ww;
-    *dy = (wy * m_device_height) / wh;
-    *dx = (std::max)(0, (std::min)(*dx, m_device_width - 1));
-    *dy = (std::max)(0, (std::min)(*dy, m_device_height - 1));
+    // Read each size exactly once. A rotation lands on these members from the video
+    // thread, and scaling by one width while clamping against another would put the
+    // poke outside the picture it was just mapped into.
+    const int dev_w = m_device_width;
+    const int dev_h = m_device_height;
+
+    *dx = (wx * dev_w) / ww;
+    *dy = (wy * dev_h) / wh;
+    *dx = (std::max)(0, (std::min)(*dx, dev_w - 1));
+    *dy = (std::max)(0, (std::min)(*dy, dev_h - 1));
 }
 
 void InputHandler::handle_pointer(pm::window::PointerAction action, int x, int y, int viewport_w, int viewport_h) {
