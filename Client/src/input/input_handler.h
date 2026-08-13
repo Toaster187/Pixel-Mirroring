@@ -48,7 +48,13 @@ public:
     void reset_uhid_keyboard();
 
 private:
-    void window_to_device(int wx, int wy, int ww, int wh, int* dx, int* dy);
+    // Maps a window coordinate onto the device and reports the device size the mapping
+    // used. Callers MUST put that size on the wire rather than reading the members
+    // again: the server scales x/w and y/h, so a size re-read after this call pairs a
+    // coordinate clamped to the old picture with the new picture's dimensions and the
+    // poke lands far outside the display.
+    void window_to_device(int wx, int wy, int ww, int wh, int* dx, int* dy,
+                          int* dev_w, int* dev_h);
     void send_hid_report(const uint8_t* report);
 
     pm::stream::ScrcpyClient* client_;

@@ -383,6 +383,12 @@ Ganze, alle drei teuer gelernt — die vollständige Aufzeichnung samt Messwerte
   `push_file` + `install_pushed_app`, bewusst **nicht** über `install_app` mit `-g`.
   Fehlt der Launcher ganz, fällt `start_stream` auf die gewöhnliche Spiegelung zurück
   und sagt das auch — ein Display, das zeichnet, aber nichts starten kann, ist schlimmer.
+  Deshalb muss alles, was „eigenes Display?" entscheidet, die **Sitzung** fragen
+  (`ScrcpyClient::uses_new_display()`), nie `Settings::m_virtual_display`: die
+  Einstellung sagt nur, was gewollt war. `unlock_device_if_needed` läuft parallel zu
+  `start_stream` und kennt das Ergebnis noch nicht, bekommt die Erwartung deshalb
+  übergeben; beide Verbindungswege rufen es erneut, wenn die Sitzung zurückgefallen ist
+  — sonst spiegelt der PC einen Sperrbildschirm, den niemand entsperrt.
   Das ausgewählte Paket steht nur in der Sitzungs-`Config` und wird **nie** nach
   `settings.txt` zurückgeschrieben; `main.cpp` hält eine langlebige `Settings`-Kopie und
   schreibt bei jedem Menüklick die ganze Datei, ein dort abgelegter Wert überlebte also

@@ -138,6 +138,14 @@ verwechselt:
   Sperrbildschirm erscheint. Ein automatisches Entsperren gab es hier zwischenzeitlich,
   es ist wieder entfernt.
 
+  `unlock_device_if_needed` fragt dafür die **Sitzung**, nicht
+  `Settings::m_virtual_display`: die Einstellung sagt nur, was gewollt war, und
+  `start_stream` fällt ohne Launcher auf gewöhnliche Spiegelung zurück. Weil das
+  Entsparren parallel zu `start_stream` läuft, kennt es das Ergebnis noch nicht — es
+  bekommt die Erwartung übergeben, und beide Verbindungswege rufen es ein zweites Mal,
+  wenn die Sitzung anders ausgegangen ist. Sonst spiegelt der PC einen Sperrbildschirm,
+  den niemand entsperrt.
+
 **Geweckt wird trotzdem, entsperrt nicht.** Ein dösendes Gerät nimmt das virtuelle
 Display mit in den Schlaf, das Fenster bleibt dann schwarz. `start_stream` schickt in
 diesem Modus deshalb einmal `KEYCODE_WAKEUP`, bevor das Display gebaut wird — das holt

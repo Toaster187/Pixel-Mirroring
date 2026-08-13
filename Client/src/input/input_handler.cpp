@@ -19,28 +19,32 @@ void InputHandler::set_device_size(int width, int height) {
     }
 }
 
-void InputHandler::window_to_device(int wx, int wy, int ww, int wh, int* dx, int* dy) {
+void InputHandler::window_to_device(int wx, int wy, int ww, int wh, int* dx, int* dy,
+                                    int* dev_w, int* dev_h) {
+    // Read each size exactly once, and hand the very same numbers back to the caller.
+    // A rotation lands on these members from the video thread, so scaling by one width
+    // while clamping — or transmitting — another would put the poke outside the picture
+    // it was just mapped into.
+    const int w = m_device_width;
+    const int h = m_device_height;
+    *dev_w = w;
+    *dev_h = h;
+
     if (ww <= 0 || wh <= 0) {
         *dx = 0;
         *dy = 0;
         return;
     }
 
-    // Read each size exactly once. A rotation lands on these members from the video
-    // thread, and scaling by one width while clamping against another would put the
-    // poke outside the picture it was just mapped into.
-    const int dev_w = m_device_width;
-    const int dev_h = m_device_height;
-
-    *dx = (wx * dev_w) / ww;
-    *dy = (wy * dev_h) / wh;
-    *dx = (std::max)(0, (std::min)(*dx, dev_w - 1));
-    *dy = (std::max)(0, (std::min)(*dy, dev_h - 1));
+    *dx = (wx * w) / ww;
+    *dy = (wy * h) / wh;
+    *dx = (std::max)(0, (std::min)(*dx, w - 1));
+    *dy = (std::max)(0, (std::min)(*dy, h - 1));
 }
 
 void InputHandler::handle_pointer(pm::window::PointerAction action, int x, int y, int viewport_w, int viewport_h) {
-    int dx, dy;
-    window_to_device(x, y, viewport_w, viewport_h, &dx, &dy);
+    int dx, dy, dev_w, dev_h;
+    window_to_device(x, y, viewport_w, viewport_h, &dx, &dy, &dev_w, &dev_h);
 
     int scrcpy_action = 2;
     if (action == pm::window::PointerAction::DOWN) {
@@ -49,25 +53,25 @@ void InputHandler::handle_pointer(pm::window::PointerAction action, int x, int y
         scrcpy_action = 1;
     }
 
-    client_->inject_touch(scrcpy_action, dx, dy, m_device_width, m_device_height);
+    client_->inject_touch(scrcpy_action, dx, dy, dev_w, dev_h);
 }
 
 void InputHandler::handle_mouse_down(int x, int y, int ww, int wh) {
-    int dx, dy;
-    window_to_device(x, y, ww, wh, &dx, &dy);
-    client_->inject_touch(0, dx, dy, m_device_width, m_device_height); // ACTION_DOWN
+    int dx, dy, dev_w, dev_h;
+    window_to_device(x, y, ww, wh, &dx, &dy, &dev_w, &dev_h);
+    client_->inject_touch(0, dx, dy, dev_w, dev_h); // ACTION_DOWN
 }
 
 void InputHandler::handle_mouse_up(int x, int y, int ww, int wh) {
-    int dx, dy;
-    window_to_device(x, y, ww, wh, &dx, &dy);
-    client_->inject_touch(1, dx, dy, m_device_width, m_device_height); // ACTION_UP
+    int dx, dy, dev_w, dev_h;
+    window_to_device(x, y, ww, wh, &dx, &dy, &dev_w, &dev_h);
+    client_->inject_touch(1, dx, dy, dev_w, dev_h); // ACTION_UP
 }
 
 void InputHandler::handle_mouse_move(int x, int y, int ww, int wh) {
-    int dx, dy;
-    window_to_device(x, y, ww, wh, &dx, &dy);
-    client_->inject_touch(2, dx, dy, m_device_width, m_device_height); // ACTION_MOVE
+    int dx, dy, dev_w, dev_h;
+    window_to_device(x, y, ww, wh, &dx, &dy, &dev_w, &dev_h);
+    client_->inject_touch(2, dx, dy, dev_w, dev_h); // ACTION_MOVE
 }
 
 void InputHandler::handle_key_down(int keycode) {
@@ -80,9 +84,9 @@ void InputHandler::handle_key_up(int keycode) {
 
 void InputHandler::handle_scroll(int x, int y, int ww, int wh, float hscroll, float vscroll) {
     // Convert window coordinates to device coordinates before forwarding the scroll.
-    int dx, dy;
-    window_to_device(x, y, ww, wh, &dx, &dy);
-    client_->inject_scroll(static_cast<float>(dx), static_cast<float>(dy), m_device_width, m_device_height, hscroll, vscroll);
+    int dx, dy, dev_w, dev_h;
+    window_to_device(x, y, ww, wh, &dx, &dy, &dev_w, &dev_h);
+    client_->inject_scroll(static_cast<float>(dx), static_cast<float>(dy), dev_w, dev_h, hscroll, vscroll);
 }
 
 void InputHandler::handle_text(const std::string& text) {

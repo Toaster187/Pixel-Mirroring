@@ -543,10 +543,19 @@ std::optional<std::filesystem::path> find_fossify_apk() {
 // afterwards — a false is not fatal anywhere, it only means the new display shows
 // whatever the phone puts on it by itself.
 //
+// on_installing fires immediately before the 5 MB push, so a caller can put that on
+// screen without asking the phone a second time whether the package is there: every
+// is_app_installed costs two adb children (it resolves the foreground user first).
+// *out_freshly_installed reports whether THIS call is what put the launcher there.
+//
 // Deliberately WITHOUT the "-g" that the companion app gets. Pre-granting every runtime
 // permission is defensible for our own app, which the user installed on purpose; a
 // launcher fetched from a third-party repository has to ask the phone like any other app.
-bool ensure_fossify_installed(pm::adb::AdbClient& adb, const std::string& device_id) {
+bool ensure_fossify_installed(pm::adb::AdbClient& adb, const std::string& device_id,
+                              const std::function<void()>& on_installing = {},
+                              bool* out_freshly_installed = nullptr) {
+    if (out_freshly_installed) *out_freshly_installed = false;
+
     if (adb.is_app_installed(device_id, FOSSIFY_PACKAGE)) {
         return true;
     }
@@ -556,12 +565,15 @@ bool ensure_fossify_installed(pm::adb::AdbClient& adb, const std::string& device
         return false;
     }
 
+    if (on_installing) on_installing();
+
     const std::string remote = "/data/local/tmp/FossifyLauncher.apk";
     if (!adb.push_file(device_id, path_to_utf8(*apk), remote)) {
         return false;
     }
     const bool installed = adb.install_pushed_app(device_id, remote);
     adb.execute_shell_command(device_id, "rm -f " + remote);
+    if (installed && out_freshly_installed) *out_freshly_installed = true;
     return installed;
 }
 
@@ -695,8 +707,13 @@ void show_uhid_unavailable_message(pm::window::IWindow& window) {
 
 // user_requested = the user pressed Ctrl+U or used the menu. Then we type the PIN
 // even when the lock state cannot be read; on automatic connects we stay quiet.
+//
+// own_display_session = this session paints into a display of its own, so the phone's
+// lock is none of our business. The connect paths run the unlock beside start_stream
+// and cannot know this yet, so they pass what they expect and run it again if the
+// session turned out differently — see the calls below.
 bool unlock_device_if_needed(const std::string& device_id, pm::window::IWindow* window = nullptr,
-                             bool user_requested = false);
+                             bool user_requested = false, bool own_display_session = false);
 
 std::optional<pm::adb::Device> wait_for_usb_authorization(
     pm::adb::AdbClient& adb,
@@ -869,8 +886,17 @@ bool run_first_time_setup(
     // is attached: it is 5 MB, and pushing that over WiFi at the start of the first
     // session is a wait nobody asked for. A failure is not fatal — the mode installs it
     // itself later if it has to (see ensure_fossify_installed).
-    window.post_task([&window]() { window.set_status_text("PC-Startbildschirm wird installiert..."); });
-    ensure_fossify_installed(adb, usb_device->id);
+    //
+    // Only when the mode is actually switched on. start_stream has exactly this guard;
+    // without it here, somebody who turned the experiment off still got a third-party
+    // launcher pushed onto their phone every time they re-ran setup over USB.
+    if (pm::load_settings().m_virtual_display) {
+        ensure_fossify_installed(adb, usb_device->id, [&window]() {
+            window.post_task([&window]() {
+                window.set_status_text("PC-Startbildschirm wird installiert...");
+            });
+        });
+    }
 
     window.post_task([&window]() { window.set_status_text("Android-App wird gestartet..."); });
     adb.start_app(usb_device->id, ANDROID_PACKAGE);
@@ -924,14 +950,24 @@ bool run_first_time_setup(
     });
     
     // Unlocking and starting the stream do not depend on each other. Running them
-    // in parallel keeps first-picture latency under a second.
+    // in parallel keeps first-picture latency under a second — at the price that the
+    // unlock has to guess the mode from the setting, because start_stream has not
+    // decided yet. The catch-up below settles it once the answer exists.
     std::string tcp_id = tcp_device->id;
-    auto unlock_future = std::async(std::launch::async, [tcp_id, &window]() {
-        return unlock_device_if_needed(tcp_id, &window);
+    const bool expects_own_display = pm::load_settings().m_virtual_display;
+    auto unlock_future = std::async(std::launch::async, [tcp_id, &window, expects_own_display]() {
+        return unlock_device_if_needed(tcp_id, &window, false, expects_own_display);
     });
 
     bool stream_ok = start_stream(window, scrcpy, renderer, input, tcp_device->id, out_saved_brightness, tasks, out_phone_auto_rotate, out_saved_auto_rotate);
     bool unlock_ok = unlock_future.get();
+
+    // The mode was wanted but the session ended up mirroring anyway (no launcher on the
+    // phone). The unlock above kept its hands still for a display that never existed, so
+    // the user would be looking at a mirrored lock screen. Do it now.
+    if (stream_ok && unlock_ok && expects_own_display && !scrcpy.uses_new_display()) {
+        unlock_ok = unlock_device_if_needed(tcp_id, &window, false, false);
+    }
 
     if (!unlock_ok || !stream_ok) {
         clear_setup_state();
@@ -1010,14 +1046,17 @@ bool start_stream(
     bool fossify_freshly_installed = false;
     if (config.new_display && config.new_display_app.empty()) {
         pm::adb::AdbClient launcher_adb;
-        const bool had_it = launcher_adb.is_app_installed(device_id, FOSSIFY_PACKAGE);
-        if (!had_it) {
+        // One is_app_installed for the whole connect. Asking twice — once to decide
+        // whether to show the message, once inside the helper — cost four adb children
+        // on every connect, resume and quality restart just to learn a flag that only
+        // matters on the single connect after a fresh install.
+        const auto say_installing = [&window]() {
             window.post_task([&window]() {
                 window.set_status_text("Startbildschirm für den PC wird installiert...");
             });
-        }
-        if (ensure_fossify_installed(launcher_adb, device_id)) {
-            fossify_freshly_installed = !had_it;
+        };
+        if (ensure_fossify_installed(launcher_adb, device_id, say_installing,
+                                     &fossify_freshly_installed)) {
             config.new_display_app = FOSSIFY_PACKAGE;
         } else {
             // No launcher, no usable display. Without an app to name we would have to
@@ -1345,7 +1384,8 @@ DeviceLockState read_lock_state(pm::adb::AdbClient& adb, const std::string& devi
     return state;
 }
 
-bool unlock_device_if_needed(const std::string& device_id, pm::window::IWindow* window, bool user_requested) {
+bool unlock_device_if_needed(const std::string& device_id, pm::window::IWindow* window,
+                             bool user_requested, bool own_display_session) {
     pm::Settings settings = pm::load_settings();
     if (settings.m_pin.empty()) return true;
 
@@ -1354,7 +1394,11 @@ bool unlock_device_if_needed(const std::string& device_id, pm::window::IWindow* 
     // launcher on the new display unresponsive — but it proved unreliable in practice,
     // and typing a PIN into a phone nobody is looking at is the wrong kind of clever.
     // Clicking "Handy entsperren" by hand still does exactly that.
-    if (settings.m_virtual_display && !user_requested) return true;
+    //
+    // This asks the SESSION, not Settings::m_virtual_display. The setting only says what
+    // was wanted; start_stream falls back to plain mirroring when the phone has no
+    // launcher, and a mirrored lock screen that nobody unlocks is the worst of both.
+    if (own_display_session && !user_requested) return true;
 
     pm::adb::AdbClient adb;
 
@@ -1730,7 +1774,11 @@ static int app_main() {
     // A new quality preset has to take effect immediately. Assigned further down,
     // where the stream and the heartbeat are in scope; the menu only needs the
     // declaration.
-    std::function<void()> apply_quality_now;
+    //
+    // The caller supplies the line to show while the stream is rebuilt: this same
+    // restart also carries the virtual-display switch, and telling that user the
+    // quality is changing names the wrong setting.
+    std::function<void(std::string)> apply_quality_now;
 
     // Context menu actions.
     window->set_menu_callback([&](pm::window::MenuAction action) {
@@ -1757,7 +1805,7 @@ static int app_main() {
                 current_settings.m_quality = preset;
                 pm::save_settings(current_settings);
                 window->set_quality_preset(static_cast<int>(preset));
-                if (apply_quality_now) apply_quality_now();
+                if (apply_quality_now) apply_quality_now("Qualität wird umgestellt...");
                 break;
             }
             case pm::window::MenuAction::TOGGLE_COMPATIBILITY_MODE: {
@@ -1794,15 +1842,18 @@ static int app_main() {
                 window->set_virtual_display(current_settings.m_virtual_display);
                 // Only promise a rebuild if one is actually going to happen.
                 // apply_quality_now() declines while nothing streams or a recording is
-                // running, and says so itself in the latter case.
+                // running, and says so itself in the latter case. The rebuild message
+                // is handed to it rather than written here: its own worker posts the
+                // status from a background thread and would otherwise land on top.
+                const std::string rebuilding = current_settings.m_virtual_display
+                    ? "Eigener PC-Bildschirm wird aufgebaut..."
+                    : "Zurück zur Spiegelung des Handy-Bildschirms...";
                 if (!scrcpy.is_running()) {
                     window->set_status_text("Wirkt bei der nächsten Verbindung.");
                 } else {
-                    window->set_status_text(current_settings.m_virtual_display
-                        ? "Eigener PC-Bildschirm wird aufgebaut..."
-                        : "Zurück zur Spiegelung des Handy-Bildschirms...");
+                    window->set_status_text(rebuilding);
                 }
-                if (apply_quality_now) apply_quality_now();
+                if (apply_quality_now) apply_quality_now(rebuilding);
                 break;
             }
             case pm::window::MenuAction::EXPAND_NOTIFICATION_PANEL:
@@ -2063,10 +2114,12 @@ static int app_main() {
             SetForegroundWindow(hw);
 #endif
             // Coming back from the tray: wake and unlock the phone, or build a whole
-            // new connection if the old one is gone.
+            // new connection if the old one is gone. The running session knows whether
+            // it owns a display of its own, so ask it rather than the setting.
             if (scrcpy.is_running()) {
-                run_on_device([w = window.get()](const std::string& id) {
-                    unlock_device_if_needed(id, w);
+                const bool own_display = scrcpy.uses_new_display();
+                run_on_device([w = window.get(), own_display](const std::string& id) {
+                    unlock_device_if_needed(id, w, false, own_display);
                 });
             } else {
                 window->set_app_state(pm::window::AppState::SCANNING);
@@ -2106,7 +2159,11 @@ static int app_main() {
         // through would send the phone an ACTION_UP for a key it never saw pressed —
         // the same asymmetry swallowed_shortcuts_ exists to prevent on the UHID path.
         if (keycode == ANDROID_KEYCODE_HOME && scrcpy.uses_new_display()) {
-            const std::string& launcher = scrcpy.new_display_app();
+            // A copy, not the reference new_display_app() hands out: that one points
+            // into ScrcpyClient::config_, which start() reassigns wholesale from the
+            // connection thread on every reconnect, quality restart and resume. Reading
+            // a string while another thread reallocates it is a crash, not a stale name.
+            const std::string launcher = scrcpy.new_display_app();
             if (!launcher.empty()) {
                 if (action == 0) scrcpy.start_app(launcher);
                 return;
@@ -2223,13 +2280,13 @@ static int app_main() {
     // so a new quality preset means stopping and restarting the stream. The heartbeat
     // thread ends with it and has to be started again.
     std::atomic<bool> quality_restart_running{false};
-    apply_quality_now = [&]() {
+    apply_quality_now = [&](std::string status) {
         // Nothing streaming: the next connect picks the new preset up by itself.
         if (!scrcpy.is_running()) return;
         if (renderer.is_recording()) {
             // Restarting the stream mid-recording would leave a broken file behind.
             window->post_task([w = window.get()]() {
-                w->set_status_text("Qualität wirkt nach dem Ende der Aufnahme.");
+                w->set_status_text("Einstellung wirkt nach dem Ende der Aufnahme.");
             });
             return;
         }
@@ -2237,11 +2294,11 @@ static int app_main() {
         if (device_id.empty()) return;
         if (quality_restart_running.exchange(true)) return;
 
-        background_tasks.run([&, device_id]() {
+        background_tasks.run([&, device_id, status = std::move(status)]() {
             ScopeExit mark_done([&]() { quality_restart_running = false; });
-            window->post_task([w = window.get()]() {
+            window->post_task([w = window.get(), status]() {
                 w->set_app_state(pm::window::AppState::CONNECTED);
-                w->set_status_text("Qualität wird umgestellt...");
+                w->set_status_text(status);
             });
             scrcpy.stop();
             if (should_stop) return;
@@ -2555,15 +2612,25 @@ static int app_main() {
                 w->set_status_text(name.empty() ? "Verbunden" : name);
             });
             
-            // Unlock and stream startup are independent — run them in parallel.
+            // Unlock and stream startup are independent — run them in parallel, so the
+            // unlock can only guess the mode from the setting. See the catch-up below.
             std::string tcp_id = tcp_device->id;
-            auto unlock_future = std::async(std::launch::async, [tcp_id, w = window.get()]() {
-                return unlock_device_if_needed(tcp_id, w);
+            const bool expects_own_display = pm::load_settings().m_virtual_display;
+            auto unlock_future = std::async(std::launch::async,
+                                            [tcp_id, w = window.get(), expects_own_display]() {
+                return unlock_device_if_needed(tcp_id, w, false, expects_own_display);
             });
 
             bool stream_ok = start_stream(*window, scrcpy, renderer, input, tcp_device->id,
                                           &saved_brightness, background_tasks, &phone_auto_rotate, &saved_auto_rotate);
             bool unlock_ok = unlock_future.get();
+
+            // Wanted a display of our own, got plain mirroring instead (no launcher on
+            // the phone). The unlock above stayed quiet for a display that never came,
+            // which would leave a mirrored lock screen on screen. Settle it now.
+            if (stream_ok && unlock_ok && expects_own_display && !scrcpy.uses_new_display()) {
+                unlock_ok = unlock_device_if_needed(tcp_id, window.get(), false, false);
+            }
 
             if (!unlock_ok) {
                 window->post_task([w = window.get()]() {
@@ -2624,18 +2691,6 @@ static int app_main() {
     stop_screen_poll = true;
     stop_heartbeat = true;
 
-    // Restore the phone's brightness while ADB is still connected.
-    if (saved_brightness.brightness >= 0) {
-        pm::adb::AdbClient restore_adb;
-        restore_brightness(restore_adb, saved_brightness);
-    }
-
-    // Same for the rotation switch: the lock only ever belonged to the session.
-    if (saved_auto_rotate.enabled >= 0) {
-        pm::adb::AdbClient restore_adb;
-        restore_auto_rotate(restore_adb, saved_auto_rotate);
-    }
-
     scrcpy.stop();
 
     // Third and last layer of panel restore. stop() already sent NORMAL over the
@@ -2661,6 +2716,22 @@ static int app_main() {
     if (heartbeat_thread.joinable()) heartbeat_thread.join();
     // Every background worker must finish before the objects it captured go away.
     background_tasks.join_all();
+
+    // Only NOW may the phone be put back, and the join above is the reason. Both values
+    // are written by a background worker in start_stream: it reads the phone's setting
+    // over ADB (an adb child, easily a few hundred ms) and only then fills these in
+    // before forcing its own value. Restoring before the join meant a client closed
+    // during that window saw enabled == -1, skipped the restore, and then let the worker
+    // write the lock — the phone kept a rotation lock nobody could see the source of.
+    // ADB is still connected here; only the scrcpy tunnel went away with stop().
+    if (saved_brightness.brightness >= 0) {
+        pm::adb::AdbClient restore_adb;
+        restore_brightness(restore_adb, saved_brightness);
+    }
+    if (saved_auto_rotate.enabled >= 0) {
+        pm::adb::AdbClient restore_adb;
+        restore_auto_rotate(restore_adb, saved_auto_rotate);
+    }
 
     if (tray) tray->hide();
 
