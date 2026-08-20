@@ -1,0 +1,7 @@
+# Geprüfte Beitrags-Zustände und heruntergeladene Vorschaubilder.
+.cache/
+
+# Persönliche Daten gehören nicht ins Repository: echte Instagram-Exporte und
+# alles, was daraus erzeugt wurde, bleiben lokal.
+*.zip
+local/

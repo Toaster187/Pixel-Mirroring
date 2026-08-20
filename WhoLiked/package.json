@@ -1,0 +1,14 @@
+{
+  "name": "who-liked",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Party-Spiel \"Who liked?\" auf Basis des Instagram-Datenexports - erste Demo",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/run-tests.mjs"
+  }
+}

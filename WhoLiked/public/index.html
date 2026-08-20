@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Who liked? – Instagram-Partyspiel</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>❤️</text></svg>">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-heart">❤</span>
+    <span class="brand-name">Who liked?</span>
+    <span class="brand-tag">Demo</span>
+  </div>
+  <nav class="topnav" id="topnav" hidden>
+    <button class="navlink" data-goto="lobby">Spieler</button>
+    <button class="navlink" data-goto="game">Spiel</button>
+    <button class="navlink" data-goto="gallery">Galerie</button>
+  </nav>
+</header>
+
+<main>
+
+<!-- ------------------------------------------------------------- Lobby --- -->
+<section class="screen" id="screen-lobby">
+  <h1>Wer hat das <em>geliked</em>?</h1>
+  <p class="lede">
+    Jede Person lädt ihren Instagram-Datenexport hoch. Das Spiel zeigt dann
+    einen Beitrag – und ihr ratet, aus wessen Likes er stammt.
+  </p>
+
+  <ol class="steps">
+    <li>
+      <strong>Export anfordern</strong>
+      <span>Instagram-App → Einstellungen → Konten-Center → Deine Informationen
+      und Berechtigungen → Informationen exportieren. Format <b>JSON</b>.</span>
+    </li>
+    <li>
+      <strong>ZIP hier ablegen</strong>
+      <span>Die Datei bleibt auf diesem Rechner. Gelesen wird nur
+      <code>likes/liked_posts.json</code>.</span>
+    </li>
+    <li>
+      <strong>Raten</strong>
+      <span>Ab zwei Spielern geht es los. Mit einem Spieler gibt es die Galerie.</span>
+    </li>
+  </ol>
+
+  <div class="dropzone" id="dropzone" tabindex="0" role="button"
+       aria-label="Instagram-Export als ZIP hinzufügen">
+    <input type="file" id="fileInput" accept=".zip,application/zip" multiple hidden>
+    <div class="dropzone-icon">＋</div>
+    <div class="dropzone-title">Spieler hinzufügen</div>
+    <div class="dropzone-hint">ZIP hierher ziehen oder klicken</div>
+  </div>
+
+  <p class="import-status" id="importStatus" role="status" aria-live="polite"></p>
+
+  <ul class="players" id="playerList"></ul>
+
+  <div class="privacy">
+    <h2>Was mit deinen Daten passiert</h2>
+    <ul>
+      <li><b>Nur eine Datei wird gelesen.</b> Aus dem Archiv wird ausschließlich
+        <code>likes/liked_posts.json</code> entpackt. Nachrichten, Fotos, Videos
+        und alle übrigen Ordner werden nicht angefasst – sie werden nicht einmal
+        entpackt.</li>
+      <li><b>Nichts wird hochgeladen.</b> Das ZIP verlässt diesen Rechner nicht.
+        Ausgewertet wird es im Browser.</li>
+      <li><b>Nichts wird gespeichert.</b> Ein Neuladen der Seite löscht alle
+        importierten Likes. Zwischengespeichert wird nur, ob ein Beitrag
+        öffentlich abrufbar ist – das ist keine persönliche Information.</li>
+      <li><b>Beim Spielen lädt der Instagram-Embed.</b> In der Spielrunde wird
+        der offizielle Einbettungs-Code von Instagram geladen; Instagram sieht
+        dabei den Beitrag, nicht aber, wer ihn geliked hat. Die Galerie kommt
+        ohne aus.</li>
+    </ul>
+  </div>
+
+  <div class="actions">
+    <button class="primary" id="startCheck" disabled>Beiträge prüfen</button>
+  </div>
+</section>
+
+<!-- ------------------------------------------------------------ Prüfen --- -->
+<section class="screen" id="screen-check" hidden>
+  <h1>Beiträge werden geprüft</h1>
+  <p class="lede">
+    Jeder gelikte Beitrag wird einmal daraufhin angesehen, ob er öffentlich
+    abrufbar ist. Private, gelöschte und gesperrte Beiträge fliegen raus, damit
+    im Spiel keine kaputten Kacheln stehen.
+  </p>
+
+  <div class="progress">
+    <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+    <div class="progress-label" id="progressLabel">0 / 0</div>
+  </div>
+
+  <ul class="tally">
+    <li class="tally-public"><span id="tallyPublic">0</span><small>öffentlich</small></li>
+    <li class="tally-private"><span id="tallyPrivate">0</span><small>nicht abrufbar</small></li>
+    <li class="tally-unknown"><span id="tallyUnknown">0</span><small>nicht prüfbar</small></li>
+  </ul>
+
+  <p class="warn" id="checkWarning" hidden></p>
+
+  <div class="actions">
+    <button class="ghost" id="cancelCheck">Abbrechen</button>
+    <button class="primary" id="toGame" hidden>Spiel starten</button>
+    <button class="ghost" id="toGallery" hidden>Zur Galerie</button>
+  </div>
+</section>
+
+<!-- -------------------------------------------------------------- Spiel --- -->
+<section class="screen" id="screen-game" hidden>
+  <div class="scoreboard" id="scoreboard"></div>
+
+  <div class="round-head">
+    <span class="round-counter" id="roundCounter"></span>
+    <span class="round-turn" id="roundTurn"></span>
+  </div>
+
+  <div class="post-stage">
+    <div class="post-frame" id="postFrame"></div>
+  </div>
+
+  <div class="guess" id="guessArea">
+    <p class="guess-question">Wer hat das geliked?</p>
+    <div class="guess-buttons" id="guessButtons"></div>
+  </div>
+
+  <div class="reveal" id="revealArea" hidden>
+    <p class="reveal-verdict" id="revealVerdict"></p>
+    <p class="reveal-detail" id="revealDetail"></p>
+    <button class="primary" id="nextRound">Nächste Runde</button>
+  </div>
+
+  <div class="actions">
+    <button class="ghost" id="skipRound">Beitrag überspringen</button>
+  </div>
+</section>
+
+<!-- ------------------------------------------------------------ Galerie --- -->
+<section class="screen" id="screen-gallery" hidden>
+  <h1>Alle Likes</h1>
+  <div class="filters" id="galleryFilters"></div>
+  <div class="grid" id="galleryGrid"></div>
+  <p class="gallery-note" id="galleryNote"></p>
+</section>
+
+<!-- ------------------------------------------------------------ Endstand -- -->
+<section class="screen" id="screen-result" hidden>
+  <h1>Endstand</h1>
+  <ol class="result-list" id="resultList"></ol>
+  <div class="actions">
+    <button class="primary" id="playAgain">Nochmal spielen</button>
+    <button class="ghost" id="resultGallery">Galerie ansehen</button>
+  </div>
+</section>
+
+</main>
+
+<!-- ------------------------------------------------------------- Lightbox -->
+<div class="lightbox" id="lightbox" hidden>
+  <button class="lightbox-close" id="lightboxClose" aria-label="Schließen">✕</button>
+  <div class="lightbox-body" id="lightboxBody"></div>
+</div>
+
+<footer class="footer">
+  <span>Demo – nicht mit Instagram oder Meta verbunden.</span>
+</footer>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
