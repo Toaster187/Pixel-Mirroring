@@ -235,21 +235,18 @@ A. SDL2 (Simple DirectMedia Layer)
      misrepresented as being the original software.
   3. This notice may not be removed or altered from any source distribution.
 
-B. FFmpeg (libavcodec, libavformat, libavutil, etc.)
-* Verwendung: Dekodierung des H.264/H.265-Videostreams vom Android-Gerät.
-* Lizenz: GNU Lesser General Public License (LGPL), Version 2.1 oder höher
-* Copyright: Copyright (c) the FFmpeg developers.
-* Einhaltung der LGPL (Konformitäts-Erklärung):
-  1. Dynamische Verlinkung: Der Desktop-Client verlinkt FFmpeg ausschließlich 
-     dynamisch über DLLs (libavcodec.dll, libavformat.dll usw.). Dies stellt 
-     sicher, dass Nutzer die FFmpeg-Bibliotheken durch eigene, kompatible 
-     Versionen ersetzen können (gemäß LGPL v2.1, Sektion 6).
-  2. Unveränderter Code: Es wurden keine Modifikationen am FFmpeg-Quellcode 
-     vorgenommen.
-  3. Quellcode-Verweis: Der Quellcode von FFmpeg ist unter https://ffmpeg.org 
-     frei verfügbar.
-  4. Lizenz-Kopie: Der vollständige Text der LGPL v2.1 ist unter 
-     https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html einsehbar.
+B. FFmpeg (libavcodec, libavformat, libavutil, etc.) und x264
+* Verwendung: Video-Dekodierung und Aufnahme.
+* Der konfigurierte x264-Encoder aktiviert GPL in FFmpeg (GPL-2.0-or-later).
+  Die bisherige pauschale LGPL-Angabe war für diesen Build unzutreffend.
+* Der kombinierte Desktop-Build wird unter GPLv3-Bedingungen weitergegeben.
+  Die ursprünglichen Apache-2.0-Hinweise der Projektquellen bleiben erhalten.
+* Vollständige Originalhinweise: licenses/vcpkg/ffmpeg/copyright und
+  licenses/vcpkg/x264/copyright; GPLv3: licenses/GPL-3.0.txt.
+* Die DLLs werden dynamisch gelinkt und dürfen durch kompatible Versionen
+  ersetzt werden. vcpkg wendet Build-Patches an; die verwendeten Quellen und
+  Bauvorschriften werden im sources.zip neben den neuen Releases angeboten.
+* Details und Quellcodezugang: licenses/ThirdParty.md.
 
 C. nlohmann-json
 * Verwendung: JSON-Parsing für Konfigurationsdateien.

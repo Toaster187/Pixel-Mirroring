@@ -55,6 +55,7 @@ struct Settings {
     //
     // Note that this alone does NOT darken the phone's panel — that is m_screen_off,
     // which is independent and off by default.
+    // Existing files without this key retain mirroring in load_settings().
     bool m_virtual_display = true;
     // EXPERIMENT, only meaningful together with the switch above. Empty is the normal
     // case: the client then installs and uses Fossify Launcher, because the phone's own

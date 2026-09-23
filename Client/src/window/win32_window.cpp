@@ -81,7 +81,7 @@ namespace {
         switch (wparam) {
         case 'B': return 4;   // AKEYCODE_BACK
         case 'H': return 3;   // AKEYCODE_HOME
-        case 'S': return 187; // AKEYCODE_APP_SWITCH (Übersicht / Task-Manager)
+        case 'N': return 187; // AKEYCODE_APP_SWITCH (Übersicht / Task-Manager)
         default:  return 0;
         }
     }
@@ -1234,7 +1234,7 @@ LRESULT Win32Window::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
                     if (wp == VK_UP) {
                         menu_cb_(MenuAction::COLLAPSE_PANELS);
                     } else {
-                        // Alt+Down opens notifications, Alt+Shift+Down quick settings.
+                        // Alt+Down opens notifications, Alt+Nhift+Down quick settings.
                         menu_cb_((GetKeyState(VK_SHIFT) & 0x8000)
                             ? MenuAction::EXPAND_SETTINGS_PANEL
                             : MenuAction::EXPAND_NOTIFICATION_PANEL);
@@ -1412,6 +1412,9 @@ namespace {
     constexpr UINT ID_OPEN_KEYBOARD_SETTINGS = 1015;
     constexpr UINT ID_TOGGLE_AUTO_PAUSE = 1017;
     constexpr UINT ID_TOGGLE_VIRTUAL_DISPLAY = 1018;
+    constexpr UINT ID_SECTION_DISPLAY = 1200;
+    constexpr UINT ID_SECTION_INPUT = 1201;
+    constexpr UINT ID_SECTION_DEVICE = 1202;
 
     constexpr UINT ID_SCREENSHOT = 1101;
     constexpr UINT ID_TOGGLE_RECORDING = 1102;
@@ -1692,72 +1695,88 @@ void Win32Window::build_settings_menu_items() {
 
     g_menu_items.clear();
 
-    MenuItem header{ID_QUALITY_HEADER, std::wstring(L"Qualität: ") + QUALITY_NAMES[quality],
-                    false, quality_expanded_, false};
-    header.is_expander = true;
-    g_menu_items.push_back(header);
+    auto section = [&](UINT id, const wchar_t* title) {
+        MenuItem row{id, title, false, settings_section_ == id, false};
+        row.is_expander = true;
+        g_menu_items.push_back(row);
+        return settings_section_ == id;
+    };
 
-    if (quality_expanded_) {
-        const struct { UINT id; const wchar_t* text; int index; } presets[3] = {
-            {ID_QUALITY_BATTERY,  L"Akku sparen · 30 FPS · 720p · 4 Mbit/s",           0},
-            {ID_QUALITY_BALANCED, L"Ausgewogen · 60 FPS · volle Auflösung · 15 Mbit/s", 1},
-            {ID_QUALITY_MAXIMUM,  L"Maximal · 120 FPS · volle Auflösung · 40 Mbit/s",  2},
-        };
-        for (const auto& preset : presets) {
-            MenuItem row{preset.id, preset.text, false, false, false};
-            row.is_radio = true;
-            row.is_selected = (preset.index == quality);
-            g_menu_items.push_back(row);
+    if (section(ID_SECTION_DISPLAY, L"Bild, Ton und Leistung")) {
+
+        MenuItem header{ID_QUALITY_HEADER, std::wstring(L"Qualität: ") + QUALITY_NAMES[quality],
+                        false, quality_expanded_, false};
+        header.is_expander = true;
+        g_menu_items.push_back(header);
+
+        if (quality_expanded_) {
+            const struct { UINT id; const wchar_t* text; int index; } presets[3] = {
+                {ID_QUALITY_BATTERY,  L"Akku sparen · 30 FPS · 720p · 4 Mbit/s",           0},
+                {ID_QUALITY_BALANCED, L"Ausgewogen · 60 FPS · volle Auflösung · 15 Mbit/s", 1},
+                {ID_QUALITY_MAXIMUM,  L"Maximal · 120 FPS · volle Auflösung · 40 Mbit/s",  2},
+            };
+            for (const auto& preset : presets) {
+                MenuItem row{preset.id, preset.text, false, false, false};
+                row.is_radio = true;
+                row.is_selected = (preset.index == quality);
+                g_menu_items.push_back(row);
+            }
+        }
+
+        g_menu_items.push_back({ID_TOGGLE_LOWEST_BRIGHTNESS, L"Bildschirm auf niedrigste Helligkeit", true, lowest_brightness_, false});
+        g_menu_items.push_back({ID_TOGGLE_SCREEN_OFF, L"Handy-Display komplett aus", true, screen_off_, false});
+        g_menu_items.push_back({ID_TOGGLE_AUDIO, L"Ton vom Handy übertragen", true, audio_enabled_, false});
+        g_menu_items.push_back({ID_TOGGLE_AUTO_PAUSE, L"Stream pausieren, wenn Fenster minimiert",
+                                true, auto_pause_minimized_, false});
+        g_menu_items.push_back({ID_TOGGLE_VIRTUAL_DISPLAY, L"Eigener PC-Bildschirm (experimentell)",
+                                true, virtual_display_, false});
+        if (virtual_display_) {
+            // The whole point in one row, because the switch looks harmless and changes
+            // everything: the phone is no longer being watched, it keeps living its own life.
+            g_menu_items.push_back({0, L"Handy bleibt gesperrt und parallel benutzbar", false, false, false, true});
+            // The mode reads as "and the phone goes dark", but darkening the panel is the
+            // separate switch above, which is off by default. Naming it here is cheaper
+            // than letting the phone on the table contradict the promise on the desk.
+            if (!screen_off_) {
+                g_menu_items.push_back({0, L"Für ein dunkles Panel zusätzlich „Handy-Display komplett aus“",
+                                        false, false, false, true});
+            }
         }
     }
-
-    g_menu_items.push_back({ID_TOGGLE_COMPAT, L"Kompatibilitätsmodus (langsame PIN)", true, compatibility_mode_, false});
-    g_menu_items.push_back({ID_TOGGLE_LOWEST_BRIGHTNESS, L"Bildschirm auf niedrigste Helligkeit", true, lowest_brightness_, false});
-    g_menu_items.push_back({ID_TOGGLE_SCREEN_OFF, L"Handy-Display komplett aus", true, screen_off_, false});
-    g_menu_items.push_back({ID_TOGGLE_AUDIO, L"Ton vom Handy übertragen", true, audio_enabled_, false});
-    g_menu_items.push_back({ID_TOGGLE_AUTO_PAUSE, L"Stream pausieren, wenn Fenster minimiert",
-                            true, auto_pause_minimized_, false});
-    g_menu_items.push_back({ID_TOGGLE_VIRTUAL_DISPLAY, L"Eigener PC-Bildschirm (experimentell)",
-                            true, virtual_display_, false});
-    if (virtual_display_) {
-        // The whole point in one row, because the switch looks harmless and changes
-        // everything: the phone is no longer being watched, it keeps living its own life.
-        g_menu_items.push_back({0, L"Handy bleibt gesperrt und parallel benutzbar", false, false, false, true});
-        // The mode reads as "and the phone goes dark", but darkening the panel is the
-        // separate switch above, which is off by default. Naming it here is cheaper
-        // than letting the phone on the table contradict the promise on the desk.
-        if (!screen_off_) {
-            g_menu_items.push_back({0, L"Für ein dunkles Panel zusätzlich „Handy-Display komplett aus“",
-                                    false, false, false, true});
+    if (section(ID_SECTION_INPUT, L"Tastatur und Steuerung")) {
+        g_menu_items.push_back({ID_TOGGLE_UHID_KEYBOARD, L"Echte USB-Tastatur am Handy", true, uhid_keyboard_, false});
+        if (uhid_keyboard_) {
+            if (app_state_ == AppState::STREAMING) {
+                g_menu_items.push_back({ID_OPEN_KEYBOARD_SETTINGS, L"Tastaturlayout am Handy einstellen", false, false, false});
+            }
+            // Without a German layout set on the phone the feature is useless, and nobody
+            // guesses that on their own. Has to stay one line to fit the row.
+            g_menu_items.push_back({0, L"Layout am Handy muss auf Deutsch stehen", false, false, false, true});
         }
-    }
-    g_menu_items.push_back({ID_TOGGLE_UHID_KEYBOARD, L"Echte USB-Tastatur am Handy", true, uhid_keyboard_, false});
-    if (uhid_keyboard_) {
+        g_menu_items.push_back({0, L"", false, false, true});
         if (app_state_ == AppState::STREAMING) {
-            g_menu_items.push_back({ID_OPEN_KEYBOARD_SETTINGS, L"Tastaturlayout am Handy einstellen", false, false, false});
+            g_menu_items.push_back({ID_TOGGLE_AUTO_ROTATE, L"Automatische Bildschirmdrehung (Handy)", true, auto_rotate_enabled_, false});
+            // Hint rows for the keyboard shortcuts — otherwise nobody finds them.
+            g_menu_items.push_back({0, L"Alt+B Zurück · Alt+H Start · Alt+N Übersicht", false, false, false, true});
+            g_menu_items.push_back({0, L"Alt+↓ Benachrichtigungen · Alt+Umschalt+↓ Schnelleinstellungen", false, false, false, true});
+            g_menu_items.push_back({0, L"Alt+↑ schließt sie wieder", false, false, false, true});
         }
-        // Without a German layout set on the phone the feature is useless, and nobody
-        // guesses that on their own. Has to stay one line to fit the row.
-        g_menu_items.push_back({0, L"Layout am Handy muss auf Deutsch stehen", false, false, false, true});
     }
-    g_menu_items.push_back({0, L"", false, false, true});
-    g_menu_items.push_back({ID_SET_PIN, L"PIN zum Entsperren festlegen", false, false, false});
-    if (app_state_ == AppState::STREAMING) {
-        g_menu_items.push_back({ID_TOGGLE_AUTO_ROTATE, L"Automatische Bildschirmdrehung (Handy)", true, auto_rotate_enabled_, false});
-        g_menu_items.push_back({ID_UNLOCK_DEVICE, L"Handy entsperren (Strg+U)", false, false, false});
-        g_menu_items.push_back({ID_LOCK_DEVICE, L"Handy sperren & Bildschirm aus (Strg+L)", false, false, false});
-        // Hint rows for the keyboard shortcuts — otherwise nobody finds them.
-        g_menu_items.push_back({0, L"Alt+B Zurück · Alt+H Start · Alt+S Übersicht", false, false, false, true});
-        g_menu_items.push_back({0, L"Alt+↓ Benachrichtigungen · Alt+Umschalt+↓ Schnelleinstellungen", false, false, false, true});
-        g_menu_items.push_back({0, L"Alt+↑ schließt sie wieder", false, false, false, true});
+    if (section(ID_SECTION_DEVICE, L"Gerät und Verbindung")) {
+        g_menu_items.push_back({ID_SET_PIN, L"PIN zum Entsperren festlegen", false, false, false});
+        g_menu_items.push_back({ID_TOGGLE_COMPAT, L"Kompatibilitätsmodus (langsame PIN)", true, compatibility_mode_, false});
+        if (app_state_ == AppState::STREAMING) {
+            g_menu_items.push_back({ID_UNLOCK_DEVICE, L"Handy entsperren (Strg+U)", false, false, false});
+            g_menu_items.push_back({ID_LOCK_DEVICE, L"Handy sperren & Bildschirm aus (Strg+L)", false, false, false});
+        }
+        g_menu_items.push_back({ID_FACTORY_RESET, L"Werkseinstellungen zurücksetzen", false, false, false});
     }
-    g_menu_items.push_back({0, L"", false, false, true});
-    g_menu_items.push_back({ID_FACTORY_RESET, L"Werkseinstellungen zurücksetzen", false, false, false});
 }
 
 void Win32Window::show_context_menu(POINT pt) {
 
     quality_expanded_ = false; // every freshly opened menu starts collapsed
+    settings_section_ = 0;
     build_settings_menu_items();
     const int height = menu_height_for_items();
 
@@ -1803,9 +1822,17 @@ void Win32Window::show_context_menu(POINT pt) {
         if (!IsWindow(hMenu) || g_menu_done) break;
         if (msg.hwnd == hMenu && msg.message == WM_APP + 5) {
             UINT action_id = static_cast<UINT>(msg.wParam);
+            if (action_id >= ID_SECTION_DISPLAY && action_id <= ID_SECTION_DEVICE) {
+                settings_section_ = settings_section_ == action_id ? 0 : action_id;
+                g_hovered_item = -1;
+                build_settings_menu_items();
+                resize_menu_window(hMenu);
+                continue;
+            }
             if (action_id == ID_QUALITY_HEADER) {
                 // Expand or collapse the three presets and resize the menu around them.
                 quality_expanded_ = !quality_expanded_;
+                g_hovered_item = -1;
                 build_settings_menu_items();
                 resize_menu_window(hMenu);
                 continue;
@@ -1828,6 +1855,9 @@ void Win32Window::show_context_menu(POINT pt) {
                 default: continue;
             }
             if (menu_cb_) menu_cb_(action);
+            g_hovered_item = -1;
+            build_settings_menu_items();
+            resize_menu_window(hMenu);
             continue;
         }
         TranslateMessage(&msg);

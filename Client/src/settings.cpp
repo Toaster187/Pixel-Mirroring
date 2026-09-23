@@ -131,6 +131,10 @@ Settings load_settings() {
         return s;
     }
 
+    // Existing installs keep mirroring until the user explicitly selects the new mode.
+    // A new install still receives the Settings default; an explicit key wins below.
+    s.m_virtual_display = false;
+
     // Older settings files only had two separate switches instead of a preset.
     // Remember what they said so an upgrading install can be mapped to the closest
     // preset below.

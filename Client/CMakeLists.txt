@@ -83,6 +83,13 @@ if(PM_BUILD_TESTS)
     endif()
 
     add_test(NAME control_messages COMMAND pm_control_messages_test)
+
+    add_executable(pm_settings_test tests/settings_test.cpp src/settings.cpp src/util/encoding.cpp)
+    target_compile_definitions(pm_settings_test PRIVATE PM_PORTABLE_BUILD)
+    if(MSVC)
+        target_compile_options(pm_settings_test PRIVATE /EHsc /utf-8)
+    endif()
+    add_test(NAME settings COMMAND pm_settings_test)
 endif()
 
 # Same reasoning as PM_REQUIRE_FOSSIFY further down: a developer build without the
@@ -185,10 +192,7 @@ set(PM_FOSSIFY_APK "${CMAKE_SOURCE_DIR}/vendor/FossifyLauncher.apk")
 # so the first URL is guaranteed to 404 the day version 17 appears — this is a scheduled
 # failure, not a "what if the network is down". The archive copy is the same file with the
 # same checksum, so the verification below covers both.
-set(PM_FOSSIFY_URLS
-    "https://f-droid.org/repo/org.fossify.home_16.apk"
-    "https://f-droid.org/archive/org.fossify.home_16.apk")
-set(PM_FOSSIFY_SHA256 "a603d3d510482feafd73d52a93a1ea9baefd2ca0aae329a14cbf0e21f43638e3")
+include(cmake/Fossify.cmake)
 
 # The hash is checked HERE rather than through file(DOWNLOAD ... EXPECTED_HASH), which
 # aborts the whole configure step on a mismatch — the STATUS branch below never runs and
@@ -438,8 +442,25 @@ install(FILES
         "${CMAKE_SOURCE_DIR}/vendor/licenses/GPL-3.0.txt"
         "${CMAKE_SOURCE_DIR}/vendor/licenses/FossifyLauncher.md"
     DESTINATION licenses
-    OPTIONAL
 )
+
+install(FILES "${CMAKE_SOURCE_DIR}/vendor/platform-tools/NOTICE.txt"
+    DESTINATION licenses RENAME Android-Platform-Tools-NOTICE.txt)
+install(FILES "${CMAKE_SOURCE_DIR}/../LICENSE" DESTINATION licenses
+    RENAME Pixel-Mirroring-LICENSE.txt)
+install(FILES "${CMAKE_SOURCE_DIR}/vendor/licenses/ThirdParty.md" DESTINATION licenses)
+
+# vcpkg selects the actual licence for the enabled features (FFmpeg+x264 is GPL).
+# Preserve its notices for every installed dependency, including transitive ones.
+if(DEFINED VCPKG_TARGET_TRIPLET)
+    file(GLOB PM_DEPENDENCY_NOTICES
+        "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/share/*/copyright")
+    foreach(PM_NOTICE IN LISTS PM_DEPENDENCY_NOTICES)
+        get_filename_component(PM_NOTICE_DIR "${PM_NOTICE}" DIRECTORY)
+        get_filename_component(PM_NOTICE_NAME "${PM_NOTICE_DIR}" NAME)
+        install(FILES "${PM_NOTICE}" DESTINATION "licenses/vcpkg/${PM_NOTICE_NAME}")
+    endforeach()
+endif()
 
 # Install ADB runtime files
 if(WIN32)

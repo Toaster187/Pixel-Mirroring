@@ -17,10 +17,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
+      - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
+          java-version: '21'
           distribution: 'temurin'
 
       - name: Setup Gradle
@@ -29,7 +29,7 @@ jobs:
           gradle-version: '9.4.1'
 
       - name: Build Android App
-        run: gradle assembleDebug
+        run: gradle assembleDebug testDebugUnitTest
         working-directory: Android
 
       - name: Upload Android APK
@@ -45,6 +45,8 @@ jobs:
     needs: build-android
     env:
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/Client/vcpkg_cache
+      # Source delivery requires the exact patched trees; binary-cache hits omit them.
+      VCPKG_BINARY_SOURCES: clear
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -90,7 +92,11 @@ jobs:
         working-directory: Client
 
       - name: Install NSIS
-        run: choco install nsis -y
+        run: choco install nsis wixtoolset 7zip -y
+
+      - name: Package corresponding sources
+        shell: pwsh
+        run: ./Client/cmake/package-sources.ps1 -BuildDirectory ./Client/build
 
       - name: Run CPack Packaging
         run: |
@@ -99,29 +105,9 @@ jobs:
         working-directory: Client
         shell: bash
 
-      # Letzte Kontrolle am fertigen Paket statt am Build-Verzeichnis: das ZIP entsteht
-      # aus demselben Install-Baum wie der NSIS-Installer, ist aber ohne Windows-
-      # Werkzeuge lesbar. Der .exe-Installer wird eigens geprüft, weil das Upload unten
-      # schon zufrieden ist, wenn irgendeines der drei Muster etwas findet.
-      - name: Verify packaged payload
-        working-directory: Client/build
-        shell: bash
-        run: |
-          set -euo pipefail
-          ZIP=$(ls PixelMirroring-*.zip | head -1)
-          echo "Prüfe $ZIP"
-          cmake -E tar tf "$ZIP" > contents.txt
-          cat contents.txt
-          for f in PixelMirroring.apk FossifyLauncher.apk scrcpy-server.jar adb.exe \
-                   licenses/GPL-3.0.txt licenses/FossifyLauncher.md; do
-            if ! grep -q -- "$f" contents.txt; then
-              echo "::error::Fehlt im Auslieferungspaket: $f"
-              exit 1
-            fi
-          done
-          ls PixelMirroring-*.exe >/dev/null || { echo "::error::Kein NSIS-Installer gebaut"; exit 1; }
-          echo "Alle mitgelieferten Dateien vorhanden."
-          rm -f contents.txt
+      - name: Verify ZIP, NSIS and MSI payloads
+        shell: pwsh
+        run: ./Client/cmake/verify-packages.ps1 -BuildDirectory ./Client/build
 
       - name: Upload Installers as Workflow Artifacts
         uses: actions/upload-artifact@v4
