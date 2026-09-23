@@ -1118,7 +1118,9 @@ bool start_stream(
         pm::adb::AdbClient wake_adb;
         const std::string power = wake_adb.execute_shell_command(
             device_id, "dumpsys power | grep -iE 'mInteractive|mIsInteractive'");
-        const bool already_awake = !power.empty() && power.find("false") == std::string::npos;
+        const bool already_awake = (power.find("mInteractive=true") != std::string::npos ||
+            power.find("mIsInteractive=true") != std::string::npos) &&
+            power.find("false") == std::string::npos;
         if (!already_awake) {
             wake_adb.execute_shell_command(device_id, "input keyevent 224");
             std::this_thread::sleep_for(std::chrono::milliseconds(600));
@@ -1212,9 +1214,12 @@ bool start_stream(
     // Server 4.x says out loud when the picture changes shape mid-stream. Without this
     // the mouse keeps aiming at the old ruler and the window keeps the old proportions
     // — a turned display would put every poke in the wrong place.
-    scrcpy.set_resolution_callback([&window, &input](int new_w, int new_h) {
-        input.set_device_size(new_w, new_h);
-        window.post_task([&window, new_w, new_h]() {
+    scrcpy.set_resolution_callback([&window, &input, &scrcpy](int, int) {
+        window.post_task([&window, &input, &scrcpy]() {
+            const int new_w = scrcpy.video_width();
+            const int new_h = scrcpy.video_height();
+            if (!scrcpy.is_running() || new_w <= 0 || new_h <= 0) return;
+            input.set_device_size(new_w, new_h);
             window.set_aspect_ratio((double)new_w / (double)new_h);
             window.set_orientation(new_w > new_h);
         });
@@ -1242,8 +1247,6 @@ bool start_stream(
         scrcpy.stop();
         return false;
     }
-
-    input.set_device_size(w, h);
 
     // The control socket only exists once the stream is up, which is why the panel
     // power mode is handled here and not next to the brightness code above. The
@@ -1315,16 +1318,13 @@ bool start_stream(
     // the mouse aiming at a picture that is no longer that shape. In this mode that is not
     // theoretical: the new display can still settle after START_APP. The values are
     // atomics for exactly this.
-    int cur_w = scrcpy.video_width();
-    int cur_h = scrcpy.video_height();
-    if (cur_w <= 0 || cur_h <= 0) {
-        cur_w = w;
-        cur_h = h;
-    } else if (cur_w != w || cur_h != h) {
+    window.post_task([&window, &input, &scrcpy, uhid_keyboard, own_display, launcher_started]() {
+        const int cur_w = scrcpy.video_width();
+        const int cur_h = scrcpy.video_height();
+        if (!scrcpy.is_running() || cur_w <= 0 || cur_h <= 0) return;
+        // Both the resolution event and startup now update input on the UI thread.
+        // Read when the task runs, so a queued startup cannot overwrite a newer size.
         input.set_device_size(cur_w, cur_h);
-    }
-
-    window.post_task([&window, cur_w, cur_h, uhid_keyboard, own_display, launcher_started]() {
         window.set_uhid_keyboard(uhid_keyboard);
         window.set_aspect_ratio((double)cur_w / (double)cur_h);
         window.set_orientation(cur_w > cur_h);
@@ -2317,7 +2317,7 @@ static int app_main() {
             // reason — the other order leaves a window in which both are false and the
             // heartbeat thread exits for good.
             const auto still_wanted = [&]() {
-                return scrcpy.is_running() || auto_paused.load();
+                return !pause_suspended.load() && (scrcpy.is_running() || auto_paused.load());
             };
             while (!should_stop && !stop_heartbeat && still_wanted()) {
                 hb_scanner.send_heartbeat(ip, client_id, client_name);

@@ -26,9 +26,7 @@ void InputHandler::window_to_device(int wx, int wy, int ww, int wh, int* dx, int
         return;
     }
 
-    // Read each size exactly once. A rotation lands on these members from the video
-    // thread, and scaling by one width while clamping against another would put the
-    // poke outside the picture it was just mapped into.
+    // Use the same size for scaling and clamping this pointer event.
     const int dev_w = m_device_width;
     const int dev_h = m_device_height;
 

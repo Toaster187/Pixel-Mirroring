@@ -70,7 +70,7 @@ auftauchen.
 - UI: Jetpack Compose + Material 3
 - Min SDK: Android 11 (API 30)
 - Target SDK: Android 15 (API 35)
-- Build: Gradle 9.4.1, JDK 17+ (Wrapper ist bewusst nicht eingecheckt)
+- Build: Gradle 9.4.1, JDK 21+ für API-36-Tests (Wrapper ist bewusst nicht eingecheckt)
 
 **Die Debug-Variante ist das ausgelieferte Artefakt** - der Desktop-Client installiert
 sie, die CI veröffentlicht sie. Deshalb laufen auf `debug` ausnahmsweise
@@ -275,11 +275,11 @@ jedem Textfeld korrekt dargestellt werden. Damit das dauerhaft hält, gilt:
 - **Aufnahmen bevorzugen den Hardware-Encoder** (`h264_mf`, sonst NVENC/QSV/AMF), mit
   automatischem Rückfall auf `libx264` und passendem Pixelformat.
 - **Tastenkürzel:** Navigation liegt auf **Alt** (`Alt+B` zurück, `Alt+H` Start,
-  `Alt+S` Übersicht, `Alt+↓` Benachrichtigungen, `Alt+Umschalt+↓` Schnelleinstellungen,
+  `Alt+N` Übersicht, `Alt+↓` Benachrichtigungen, `Alt+Umschalt+↓` Schnelleinstellungen,
   `Alt+↑` schließt wieder), weil Strg+C/V die Zwischenablage und Strg+U/L
   Sperren/Entsperren belegen. Alt-Tasten kommen als `WM_SYSKEYDOWN`/`WM_SYSKEYUP`; nur
-  B/H/S und die Pfeiltasten hoch/runter werden abgefangen, damit `Alt+F4` weiter bei
-  `DefWindowProc` ankommt. B/H/S sind Android-Keycodes und laufen über
+  B/H/N und die Pfeiltasten hoch/runter werden abgefangen, damit `Alt+F4` weiter bei
+  `DefWindowProc` ankommt. B/H/N sind Android-Keycodes und laufen über
   `set_key_callback`; die Pfeiltasten sind scrcpy-Control-Messages 5/6/7 und laufen
   deshalb über den `MenuAction`-Weg, genau wie Strg+U/L. Bei `Alt+↑`/`Alt+↓` müssen
   Druck **und** jede Wiederholung geschluckt werden — ein einzelnes Alt, das bis
@@ -469,8 +469,7 @@ Ganze, alle drei teuer gelernt — die vollständige Aufzeichnung samt Messwerte
 - Gradle Build: `gradle assembleDebug`
 - Unit-Tests: `gradle test` — JUnit4 über die Serialisierung der Wire-Modelle
   (`ApiModelsTest`) und die Pairing-Regeln in `PairedClientStore`
-  (`PairedClientStoreTest`). **Die CI führt sie nicht aus** (`build.yml` baut nur
-  `assembleDebug`), also selbst laufen lassen, wer eine der beiden Dateien anfasst.
+  (`PairedClientStoreTest`). **Die CI führt `testDebugUnitTest` zusammen mit `assembleDebug` aus.**
 - Der `androidTest`-Sourceset ist weiterhin Espresso-Boilerplate.
 - Manueller Test auf physischem Gerät
 
@@ -483,7 +482,7 @@ Installer und nur auf `v*`-Tags.
 
 ### Die automatischen Tests auf der Client-Seite
 
-Beide sind eigenständige `main()` mit handgeschriebenem `check()` (bewusst **kein**
+Die C++-Tests sind eigenständige `main()` mit handgeschriebenem `check()` (bewusst **kein**
 `assert`: die Auslieferung ist ein Release-Build mit `NDEBUG`, dort wäre jede
 Zusicherung wegoptimiert). Kein Test-Framework hinzufügen - für weitere Absicherungen
 dasselbe Muster benutzen.
@@ -504,7 +503,11 @@ liegt das Byte-Bauen in einem Header ohne Socket- und FFmpeg-Abhängigkeit, der 
 linkt gar nichts, und `ScrcpyClient` ruft dieselben Funktionen auf - die festgenagelten
 Bytes sind also die ausgelieferten Bytes. Ziel `pm_control_messages_test`.
 
-Beide werden weder installiert noch paketiert, und CI lässt sie laufen.
+`Client/tests/settings_test.cpp` prüft die Migration alter Einstellungsdateien,
+ausdrückliche Virtual-Display-Werte und das Trimmen benutzerdefinierter Paketnamen.
+Es verwendet ein eigenes temporäres Verzeichnis und verändert keine Nutzereinstellungen.
+
+Die Tests werden weder installiert noch paketiert, und CI lässt sie laufen.
 
 ### Was sich nicht automatisiert testen lässt
 

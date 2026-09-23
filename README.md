@@ -571,16 +571,19 @@ gradle assembleDebug
 
 - **Issues & Feature Requests**: https://github.com/Toaster187/Pixel-Mirroring/issues
 - **Discussions**: https://github.com/Toaster187/Pixel-Mirroring/discussions
-- **Lizenz & Rechtliches**: Siehe [LICENSE](./LICENSE) für Details zu LGPL (FFmpeg), Apache 2.0 und Attributionen
+- **Lizenz & Rechtliches**: Siehe [LICENSE](./LICENSE) und [Drittanbieterhinweise](./Client/vendor/licenses/ThirdParty.md)
 
 ---
 
 ## 📜 Lizenz
 
-**Pixel Mirroring** ist unter der **Apache License 2.0** lizenziert — siehe [LICENSE](./LICENSE) für den vollständigen Text.
+Die eigenen **Pixel-Mirroring-Quellen** stehen unter **Apache License 2.0**.
+Der mit FFmpeg und x264 kombinierte Desktop-Build wird unter **GPLv3-Bedingungen**
+weitergegeben. Neue Releases enthalten ein separates Quellcodearchiv mit den
+verwendeten Bibliotheksquellen und Bauvorschriften; siehe [LICENSE](./LICENSE).
 
 **Hinweis zu Abhängigkeiten:**
-- **FFmpeg** (LGPL v2.1+): Wird dynamisch gelinkt; siehe [LICENSE](./LICENSE) für LGPL-Konformität
+- **FFmpeg mit x264** (GPL v2 oder später): Wird dynamisch gelinkt; für den kombinierten Build gelten GPLv3-Bedingungen
 - **SDL2** (zlib), **nlohmann-json** (MIT), **cpp-httplib** (MIT): Siehe [LICENSE](./LICENSE)
 - **Android Platform Tools** (Apache 2.0): Gebündelt im Windows-Client
 - **scrcpy-server** (Apache 2.0): Unmodifizierter offizielle JAR

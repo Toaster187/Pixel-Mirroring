@@ -52,6 +52,9 @@ class MirroringService : Service() {
 
     // Session tracking, so the watchdog can tell when the PC stopped calling in.
     private val sessionActive = AtomicBoolean(false)
+    // A persisted session keeps the ADB watchdog alive after a restart, but only a
+    // fresh authenticated request is evidence for a visible connection indicator.
+    private val liveStatusActive = AtomicBoolean(false)
     private val lastSeenElapsedMs = AtomicLong(0L)
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -149,14 +152,17 @@ class MirroringService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.i(TAG, "Starting MirroringService")
+        val notification = NotificationHelper.createNotification(this,
+            if (liveStatusActive.get()) "PC verbunden – ADB aktiviert" else "Bereit für Verbindung",
+            liveStatusActive.get())
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(
                 NOTIFICATION_ID, 
-                NotificationHelper.createNotification(this),
+                notification,
                 android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
             )
         } else {
-            startForeground(NOTIFICATION_ID, NotificationHelper.createNotification(this))
+            startForeground(NOTIFICATION_ID, notification)
         }
         startDiscoveryServer()
         return START_STICKY
@@ -222,8 +228,10 @@ class MirroringService : Service() {
         lastSeenElapsedMs.set(SystemClock.elapsedRealtime())
         if (sessionActive.compareAndSet(false, true)) {
             runBlocking { clientStore.setSessionActive(true) }
-            updateNotification("PC verbunden – ADB aktiviert")
             Log.i(TAG, "PC session started.")
+        }
+        if (liveStatusActive.compareAndSet(false, true)) {
+            updateNotification("PC verbunden – ADB aktiviert")
         }
     }
 
@@ -233,6 +241,7 @@ class MirroringService : Service() {
         adbWifiManager.disableAdbWifi()
         adbWifiManager.setAdbEnabled(false)
         sessionActive.set(false)
+        liveStatusActive.set(false)
         runBlocking { clientStore.setSessionActive(false) }
         updateNotification("ADB deaktiviert – Bereit für Verbindung")
         Log.i(TAG, "PC session ended, ADB disabled.")
@@ -240,7 +249,8 @@ class MirroringService : Service() {
 
     private fun updateNotification(text: String) {
         val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-        notificationManager.notify(NOTIFICATION_ID, NotificationHelper.createNotification(this, text))
+        notificationManager.notify(NOTIFICATION_ID,
+            NotificationHelper.createNotification(this, text, liveStatusActive.get()))
     }
 
     private fun handleRequest(request: HttpRequest): HttpResponse {

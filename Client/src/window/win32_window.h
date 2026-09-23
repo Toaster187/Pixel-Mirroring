@@ -178,6 +178,7 @@ private:
     bool minimized_{false};
     int quality_preset_{1};        // 0 = Akku, 1 = Ausgewogen, 2 = Maximal
     bool quality_expanded_{false}; // are the three quality presets expanded?
+    unsigned settings_section_{0}; // one section at a time keeps the menu on screen
     bool compatibility_mode_{false};
     bool lowest_brightness_{true};
     bool screen_off_{false};
